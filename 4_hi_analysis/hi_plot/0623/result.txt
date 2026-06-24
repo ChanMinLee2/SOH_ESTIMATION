@@ -1,0 +1,173 @@
+=== Spearman ρ 계산 ===
+
+── Discharge — Global ──
+                   MIT   HUST  |ρ| avg
+energy_Wh       +0.925 +0.995   +0.960
+dvdq_min        +0.828 +0.759   +0.793
+q_tail          +0.907 +0.465   +0.686
+v_at_q80        +0.658 +0.474   +0.566
+ce              +0.162 +0.848   +0.505
+v_skew          -0.573 -0.412   +0.492
+v_energy        +0.395 +0.544   +0.469
+v_kurt          +0.406 +0.453   +0.430
+v_std           -0.386 -0.468   +0.427
+v_mean          +0.434 +0.391   +0.412
+ica_peak_h      +0.495 +0.320   +0.408
+v_at_q20        +0.541 +0.250   +0.395
+v_at_q50        +0.585 +0.141   +0.363
+t_discharge     +0.228 +0.430   +0.329
+ica_peak_area   +0.356 +0.279   +0.318
+q_high_v        +0.382 +0.241   +0.311
+temp_max        -0.258    NaN   +0.258
+temp_mean       -0.238    NaN   +0.238
+v_end           +0.134 -0.277   +0.206
+q_plateau_ratio +0.172 +0.200   +0.186
+v_drop          +0.248 +0.102   +0.175
+ica_peak_v      -0.117 +0.038   +0.077
+
+── Dis. SoC 60~100% ──
+                         MIT   HUST  |ρ| avg
+q_abs_s_hi            +0.894 +0.998   +0.946
+energy_Wh_s_hi        +0.888 +0.983   +0.936
+ica_peak_h_s_hi       +0.823 +0.851   +0.837
+ocv_slope_s_hi        +0.936 +0.725   +0.831
+dvdq_p5_s_hi          -0.849 -0.731   +0.790
+dvdq_min_s_hi         +0.759 +0.779   +0.769
+mean_dvdt_s_hi        +0.786 +0.546   +0.666
+v_std_s_hi            -0.838 -0.391   +0.614
+v_total_var_s_hi      -0.683 +0.477   +0.580
+nonlinear_idx_s_hi    +0.701 +0.423   +0.562
+power_var_s_hi        -0.547 +0.486   +0.516
+ent_v_s_hi            -0.740 -0.138   +0.439
+de_dq_s_hi            +0.499 +0.273   +0.386
+v_retention_s_hi      +0.514 +0.209   +0.361
+corr_vi_s_hi          -0.226 -0.495   +0.361
+var_dvdt_s_hi         -0.454 -0.256   +0.355
+v_mean_s_hi           +0.083 +0.319   +0.201
+corr_vt_s_hi          -0.063    NaN   +0.063
+dtdt_s_hi             +0.048    NaN   +0.048
+temp_rise_per_ah_s_hi +0.047    NaN   +0.047
+
+── Dis. SoC 30~60% ──
+                          MIT   HUST  |ρ| avg
+energy_Wh_s_mid        +0.875 +0.981   +0.928
+q_abs_s_mid            +0.829 +0.991   +0.910
+dvdq_p5_s_mid          -0.777 -0.619   +0.698
+ica_peak_h_s_mid       +0.760 +0.546   +0.653
+v_total_var_s_mid      -0.622 -0.501   +0.561
+var_dvdt_s_mid         -0.650 -0.424   +0.537
+dvdq_min_s_mid         +0.687 +0.326   +0.506
+v_mean_s_mid           +0.595 +0.269   +0.432
+de_dq_s_mid            +0.596 +0.259   +0.428
+v_retention_s_mid      +0.623 +0.218   +0.420
+nonlinear_idx_s_mid    +0.628 -0.149   +0.388
+ocv_slope_s_mid        +0.739 +0.036   +0.388
+mean_dvdt_s_mid        +0.737 -0.012   +0.374
+power_var_s_mid        -0.619 +0.079   +0.349
+v_std_s_mid            -0.619 -0.036   +0.328
+temp_rise_per_ah_s_mid -0.277    NaN   +0.277
+dtdt_s_mid             -0.276    NaN   +0.276
+ent_v_s_mid            +0.505 +0.008   +0.256
+corr_vt_s_mid          -0.223    NaN   +0.223
+corr_vi_s_mid          -0.004 -0.190   +0.097
+
+── Dis. SoC 0~30% ──
+                         MIT   HUST  |ρ| avg
+q_abs_s_lo            +0.890 +0.992   +0.941
+energy_Wh_s_lo        +0.889 +0.987   +0.938
+de_dq_s_lo            +0.668 +0.542   +0.605
+v_total_var_s_lo      +0.695 -0.402   +0.548
+dvdq_p5_s_lo          +0.429 -0.626   +0.527
+v_mean_s_lo           +0.493 +0.469   +0.481
+nonlinear_idx_s_lo    -0.614 +0.299   +0.456
+v_std_s_lo            +0.760 -0.064   +0.412
+power_var_s_lo        +0.513 -0.294   +0.404
+mean_dvdt_s_lo        -0.124 +0.548   +0.336
+ocv_slope_s_lo        +0.242 +0.416   +0.329
+v_retention_s_lo      -0.619 -0.014   +0.317
+dvdq_min_s_lo         +0.027 +0.502   +0.264
+var_dvdt_s_lo         -0.083 -0.417   +0.250
+ica_peak_h_s_lo       +0.101 +0.238   +0.169
+ent_v_s_lo            +0.223 -0.115   +0.169
+corr_vi_s_lo          +0.056 -0.278   +0.167
+corr_vt_s_lo          +0.145    NaN   +0.145
+dtdt_s_lo             -0.089    NaN   +0.089
+temp_rise_per_ah_s_lo -0.079    NaN   +0.079
+
+── Charge — Global ──
+                     MIT   HUST  |ρ| avg
+chg_ica_peak_area +0.640 +0.784   +0.712
+chg_ica_peak_h    +0.552 +0.730   +0.641
+chg_v_energy      -0.573 -0.632   +0.603
+chg_dvdq_min      -0.307 +0.885   +0.596
+q_cc_ratio        -0.092 -0.708   +0.400
+chg_ica_peak_v    +0.002 -0.159   +0.081
+
+── Chg. SoC 0~30% ──
+                             MIT   HUST  |ρ| avg
+q_abs_chg_s_lo            +0.968 +0.993   +0.981
+energy_Wh_chg_s_lo        +0.941 +0.992   +0.967
+ocv_slope_chg_s_lo        -0.422 -0.921   +0.671
+ica_peak_h_chg_s_lo       +0.444 +0.817   +0.631
+v_retention_chg_s_lo      -0.234 -0.807   +0.520
+ent_v_chg_s_lo            -0.291 -0.734   +0.513
+dvdq_p5_chg_s_lo          -0.254 -0.602   +0.428
+nonlinear_idx_chg_s_lo    -0.081 +0.674   +0.377
+mean_dvdt_chg_s_lo        -0.050 -0.629   +0.339
+v_total_var_chg_s_lo      +0.043 +0.595   +0.319
+dvdq_min_chg_s_lo         -0.107 -0.519   +0.313
+corr_vt_chg_s_lo          +0.250    NaN   +0.250
+dtdt_chg_s_lo             +0.244    NaN   +0.244
+temp_rise_per_ah_chg_s_lo +0.232    NaN   +0.232
+power_var_chg_s_lo        +0.146 +0.290   +0.218
+v_mean_chg_s_lo           +0.137 -0.246   +0.192
+v_std_chg_s_lo            +0.066 +0.292   +0.179
+var_dvdt_chg_s_lo         +0.063 +0.281   +0.172
+de_dq_chg_s_lo            +0.021 -0.264   +0.142
+corr_vi_chg_s_lo          +0.044 -0.001   +0.022
+
+── Chg. SoC 30~60% ──
+                              MIT   HUST  |ρ| avg
+q_abs_chg_s_mid            +0.938 +0.982   +0.960
+energy_Wh_chg_s_mid        +0.906 +0.981   +0.944
+ica_peak_h_chg_s_mid       +0.402 +0.630   +0.516
+ocv_slope_chg_s_mid        -0.352 -0.642   +0.497
+mean_dvdt_chg_s_mid        -0.331 -0.630   +0.480
+v_mean_chg_s_mid           -0.434 -0.459   +0.446
+de_dq_chg_s_mid            -0.410 -0.459   +0.435
+dvdq_p5_chg_s_mid          -0.169 -0.679   +0.424
+dvdq_min_chg_s_mid         -0.140 -0.694   +0.417
+var_dvdt_chg_s_mid         -0.169 -0.419   +0.294
+v_std_chg_s_mid            -0.245 -0.335   +0.290
+v_total_var_chg_s_mid      -0.097 -0.327   +0.212
+power_var_chg_s_mid        -0.086 -0.335   +0.211
+v_retention_chg_s_mid      +0.096 +0.317   +0.206
+nonlinear_idx_chg_s_mid    -0.105 -0.295   +0.200
+ent_v_chg_s_mid            +0.109 +0.283   +0.196
+dtdt_chg_s_mid             -0.192    NaN   +0.192
+temp_rise_per_ah_chg_s_mid -0.187    NaN   +0.187
+corr_vt_chg_s_mid          -0.154    NaN   +0.154
+corr_vi_chg_s_mid          +0.123 +0.014   +0.068
+
+── Chg. SoC 60~100% ──
+                             MIT   HUST  |ρ| avg
+q_abs_chg_s_hi            +0.968 +0.994   +0.981
+energy_Wh_chg_s_hi        +0.932 +0.990   +0.961
+de_dq_chg_s_hi            -0.886 -0.820   +0.853
+v_std_chg_s_hi            +0.881 +0.750   +0.815
+v_retention_chg_s_hi      -0.847 -0.770   +0.808
+power_var_chg_s_hi        -0.723 -0.710   +0.716
+v_mean_chg_s_hi           -0.690 -0.684   +0.687
+corr_vt_chg_s_hi          -0.682    NaN   +0.682
+corr_vi_chg_s_hi          -0.533 -0.787   +0.660
+var_dvdt_chg_s_hi         -0.375 -0.888   +0.632
+ocv_slope_chg_s_hi        +0.933 -0.069   +0.501
+v_total_var_chg_s_hi      +0.199 -0.723   +0.461
+ent_v_chg_s_hi            +0.432 +0.430   +0.431
+ica_peak_h_chg_s_hi       -0.411 -0.440   +0.426
+dvdq_min_chg_s_hi         +0.118 +0.624   +0.371
+nonlinear_idx_chg_s_hi    -0.474 +0.195   +0.334
+dtdt_chg_s_hi             +0.324    NaN   +0.324
+dvdq_p5_chg_s_hi          +0.400 +0.159   +0.280
+mean_dvdt_chg_s_hi        +0.199 +0.222   +0.210
+temp_rise_per_ah_chg_s_hi +0.093    NaN   +0.093
