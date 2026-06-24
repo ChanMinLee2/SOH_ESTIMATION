@@ -1,0 +1,2 @@
+# SOH_ESTIMATION
+LFP SOH ESTIMATION with partial cycles
