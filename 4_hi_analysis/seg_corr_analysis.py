@@ -1,39 +1,30 @@
 """
 seg_corr_analysis.py
 
-hi_features.pkl 에서 6개 세그먼트 시나리오별로
-  1) features ↔ capacity_Ah (SOH) Spearman 상관계수 랭킹
-  2) features 서로 간의 Spearman 상관행렬 (히트맵)
-  3) 시나리오별 Top-7 HI 비교 — HI 종류에 20색 고정 할당 (시나리오 간 공통 feature 파악)
-을 계산·시각화.
+285-HI 구조 기준 세그먼트 × 카테고리별 상관분석.
 
-정답(target): capacity_Ah — 해당 사이클의 방전용량 (SOH 프록시).
-              셀마다 initial capacity 가 다르므로 셀 내부 상관계수를 계산한 뒤 집계.
-
-6 시나리오:
-  discharge-high  (_s_hi)       방전 SoC 60~100%
-  discharge-mid   (_s_mid)      방전 SoC 30~60%
-  discharge-low   (_s_lo)       방전 SoC 0~30%
-  charge-low      (_chg_s_lo)   충전 SoC 0~30%
-  charge-mid      (_chg_s_mid)  충전 SoC 30~60%
-  charge-high     (_chg_s_hi)   충전 SoC 60~100%
+분석 단위: 6구간(dis_hi/mid/lo, chg_lo/mid/hi) × 3카테고리(Stat/Diff/LFP) = 18 그룹
+정답(target): capacity_Ah (셀 내부 Spearman 상관계수 → 전체 셀 평균)
 
 출력: 4_hi_analysis/seg_corr/<MMDD>/
-  corr_rank.png        — 6 시나리오 × 상관계수 랭킹 바 차트
-  corr_matrix.png      — 6 시나리오 × 20×20 feature 상관행렬 (히트맵)
-  top7_cross.png       — 6 시나리오 × Top-7 HI 비교 (HI 아이덴티티 기준 20색)
+  corr_rank_stat_{ds}.png    — 카테고리 A: 6구간 × 15 통계 HI 상관계수 랭킹
+  corr_rank_diff_{ds}.png    — 카테고리 B: 6구간 × 15 미분 HI
+  corr_rank_lfp_{ds}.png     — 카테고리 C: 6구간 × 15 LFP HI
+  corr_matrix_stat_{ds}.png  — 카테고리 A: 6구간 × 15×15 feature 상관행렬
+  corr_matrix_diff_{ds}.png  — 카테고리 B
+  corr_matrix_lfp_{ds}.png   — 카테고리 C
+  top_cross_{ds}.png         — 3카테고리 × 6구간 Top-5 HI 비교 (전체 요약)
 
 사용:
   python 4_hi_analysis/seg_corr_analysis.py
-  python 4_hi_analysis/seg_corr_analysis.py --pkl 4_hi_analysis/0622_1154_hi_features.pkl
   python 4_hi_analysis/seg_corr_analysis.py --dataset mit
-  python 4_hi_analysis/seg_corr_analysis.py --min-cycles 10 --workers 8
+  python 4_hi_analysis/seg_corr_analysis.py --min-cycles 5 --workers 8
 """
 
 import argparse
 import pickle
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
@@ -47,7 +38,6 @@ from scipy.stats import spearmanr
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.patches import Patch
 
@@ -56,49 +46,68 @@ try:
 except ImportError:
     from tqdm import tqdm
 
+from hi_correlation import (
+    ALL_SEGS,
+    HI_GROUPS,
+    HI_LABELS,
+    STAT_KEYS,
+    DIFF_KEYS,
+    LFP_KEYS,
+)
+
 # ── 경로 ─────────────────────────────────────────────────────────────────────
-HERE         = Path(__file__).resolve().parent
-PKL_DEFAULT  = HERE / "hi_features.pkl"
-OUT_BASE     = HERE / "seg_corr" / date.today().strftime("%m%d")
+HERE        = Path(__file__).resolve().parent
+PKL_DEFAULT = HERE / "hi_features.pkl"
+OUT_BASE    = HERE / "seg_corr" / date.today().strftime("%m%d")
 
 # ── 폰트 ─────────────────────────────────────────────────────────────────────
 for _f in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
     try:
-        plt.rcParams["font.family"] = _f; break
+        plt.rcParams["font.family"] = _f
+        break
     except Exception:
         continue
 plt.rcParams["axes.unicode_minus"] = False
 
-# ── 시나리오 정의 ─────────────────────────────────────────────────────────────
-SCENARIOS = [
-    ("discharge-high", "_s_hi",      lambda c: c.endswith("_s_hi")      and "chg" not in c),
-    ("discharge-mid",  "_s_mid",     lambda c: c.endswith("_s_mid")     and "chg" not in c),
-    ("discharge-low",  "_s_lo",      lambda c: c.endswith("_s_lo")      and "chg" not in c),
-    ("charge-low",     "_chg_s_lo",  lambda c: c.endswith("_chg_s_lo")),
-    ("charge-mid",     "_chg_s_mid", lambda c: c.endswith("_chg_s_mid")),
-    ("charge-high",    "_chg_s_hi",  lambda c: c.endswith("_chg_s_hi")),
-]
-
-SCENARIO_COLORS = {
-    "discharge-high": "#1f77b4",
-    "discharge-mid":  "#4daf4a",
-    "discharge-low":  "#984ea3",
-    "charge-high":    "#d62728",
-    "charge-mid":     "#ff7f0e",
-    "charge-low":     "#a65628",
+# ── 세그먼트 색상 (방전=파랑 계열, 충전=주황 계열) ──────────────────────────
+SEG_COLORS = {
+    "dis_hi":  "#1a5276",
+    "dis_mid": "#2980b9",
+    "dis_lo":  "#85c1e9",
+    "chg_lo":  "#f0b27a",
+    "chg_mid": "#e67e22",
+    "chg_hi":  "#a04000",
+}
+SEG_LABELS = {
+    "dis_hi":  "dis_hi\n(SoC 60–100%)",
+    "dis_mid": "dis_mid\n(SoC 30–60%)",
+    "dis_lo":  "dis_lo\n(SoC 0–30%)",
+    "chg_lo":  "chg_lo\n(SoC 0–40%)",
+    "chg_mid": "chg_mid\n(SoC 40–70%)",
+    "chg_hi":  "chg_hi\n(SoC 70–100%)",
 }
 
-# feature 이름에서 suffix 제거해 짧은 레이블 생성
-def _short(col, suffix):
-    return col.replace(suffix, "").replace("_chg", "")
+# ── 카테고리 메타 ─────────────────────────────────────────────────────────────
+CATEGORIES = [
+    ("Stat", "카테고리 A: 통계 기반",      "corr_rank_stat",   "corr_matrix_stat",   STAT_KEYS),
+    ("Diff", "카테고리 B: 미분 기반",      "corr_rank_diff",   "corr_matrix_diff",   DIFF_KEYS),
+    ("LFP",  "카테고리 C: LFP 특징 기반", "corr_rank_lfp",    "corr_matrix_lfp",    LFP_KEYS),
+]
+
+# tab20 팔레트 (15개 feature 색 고정)
+_TAB20 = matplotlib.colormaps["tab20"].colors
+
+
+def _feat_palette(keys: list) -> dict:
+    """feature key → 고정 색상 (tab20)."""
+    return {k: _TAB20[i % 20] for i, k in enumerate(keys)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 셀별 Spearman 상관계수 계산
+# 상관계수 계산
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cell_corr(args):
-    """워커: 단일 (cell_id, group_df) → feature별 Spearman ρ Series."""
     cell_key, sub, feat_cols, min_cycles = args
     cap = sub["capacity_Ah"].values
     if len(cap) < min_cycles:
@@ -115,95 +124,86 @@ def _cell_corr(args):
     return cell_key, pd.Series(result)
 
 
-def compute_corr_with_capacity(df: pd.DataFrame, feat_cols: list,
-                                min_cycles: int = 5,
-                                workers: int = 4) -> pd.DataFrame:
-    """
-    셀별 Spearman(feature, capacity_Ah) 계산.
-    반환: DataFrame (index=cell_key, columns=feat_cols)
-    """
+def compute_corr(df: pd.DataFrame, feat_cols: list,
+                 min_cycles: int = 5, workers: int = 4) -> pd.DataFrame:
+    """셀별 Spearman(feature, capacity_Ah). 반환: (n_cells, n_feats)"""
     groups = list(df.groupby(["dataset", "cell_id"]))
     args   = [(key, sub[feat_cols + ["capacity_Ah"]], feat_cols, min_cycles)
               for key, sub in groups]
-
     rows = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_cell_corr, a) for a in args]
-        for fut in futs:
-            key, ser = fut.result()
+        for key, ser in ex.map(_cell_corr, args):
             if ser is not None:
                 rows[key] = ser
-
-    return pd.DataFrame(rows).T  # shape: (n_cells, n_features)
+    return pd.DataFrame(rows).T
 
 
 def summarise(cell_corr_df: pd.DataFrame) -> pd.DataFrame:
-    """mean / std / median / 유효셀수 집계."""
     return pd.DataFrame({
-        "mean":   cell_corr_df.mean(skipna=True),
-        "std":    cell_corr_df.std(skipna=True),
-        "median": cell_corr_df.median(skipna=True),
-        "n_valid":cell_corr_df.notna().sum(),
+        "mean":    cell_corr_df.mean(skipna=True),
+        "std":     cell_corr_df.std(skipna=True),
+        "median":  cell_corr_df.median(skipna=True),
+        "n_valid": cell_corr_df.notna().sum(),
     }).sort_values("mean", key=abs, ascending=False)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Feature ↔ Feature 상관행렬
-# ─────────────────────────────────────────────────────────────────────────────
-
 def feature_corr_matrix(df: pd.DataFrame, feat_cols: list) -> pd.DataFrame:
-    """전체 데이터 풀링 후 Spearman 상관행렬 (rank 변환 → Pearson)."""
-    sub = df[feat_cols].dropna(how="all")
-    # rank 변환 (spearman = pearson on ranks)
+    sub    = df[feat_cols].dropna(how="all")
     ranked = sub.rank(method="average", na_option="keep")
     return ranked.corr(method="pearson", min_periods=20)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 플롯 1: 상관계수 랭킹 바 차트
+# Plot 1: 상관계수 랭킹 바 차트 (6 seg × 1 cat)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_corr_rank(summaries: dict, out_path: Path, dataset_name: str = ""):
-    n_sc   = len(summaries)
+def plot_corr_rank(seg_summaries: dict, out_path: Path,
+                   cat_title: str, dataset_name: str = ""):
+    """6 세그먼트 서브플롯 — feature ↔ capacity_Ah |ρ| 랭킹 바.
+
+    seg_summaries: {seg: (summary_df, hi_keys)}
+    """
+    n_segs = len(seg_summaries)
     n_cols = 3
-    n_rows = (n_sc + n_cols - 1) // n_cols
+    n_rows = (n_segs + n_cols - 1) // n_cols
 
     fig, axes = plt.subplots(n_rows, n_cols,
-                             figsize=(n_cols * 7, n_rows * 9),
-                             constrained_layout=True)
-    ds_label = f"[{dataset_name}] " if dataset_name else ""
+                              figsize=(n_cols * 7, n_rows * 9),
+                              constrained_layout=True)
+    ds_lbl = f"[{dataset_name}] " if dataset_name else ""
     fig.suptitle(
-        f"{ds_label}세그먼트별 Feature ↔ 방전용량(capacity_Ah) |Spearman ρ| 랭킹\n"
-        "(셀 내부 상관계수 절댓값 → 전체 셀 평균±std,  방향은 (+)/(-) 표기)",
-        fontsize=13, fontweight="bold")
+        f"{ds_lbl}{cat_title}\n"
+        "Feature ↔ capacity_Ah  |Spearman ρ| 랭킹  (셀 내부 ρ 평균±std, 방향 부호 표기)",
+        fontsize=13, fontweight="bold",
+    )
 
     axes_flat = np.array(axes).reshape(-1)
-    for ax, (sc_name, summary_df, suffix) in zip(axes_flat, summaries.values()):
-        color     = SCENARIO_COLORS.get(sc_name, "steelblue")
-        feat_cols = summary_df.index.tolist()
-        labels    = [_short(c, suffix) for c in feat_cols]
-        means     = summary_df["mean"].values
+    for ax, (seg, (summ, _hi_keys)) in zip(axes_flat, seg_summaries.items()):
+        color     = SEG_COLORS.get(seg, "steelblue")
+        feat_cols = summ.index.tolist()
+        labels    = [HI_LABELS.get(k, k) for k in feat_cols]
+        means     = summ["mean"].values
         means_abs = np.abs(means)
-        stds      = summary_df["std"].values
+        stds      = summ["std"].values
 
         ax.barh(labels[::-1], means_abs[::-1],
                 xerr=stds[::-1], color=color,
                 alpha=0.82, capsize=3, height=0.65,
                 error_kw={"elinewidth": 1.0, "alpha": 0.6})
 
-        ax.set_xlim(0, 1.15)
-        ax.set_xlabel("|Spearman ρ| (mean across cells)", fontsize=9)
-        ax.set_title(f"[{sc_name}]", fontsize=10, fontweight="bold",
-                     color=color, pad=4)
+        for i, (m, s) in enumerate(zip(means[::-1], stds[::-1])):
+            ax.text(abs(m) + 0.02, i,
+                    f"{abs(m):.3f} {'(+)' if m >= 0 else '(-)'}",
+                    va="center", ha="left", fontsize=7)
+
+        ax.set_xlim(0, 1.2)
+        ax.set_xlabel("|Spearman ρ|", fontsize=9)
+        ax.set_title(SEG_LABELS.get(seg, seg), fontsize=10,
+                     fontweight="bold", color=color, pad=4)
         ax.tick_params(labelsize=8)
         ax.grid(axis="x", alpha=0.3)
 
-        for i, (m, s) in enumerate(zip(means[::-1], stds[::-1])):
-            sign_str = "(+)" if m >= 0 else "(-)"
-            ax.text(abs(m) + 0.02, i, f"{abs(m):.3f} {sign_str}",
-                    va="center", ha="left", fontsize=7, color="black")
-
-    for ax in axes_flat[n_sc:]:
+    for ax in axes_flat[n_segs:]:
         ax.set_visible(False)
 
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -212,52 +212,59 @@ def plot_corr_rank(summaries: dict, out_path: Path, dataset_name: str = ""):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 플롯 2: Feature × Feature 상관행렬 히트맵
+# Plot 2: Feature × Feature 상관행렬 히트맵 (6 seg × 1 cat)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_corr_matrix(matrices: dict, out_path: Path, dataset_name: str = ""):
-    n_sc   = len(matrices)
+def plot_corr_matrix(seg_matrices: dict, out_path: Path,
+                     cat_title: str, dataset_name: str = ""):
+    """6 세그먼트 서브플롯 — 15×15 feature 상관행렬.
+
+    seg_matrices: {seg: (corr_df, hi_keys)}
+    """
+    n_segs = len(seg_matrices)
     n_cols = 3
-    n_rows = (n_sc + n_cols - 1) // n_cols
+    n_rows = (n_segs + n_cols - 1) // n_cols
 
     fig, axes = plt.subplots(n_rows, n_cols,
-                             figsize=(n_cols * 7.5, n_rows * 7.5),
-                             constrained_layout=True)
-    ds_label = f"[{dataset_name}] " if dataset_name else ""
+                              figsize=(n_cols * 7.5, n_rows * 7.5),
+                              constrained_layout=True)
+    ds_lbl = f"[{dataset_name}] " if dataset_name else ""
     fig.suptitle(
-        f"{ds_label}세그먼트별 Feature × Feature Spearman 상관행렬\n"
-        "(전체 데이터 풀링, rank 변환 후 Pearson 계산)",
-        fontsize=13, fontweight="bold")
+        f"{ds_lbl}{cat_title}\n"
+        "Feature × Feature Spearman 상관행렬  (전체 풀링, rank→Pearson)",
+        fontsize=13, fontweight="bold",
+    )
 
     norm = TwoSlopeNorm(vmin=-1, vcenter=0, vmax=1)
     cmap = "RdBu_r"
 
     axes_flat = np.array(axes).reshape(-1)
-    for ax, (sc_name, (corr_mat, suffix)) in zip(axes_flat, matrices.items()):
-        labels = [_short(c, suffix) for c in corr_mat.columns]
+    for ax, (seg, (corr_mat, _)) in zip(axes_flat, seg_matrices.items()):
+        labels = [HI_LABELS.get(c, c) for c in corr_mat.columns]
         n      = len(labels)
         mat    = corr_mat.values
 
         im = ax.imshow(mat, cmap=cmap, norm=norm, aspect="auto")
-        ax.set_xticks(range(n)); ax.set_xticklabels(labels, rotation=90, fontsize=7)
-        ax.set_yticks(range(n)); ax.set_yticklabels(labels, fontsize=7)
+        ax.set_xticks(range(n))
+        ax.set_xticklabels(labels, rotation=90, fontsize=7)
+        ax.set_yticks(range(n))
+        ax.set_yticklabels(labels, fontsize=7)
 
-        # 셀 값 표시 (n<=15 일 때만)
-        if n <= 20:
-            for i in range(n):
-                for j in range(n):
-                    v = mat[i, j]
-                    if not np.isfinite(v): continue
-                    txt_c = "white" if abs(v) > 0.6 else "black"
-                    ax.text(j, i, f"{v:.2f}", ha="center", va="center",
-                            fontsize=5.5, color=txt_c)
+        for i in range(n):
+            for j in range(n):
+                v = mat[i, j]
+                if not np.isfinite(v):
+                    continue
+                ax.text(j, i, f"{v:.2f}",
+                        ha="center", va="center", fontsize=5.5,
+                        color="white" if abs(v) > 0.6 else "black")
 
-        color = SCENARIO_COLORS.get(sc_name, "steelblue")
-        ax.set_title(f"[{sc_name}]", fontsize=10, fontweight="bold",
-                     color=color, pad=4)
+        color = SEG_COLORS.get(seg, "steelblue")
+        ax.set_title(SEG_LABELS.get(seg, seg), fontsize=10,
+                     fontweight="bold", color=color, pad=4)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
 
-    for ax in axes_flat[n_sc:]:
+    for ax in axes_flat[n_segs:]:
         ax.set_visible(False)
 
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -266,103 +273,108 @@ def plot_corr_matrix(matrices: dict, out_path: Path, dataset_name: str = ""):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 플롯 3: 시나리오별 Top-N HI 비교 (HI 아이덴티티 20색 고정)
+# Plot 3: 3카테고리 × 6구간 Top-5 비교 (전체 요약)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_top7_cross_scenario(summaries: dict, out_path: Path,
-                              top_n: int = 7, dataset_name: str = ""):
-    """
-    6 시나리오 × Top-N HI 비교 플롯 — HI 7개를 x축에 배치.
-    HI 종류(short name)별로 tab20 팔레트에서 고유 색상 할당 →
-    같은 feature가 여러 시나리오에 등장할 때 동일 색으로 표시.
-    """
-    # ── 1. 전체 시나리오를 합쳐 고유 HI short-name 목록 수집 (등장 순서 유지)
-    all_short: list = []
-    seen: set = set()
-    for _, (_, summ, suffix) in summaries.items():
-        for feat in summ.index:
-            sn = _short(feat, suffix)
-            if sn not in seen:
-                all_short.append(sn)
-                seen.add(sn)
+def plot_top_cross(all_summaries: dict, out_path: Path,
+                   top_n: int = 5, dataset_name: str = ""):
+    """3 × 6 그리드 — rows=카테고리(Stat/Diff/LFP), cols=세그먼트.
 
-    # tab20: 20가지 고유색 — HI 하나당 색 하나 고정
-    palette = matplotlib.colormaps["tab20"].colors
-    hi_color = {sn: palette[i % 20] for i, sn in enumerate(all_short)}
+    all_summaries: {cat: {seg: (summary_df, hi_keys)}}
+    """
+    cats     = list(all_summaries.keys())      # ["Stat","Diff","LFP"]
+    segs     = [seg for _, _, seg, _ in ALL_SEGS]  # 6 segments
+    n_cats   = len(cats)
+    n_segs   = len(segs)
 
-    # ── 2. 서브플롯 구성 (HI x축, |ρ| y축 수직 바)
-    n_sc   = len(summaries)
-    n_cols = 3
-    n_rows = (n_sc + n_cols - 1) // n_cols
+    # feature 색상: 카테고리별 15개 feature에 tab20 고정 매핑
+    cat_palettes = {}
+    for cat, _, _, _, base_keys in CATEGORIES:
+        cat_palettes[cat] = {k: _TAB20[i % 20] for i, k in enumerate(base_keys)}
 
     fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(n_cols * 5.8, n_rows * 4.8),
+        n_cats, n_segs,
+        figsize=(n_segs * 4.2, n_cats * 4.0),
         constrained_layout=True,
     )
-    ds_label = f"[{dataset_name}] " if dataset_name else ""
+    ds_lbl = f"[{dataset_name}] " if dataset_name else ""
     fig.suptitle(
-        f"{ds_label}시나리오별 Top-{top_n} HI  (|ρ| 기준,  막대 위 수치·방향 표기)\n"
-        "막대 색 = HI 종류 기준 — 같은 색 = 동일 feature",
-        fontsize=13, fontweight="bold",
+        f"{ds_lbl}카테고리 × 세그먼트 Top-{top_n} HI  (|ρ| 기준)\n"
+        "행=카테고리, 열=세그먼트,  막대 색=feature 아이덴티티",
+        fontsize=12, fontweight="bold",
     )
 
-    top_names_used: set = set()
-    axes_flat = np.array(axes).reshape(-1)
     x_pos = np.arange(top_n)
+    for ri, (cat, cat_title_short, _, _, base_keys) in enumerate(CATEGORIES):
+        # base_keys 인덱스로 색 결정 (stat_v_mean_* → v_mean → palette)
+        palette = cat_palettes[cat]
 
-    for ax, (sc_name, (_, summ, suffix)) in zip(axes_flat, summaries.items()):
-        top       = summ.head(top_n)
-        labels    = [_short(c, suffix) for c in top.index]
-        means     = top["mean"].values
-        means_abs = np.abs(means)
-        stds      = top["std"].values
-        colors    = [hi_color[lbl] for lbl in labels]
-        top_names_used.update(labels)
+        for ci, seg in enumerate(segs):
+            ax = axes[ri, ci]
+            summ, hi_keys = all_summaries.get(cat, {}).get(seg, (None, []))
+            if summ is None or len(summ) == 0:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=9)
+                ax.set_xticks([])
+                continue
 
-        ax.bar(x_pos, means_abs, yerr=stds, color=colors,
-               alpha=0.85, capsize=4, width=0.62,
-               error_kw={"elinewidth": 1.2, "alpha": 0.55})
+            top       = summ.head(top_n)
+            feat_keys = top.index.tolist()
+            # strip prefix+suffix → base key for color lookup
+            base      = [k.split("_", 1)[1].rsplit("_", 2)[0]
+                         if k.count("_") >= 3 else k
+                         for k in feat_keys]
+            labels    = [HI_LABELS.get(k, k) for k in feat_keys]
+            means     = top["mean"].values
+            means_abs = np.abs(means)
+            stds      = top["std"].values
+            colors    = [palette.get(b, "#888888") for b in base]
 
-        # 막대 위: |ρ| 수치 + 방향 부호
-        for xi, (m, m_abs, std) in enumerate(zip(means, means_abs, stds)):
-            sign_str = "(+)" if m >= 0 else "(-)"
-            ax.text(xi, m_abs + std + 0.03,
-                    f"{m_abs:.3f}\n{sign_str}",
-                    ha="center", va="bottom", fontsize=7,
-                    fontweight="bold", linespacing=1.25)
+            ax.bar(x_pos, means_abs, yerr=stds, color=colors,
+                   alpha=0.85, capsize=3, width=0.62,
+                   error_kw={"elinewidth": 1.0, "alpha": 0.5})
 
-        ax.set_xticks(x_pos)
-        ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8.5)
-        ax.set_ylim(0, 1.22)
-        ax.set_ylabel("|Spearman ρ|", fontsize=8)
-        sc_col = SCENARIO_COLORS.get(sc_name, "steelblue")
-        ax.set_title(f"[{sc_name}]  Top-{top_n}",
-                     fontsize=10, fontweight="bold", color=sc_col, pad=4)
-        ax.tick_params(axis="y", labelsize=7)
-        ax.grid(axis="y", alpha=0.3, lw=0.7)
-        ax.set_axisbelow(True)
+            for xi, (m, ma, std) in enumerate(zip(means, means_abs, stds)):
+                ax.text(xi, ma + std + 0.04,
+                        f"{ma:.2f}\n{'(+)' if m >= 0 else '(-)'}",
+                        ha="center", va="bottom", fontsize=6,
+                        fontweight="bold", linespacing=1.2)
 
-    for ax in axes_flat[n_sc:]:
-        ax.set_visible(False)
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=7.5)
+            ax.set_ylim(0, 1.3)
+            ax.tick_params(axis="y", labelsize=7)
+            ax.grid(axis="y", alpha=0.3, lw=0.6)
+            ax.set_axisbelow(True)
 
-    # ── 3. 범례: Top-N에 등장한 HI만, all_short 순서 유지
-    legend_handles = [
-        Patch(facecolor=hi_color[sn], label=sn)
-        for sn in all_short if sn in top_names_used
-    ]
+            # 열 제목 (첫 행에만)
+            if ri == 0:
+                ax.set_title(SEG_LABELS.get(seg, seg), fontsize=8.5,
+                             fontweight="bold",
+                             color=SEG_COLORS.get(seg, "black"), pad=3)
+            # 행 레이블 (첫 열에만)
+            if ci == 0:
+                ax.set_ylabel(f"{cat_title_short}\n|ρ|", fontsize=8.5)
+
+    # 카테고리별 범례 (각 카테고리의 feature 색상)
+    legend_handles = []
+    for cat, _, _, _, base_keys in CATEGORIES:
+        legend_handles.append(Patch(color="white", label=f"─ {cat} ─"))
+        for bk in base_keys:
+            col = cat_palettes[cat][bk]
+            lbl = HI_LABELS.get(f"stat_{bk}_dis_hi", bk)  # Stat 기준 레이블 조회
+            legend_handles.append(Patch(facecolor=col, label=lbl))
+
     fig.legend(
         handles=legend_handles,
         loc="lower center",
-        ncol=min(len(legend_handles), 7),
-        fontsize=8.5,
+        ncol=16,
+        fontsize=7,
         framealpha=0.85,
-        title="HI 아이덴티티 색상 범례",
-        title_fontsize=9,
-        bbox_to_anchor=(0.5, -0.03),
+        bbox_to_anchor=(0.5, -0.04),
     )
 
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
     print(f"  저장: {out_path}")
 
@@ -372,19 +384,18 @@ def plot_top7_cross_scenario(summaries: dict, out_path: Path,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="세그먼트별 feature 상관분석")
+    parser = argparse.ArgumentParser(description="285-HI 세그먼트 × 카테고리 상관분석")
     parser.add_argument("--pkl",        default=str(PKL_DEFAULT))
-    parser.add_argument("--dataset",    default="all", choices=["all", "mit", "hust"],
-                        help="분석 대상 데이터셋 (기본: all)")
-    parser.add_argument("--min-cycles", type=int, default=5,
-                        help="셀당 최소 유효 사이클 수 (기본: 5)")
-    parser.add_argument("--workers",    type=int, default=8,
-                        help="병렬 스레드 수 (기본: 8)")
+    parser.add_argument("--dataset",    default="all", choices=["all", "mit", "hust"])
+    parser.add_argument("--min-cycles", type=int, default=5)
+    parser.add_argument("--workers",    type=int, default=8)
+    parser.add_argument("--top-n",      type=int, default=5,
+                        help="top_cross 플롯 상위 HI 개수 (기본: 5)")
     args = parser.parse_args()
 
+    # ── PKL 로드 ──────────────────────────────────────────────────────────────
     pkl_path = Path(args.pkl)
     if not pkl_path.exists():
-        # 날짜 붙은 최신 파일 자동 탐색
         candidates = sorted(HERE.glob("*hi_features*.pkl"),
                             key=lambda p: p.stat().st_mtime, reverse=True)
         if not candidates:
@@ -395,79 +406,88 @@ def main():
     print(f"=== 로드: {pkl_path} ===")
     with open(pkl_path, "rb") as f:
         df = pickle.load(f)
-    print(f"  shape: {df.shape}  |  셀 수: {df.groupby(['dataset','cell_id']).ngroups}")
+    df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
+    print(f"  rows={len(df):,}  셀={df.groupby(['dataset','cell_id']).ngroups}")
 
     OUT_BASE.mkdir(parents=True, exist_ok=True)
 
-    # 처리할 데이터셋 목록 결정
-    if args.dataset == "all":
-        datasets = sorted(df["dataset"].str.upper().unique().tolist())
-    else:
-        datasets = [args.dataset.upper()]
+    datasets = (sorted(df["dataset"].unique().tolist())
+                if args.dataset == "all" else [args.dataset.upper()])
 
     for ds_name in datasets:
-        df_ds = df[df["dataset"].str.upper() == ds_name].copy()
+        df_ds = df[df["dataset"] == ds_name].copy()
         if df_ds.empty:
-            print(f"\n[SKIP] {ds_name}: 데이터 없음")
-            continue
+            print(f"\n[SKIP] {ds_name}: 데이터 없음"); continue
 
         print(f"\n{'='*60}")
-        print(f"  데이터셋: {ds_name}  ({len(df_ds)}행, "
+        print(f"  데이터셋: {ds_name}  ({len(df_ds):,}행, "
               f"{df_ds.groupby('cell_id').ngroups}셀)")
         print(f"{'='*60}")
 
-        # ── 시나리오별 feature 컬럼 목록 추출 ───────────────────────────────
-        scenarios_cols: dict[str, tuple] = {}
-        for sc_name, suffix, fn in SCENARIOS:
-            cols = [c for c in df_ds.columns if fn(c)]
-            if not cols:
-                continue
-            scenarios_cols[sc_name] = (cols, suffix)
-            print(f"  {sc_name}: {len(cols)}개 feature")
+        # all_summaries[cat][seg] = (summary_df, hi_keys)
+        # all_matrices[cat][seg]  = (corr_df, hi_keys)
+        all_summaries: dict = {cat: {} for cat, *_ in CATEGORIES}
+        all_matrices:  dict = {cat: {} for cat, *_ in CATEGORIES}
 
-        # ── 1) Feature ↔ capacity_Ah 상관계수 ───────────────────────────────
-        print(f"\n=== [{ds_name}] capacity_Ah 상관계수 계산 (workers={args.workers}) ===")
-        summaries: dict = {}
-        for sc_name, (cols, suffix) in tqdm(scenarios_cols.items(),
-                                             desc=f"{ds_name} corr"):
-            cell_corr = compute_corr_with_capacity(
-                df_ds, cols, min_cycles=args.min_cycles, workers=args.workers)
-            summ = summarise(cell_corr)
-            summaries[sc_name] = (sc_name, summ, suffix)
-            print(f"  {sc_name}: 유효셀={cell_corr.notna().all(axis=1).sum()}"
-                  f"  top ρ={summ['mean'].iloc[0]:+.3f}({summ.index[0]})")
+        for cat, cat_title, rank_stem, matrix_stem, _base_keys in CATEGORIES:
+            print(f"\n─── {cat_title} ───")
+            for _, _, seg, seg_lbl in ALL_SEGS:
+                group_key = f"{seg} — {cat}"
+                hi_keys   = HI_GROUPS.get(group_key, [])
+                avail     = [k for k in hi_keys if k in df_ds.columns]
+                if not avail:
+                    print(f"  [{seg}] 컬럼 없음, SKIP")
+                    continue
 
-        rank_path = OUT_BASE / f"corr_rank_{ds_name.lower()}.png"
-        print(f"\n=== [{ds_name}] Rank 플롯 저장 ===")
-        plot_corr_rank(summaries, rank_path, dataset_name=ds_name)
+                # 상관계수
+                cell_corr = compute_corr(df_ds, avail,
+                                         min_cycles=args.min_cycles,
+                                         workers=args.workers)
+                summ = summarise(cell_corr)
+                all_summaries[cat][seg] = (summ, avail)
+                n_valid = int(cell_corr.notna().all(axis=1).sum())
+                top_lbl = HI_LABELS.get(summ.index[0], summ.index[0])
+                print(f"  [{seg}] 유효셀={n_valid}  "
+                      f"top ρ={summ['mean'].iloc[0]:+.3f} ({top_lbl})")
 
-        top7_path = OUT_BASE / f"top7_cross_{ds_name.lower()}.png"
-        print(f"\n=== [{ds_name}] Top-7 Cross-Scenario 플롯 저장 ===")
-        plot_top7_cross_scenario(summaries, top7_path, top_n=7, dataset_name=ds_name)
+                # feature 상관행렬
+                corr_mat = feature_corr_matrix(df_ds, avail)
+                all_matrices[cat][seg] = (corr_mat, avail)
 
-        # ── 2) Feature × Feature 상관행렬 ───────────────────────────────────
-        print(f"\n=== [{ds_name}] Feature 상관행렬 계산 ===")
-        matrices: dict = {}
-        for sc_name, (cols, suffix) in tqdm(scenarios_cols.items(),
-                                             desc=f"{ds_name} matrix"):
-            corr_mat = feature_corr_matrix(df_ds, cols)
-            matrices[sc_name] = (corr_mat, suffix)
+            # ── Plot 1: Rank ──────────────────────────────────────────────────
+            if all_summaries[cat]:
+                rank_path = OUT_BASE / f"{rank_stem}_{ds_name.lower()}.png"
+                print(f"\n  [Plot] Rank  → {rank_path.name}")
+                plot_corr_rank(all_summaries[cat], rank_path,
+                               cat_title, dataset_name=ds_name)
 
-        matrix_path = OUT_BASE / f"corr_matrix_{ds_name.lower()}.png"
-        print(f"\n=== [{ds_name}] Matrix 플롯 저장 ===")
-        plot_corr_matrix(matrices, matrix_path, dataset_name=ds_name)
+            # ── Plot 2: Matrix ────────────────────────────────────────────────
+            if all_matrices[cat]:
+                mat_path = OUT_BASE / f"{matrix_stem}_{ds_name.lower()}.png"
+                print(f"  [Plot] Matrix → {mat_path.name}")
+                plot_corr_matrix(all_matrices[cat], mat_path,
+                                 cat_title, dataset_name=ds_name)
 
-        # ── 3) 텍스트 요약 출력 ─────────────────────────────────────────────
+        # ── Plot 3: Top-N Cross ───────────────────────────────────────────────
+        top_path = OUT_BASE / f"top_cross_{ds_name.lower()}.png"
+        print(f"\n  [Plot] Top-{args.top_n} Cross → {top_path.name}")
+        plot_top_cross(all_summaries, top_path,
+                       top_n=args.top_n, dataset_name=ds_name)
+
+        # ── 텍스트 요약 ──────────────────────────────────────────────────────
         print(f"\n{'='*70}")
-        print(f"  [{ds_name}] Feature ↔ capacity_Ah 상관계수 요약 (상위 5개)")
+        print(f"  [{ds_name}] Top-3 HI 요약 (|ρ| 기준)")
         print(f"{'='*70}")
-        for sc_name, (_, summ, suffix) in summaries.items():
-            print(f"\n▶ [{sc_name}]")
-            for feat, row in summ.head(5).iterrows():
-                label = _short(feat, suffix)
-                print(f"   {label:<22}  ρ_mean={row['mean']:+.4f}  "
-                      f"std={row['std']:.4f}  median={row['median']:+.4f}  "
-                      f"n={int(row['n_valid'])}")
+        for cat, cat_title, *_ in CATEGORIES:
+            print(f"\n▶ {cat_title}")
+            for seg, (summ, _) in all_summaries[cat].items():
+                seg_lbl = SEG_LABELS.get(seg, seg).replace("\n", " ")
+                top3 = summ.head(3)
+                items = "  |  ".join(
+                    f"{HI_LABELS.get(k,k)} {row['mean']:+.3f}"
+                    for k, row in top3.iterrows()
+                )
+                print(f"  {seg_lbl:<22} {items}")
 
     print(f"\n완료 — {OUT_BASE}/")
 

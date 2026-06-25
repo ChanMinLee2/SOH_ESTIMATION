@@ -18,7 +18,9 @@ MIT는 .mat (HDF5) 파일 직접 파싱, HUST는 원본 pkl 변환.
   docs/hust_conversion_summary.csv
 
 cycles DataFrame 컬럼:
-  cycle, time_s, voltage_V, current_A, temperature_C, capacity_Ah, phase
+  data_raw    : cycle, time_s, voltage_V, current_A, temperature_C, capacity_Ah, phase
+  data_unified: cycle, time_s, voltage_V, current_A, capacity_Ah, phase
+  (온도는 HI 추출에 사용하지 않으므로 data_unified에서 제거)
 
 사용:
   python convert_unified.py --dataset all --workers 3
@@ -380,7 +382,7 @@ def _process_and_save_mit(cell_key: str, cell_data: dict, batch_num: int,
         "init_cap_Ah":        round(init_cap,  4) if np.isfinite(init_cap)  else None,
         "final_cap_Ah":       round(final_cap, 4) if np.isfinite(final_cap) else None,
     }
-    save_cell(out_dir, cell_key, meta, df)
+    save_cell(out_dir, cell_key, meta, df.drop(columns=["temperature_C"], errors="ignore"))
 
     return {
         "cell_id":        cell_key,
@@ -601,11 +603,10 @@ def convert_hust_cell(pkl_path: Path, out_dir: Path, raw_out_dir: Path) -> dict:
         "dataset":            "HUST",
         "batch_id":           cell_id.split("-")[0],
         "n_cycles":           df["cycle"].nunique(),
-        "temperature_C":      30.0,
         "n_rest_removed":     n_rest_removed,
         "n_outliers_removed": n_outliers,
     }
-    save_cell(out_dir, cell_id, meta, df)
+    save_cell(out_dir, cell_id, meta, df.drop(columns=["temperature_C"], errors="ignore"))
 
     sorted_cycs = sorted(dq_map.keys())
     init_cap  = dq_map[sorted_cycs[0]]  / 1000.0 if sorted_cycs else np.nan
@@ -684,7 +685,7 @@ def _mit_cache_worker(args):
             "init_cap_Ah":        round(init_cap,  4) if np.isfinite(init_cap)  else None,
             "final_cap_Ah":       round(final_cap, 4) if np.isfinite(final_cap) else None,
         }
-        save_cell(Path(out_dir_str), cell_key, meta, df)
+        save_cell(Path(out_dir_str), cell_key, meta, df.drop(columns=["temperature_C"], errors="ignore"))
         return ("ok", {
             "cell_id":        cell_key,
             "n_cycles":       n_actual,
@@ -728,11 +729,10 @@ def _hust_cache_worker(args):
             "dataset":            "HUST",
             "batch_id":           meta_raw.get("batch_id", cell_key.split("-")[0]),
             "n_cycles":           df["cycle"].nunique(),
-            "temperature_C":      30.0,
             "n_rest_removed":     n_rest_removed,
             "n_outliers_removed": n_outliers,
         }
-        save_cell(Path(out_dir_str), cell_key, meta, df)
+        save_cell(Path(out_dir_str), cell_key, meta, df.drop(columns=["temperature_C"], errors="ignore"))
         return ("ok", {
             "cell_id":          cell_key,
             "batch_id":         meta_raw.get("batch_id", cell_key.split("-")[0]),

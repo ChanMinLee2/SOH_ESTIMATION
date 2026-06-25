@@ -39,7 +39,8 @@ HUST_DIR = PROJECT_ROOT / "data_unified" / "HUST"
 OUT_DIR  = Path(__file__).resolve().parent / "outputs"
 
 EXPECTED_COLS = {"cycle", "time_s", "voltage_V", "current_A",
-                 "temperature_C", "capacity_Ah", "phase"}
+                 "capacity_Ah", "phase"}
+# temperature_C는 data_raw에만 저장; data_unified는 온도 제외
 VALID_PHASES  = {"charge", "discharge", "rest"}
 VALID_STAGES  = {"D0", "D1", "D2", "D3", ""}
 

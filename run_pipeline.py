@@ -24,7 +24,7 @@ STEPS = [
     (1, "데이터 변환",        "1_convert/convert_unified.py",     ["--dataset", "all"]),
     (2, "이상 사이클 제거",   "2_preprocess/preprocess.py",        []),
     (3, "무결성 검사",        "3_integrity/check_integrity.py",    []),
-    (4, "HI 상관 분석",       "4_hi_analysis/hi_correlation.py",   []),
+    (4, "HI 상관 분석",       "4_hi_analysis/hi_correlation.py",   ["--force"]),
     (5, "HI 세그먼트 시각화", "4_hi_analysis/hi_segment_viz.py",   []),
 ]
 

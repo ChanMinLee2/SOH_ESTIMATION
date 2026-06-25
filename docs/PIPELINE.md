@@ -29,8 +29,10 @@
     ★ data_raw/FastCharge/ (MIT 원본 .mat) 와 공존
 
   PKL 스키마: {"meta": dict, "cycles": DataFrame}
-  cycles 컬럼: cycle, time_s, voltage_V, current_A,
-               temperature_C, capacity_Ah, phase
+  data_raw cycles 컬럼:     cycle, time_s, voltage_V, current_A,
+                             temperature_C, capacity_Ah, phase
+  data_unified cycles 컬럼: cycle, time_s, voltage_V, current_A,
+                             capacity_Ah, phase  (temperature_C 제외)
              │
              ▼
   ┌──────────────────────────────────────────────────────────────┐
@@ -84,20 +86,31 @@
   │                            corr_matrix_<ds>.png          │
   │                            top7_cross_<ds>.png           │
   │                                                          │
-  │  HI 64종  (방전 Global 22 + 방전 SoC 세그먼트 18         │
-  │           + 충전 Global 6 + 충전 SoC 세그먼트 18)        │
-  │    방전 Global: v_mean, v_std, v_skew, v_kurt, v_end,   │
-  │                 v_drop, energy_Wh, v_energy,             │
-  │                 v_at_q20/50/80, q_high_v, q_tail,        │
-  │                 q_plateau_ratio, t_discharge,            │
-  │                 ica_peak_h/v/area, dvdq_min, ce,         │
-  │                 temp_mean, temp_max                      │
-  │    방전 SoC 3구간: v_mean, v_std, energy_Wh, q_abs,     │
-  │                    ica_peak_h, dvdq_min  × 3구간         │
-  │    충전 Global: q_cc_ratio, chg_v_energy,               │
-  │                 chg_ica_peak_h/v/area, chg_dvdq_min      │
-  │    충전 SoC 3구간: v_mean, v_std, energy_Wh, q_abs,     │
-  │                    ica_peak_h, dvdq_min  × 3구간         │
+  │  HI 285종  (Global 15 + Segment 6구간×45)                │
+  │  설계 상세: docs/NEW_HIS.md 참조                          │
+  │                                                          │
+  │  Global (15):                                            │
+  │    q_dis, energy_dis, v_mean_dis, r_dc_est,              │
+  │    q_plateau_frac, ica_peak1_v/h/area, ica_peak1_asym,  │
+  │    dva_valley_q/depth, ce, cv_q_frac, cv_time_frac,      │
+  │    chg_ica_peak1_h                                       │
+  │                                                          │
+  │  Segment (6구간 × 45):                                   │
+  │    세그먼트: dis_hi / dis_mid / dis_lo                   │
+  │             chg_lo / chg_mid / chg_hi  (q_frac 기준)    │
+  │    카테고리 A — 통계(15): stat_{k}_{seg}                 │
+  │      v_mean, v_std, v_skew, v_kurt, v_ent,              │
+  │      i_mean, i_std, v_med, corr_qi, corr_vi,            │
+  │      q_abs, energy_seg, v_iqr, v_range, v_p10           │
+  │    카테고리 B — 미분(15): diff_{k}_{seg}                 │
+  │      dvdq_mean/std/max_abs/min/area, dqdv_peak_h/v/w,   │
+  │      dqdv_area, dvdt_slope, dqdv_peak_asym,             │
+  │      d2vdq2_rms, dvdq_skew/ent, r_dyn_seg               │
+  │    카테고리 C — LFP 특징(15): lfp_{k}_{seg}             │
+  │      plateau_frac/v_mean/v_std/q_frac, nonlin_idx,      │
+  │      v_sag_mid, v_flatness, delta_v_rms, ocv_slope,     │
+  │      knee_v/q_frac, v_concavity, phase_entry_dvdq,      │
+  │      v_q_pearson, ica_peak_cnt                          │
   └───────────────────────────────────────────────────────────┘
              │
              ▼
@@ -116,7 +129,7 @@
 | `2_preprocess/preprocess.py` | 2 | 7단계 이상 사이클·행 제거 (빈 사이클, time 보정, 0전류 rest, 시간 단절, Rolling Median 2-pass, vend_min, 형상 편차) |
 | `2_preprocess/plot_cleaning_report.py` | 2 | cleaning_report.csv 읽어 필터별 시각화 플롯 생성 |
 | `3_integrity/check_integrity.py` | 3 | unified PKL 무결성 검사 → 이상 목록 CSV 저장 |
-| `4_hi_analysis/hi_correlation.py` | 4 | HI 64종 추출 및 풀링 Spearman 상관 시각화 |
+| `4_hi_analysis/hi_correlation.py` | 4 | HI 285종 추출 및 풀링 Spearman 상관 시각화 (Global 15 + Segment 6구간×45, temperature 제거) |
 | `4_hi_analysis/hi_segment_viz.py` | 4 | 세그먼트 분할 확인 + HI 열화 추이 시각화 |
 | `4_hi_analysis/seg_corr_analysis.py` | 4 | 세그먼트별 within-cell Spearman 상관계수 랭킹·히트맵·Top-7 비교 |
 
@@ -254,6 +267,9 @@ python 3_integrity/check_integrity.py --workers 8
 
 검사 항목:
 
+필수 컬럼 기준: `cycle, time_s, voltage_V, current_A, capacity_Ah, phase`  
+(temperature_C는 data_raw에만 저장; data_unified 검사 대상 아님)
+
 | 수준 | criterion | 설명 |
 |------|-----------|------|
 | 셀 | `missing_cols` | 필수 컬럼 누락 |
@@ -317,8 +333,10 @@ python 4_hi_analysis/hi_segment_viz.py --n-cycles 6
 
 출력:
 - `4_hi_analysis/hi_plot/<MMDD>/hi_segment_cuts.png` — V-q_frac 곡선에 세그먼트 경계 표시
-- `4_hi_analysis/hi_plot/<MMDD>/hi_trend.png` — 선별 HI별 용량 열화 추이 (21종)
-- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend.png` — 6 SoC 구간 × 6 HI 격자 플롯 (전체 셀·사이클, NaN 제외)
+- `4_hi_analysis/hi_plot/<MMDD>/hi_trend.png` — Global HI 15종 용량 열화 추이
+- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_stat.png` — 6구간 × 15 통계 HI 열화 추이 (카테고리 A)
+- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_diff.png` — 6구간 × 15 미분 HI 열화 추이 (카테고리 B)
+- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_lfp.png` — 6구간 × 15 LFP 특징 HI 열화 추이 (카테고리 C)
 
 #### 4-C. 세그먼트별 상관분석 (`4_hi_analysis/seg_corr_analysis.py`)
 
@@ -331,6 +349,7 @@ python 4_hi_analysis/hi_segment_viz.py --n-cycles 6
 | `--dataset` | `all` | 분석 대상: `mit` / `hust` / `all` |
 | `--min-cycles` | `5` | 셀당 최소 유효 사이클 수 |
 | `--workers` | `8` | 병렬 스레드 수 |
+| `--top-n` | `5` | top_cross 플롯 상위 HI 개수 |
 
 ```powershell
 # 권장 (4-A 실행 후 캐시에서 로드)
@@ -339,14 +358,18 @@ python 4_hi_analysis/seg_corr_analysis.py
 # MIT만 분석
 python 4_hi_analysis/seg_corr_analysis.py --dataset mit
 
-# 다른 PKL 지정
-python 4_hi_analysis/seg_corr_analysis.py --pkl 4_hi_analysis/0622_1154_hi_features.pkl
+# Top-7로 확장
+python 4_hi_analysis/seg_corr_analysis.py --top-n 7
 ```
 
 출력 (`4_hi_analysis/seg_corr/<MMDD>/`):
-- `corr_rank_<ds>.png` — 6 시나리오 × |ρ| 랭킹 바 차트 (부호 (+)/(-) 병기)
-- `corr_matrix_<ds>.png` — 6 시나리오 × feature × feature Spearman 히트맵
-- `top7_cross_<ds>.png` — 시나리오 간 Top-7 HI 비교 (HI 아이덴티티 20색 고정)
+- `corr_rank_stat_<ds>.png` — 카테고리 A: 6구간 × 15 통계 HI |ρ| 랭킹
+- `corr_rank_diff_<ds>.png` — 카테고리 B: 6구간 × 15 미분 HI
+- `corr_rank_lfp_<ds>.png`  — 카테고리 C: 6구간 × 15 LFP HI
+- `corr_matrix_stat_<ds>.png` — 카테고리 A: 6구간 × 15×15 feature 상관행렬
+- `corr_matrix_diff_<ds>.png` — 카테고리 B
+- `corr_matrix_lfp_<ds>.png`  — 카테고리 C
+- `top_cross_<ds>.png` — 3카테고리 × 6구간 Top-5 HI 비교 (전체 요약)
 
 ---
 
@@ -478,15 +501,17 @@ LFP_SOH_prediction/
     hi_features.pkl                HI 추출 캐시 (4-A/4-B/4-C 공유)
     hi_plot/
       <MMDD>/                      실행 날짜별 서브폴더
-        hi_correlation.png         풀링 Spearman 히트맵
-        hi_segment_cuts.png        세그먼트 분할 확인
-        hi_trend.png               HI 열화 추이
-        hi_segment_trend.png       세그먼트별 HI 추이 (전체 데이터)
+        hi_correlation.png           풀링 Spearman 히트맵
+        hi_segment_cuts.png          세그먼트 분할 확인
+        hi_trend.png                 Global HI 15종 열화 추이
+        hi_segment_trend_stat.png    6구간 × 15 통계 HI (카테고리 A)
+        hi_segment_trend_diff.png    6구간 × 15 미분 HI (카테고리 B)
+        hi_segment_trend_lfp.png     6구간 × 15 LFP HI (카테고리 C)
     seg_corr/
-      <MMDD>/                      실행 날짜별 서브폴더
-        corr_rank_mit.png          within-cell |ρ| 랭킹
-        corr_matrix_mit.png        feature × feature 히트맵
-        top7_cross_mit.png         시나리오 간 Top-7 비교
+      <MMDD>/                           실행 날짜별 서브폴더
+        corr_rank_{stat|diff|lfp}_*.png  카테고리별 6구간 |ρ| 랭킹
+        corr_matrix_{stat|diff|lfp}_*.png 카테고리별 6구간 feature 상관행렬
+        top_cross_*.png                   3카테고리 × 6구간 Top-5 요약
     cell/
       cell_cycles_*.png            셀별 전체 사이클 시각화
     segment/
@@ -496,6 +521,7 @@ LFP_SOH_prediction/
     HUST/
   docs/
     PIPELINE.md
+    NEW_HIS.md                       285-HI 설계 상세 (LFP 도메인 전문가 관점, 온도 피처 제외)
     HI_DESCRIPTION.md
     DATASET_ANOMALIES.md           파이프라인 단계별 이상치 처리 정리
     correlation_comparison.md      preprocess.ipynb vs 현재 / 풀링 vs within-cell 비교
