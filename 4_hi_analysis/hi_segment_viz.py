@@ -127,7 +127,7 @@ def _draw_trend_cell(ax, df, hi_key):
     if not any_data:
         ax.text(0.5, 0.5, "N/A", ha="center", va="center",
                 transform=ax.transAxes, fontsize=8, color="gray")
-    ax.tick_params(labelsize=5)
+    ax.tick_params(labelsize=7)
     ax.grid(True, lw=0.3, alpha=0.35)
 
 
@@ -276,7 +276,7 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
     # 열 헤더: 첫 번째 세그먼트(dis_hi) 기준 HI 레이블
     col_labels = [HI_LABELS.get(k, k) for k in seg_keys_list[0][1]]
 
-    cell_w, cell_h = 2.5, 2.4
+    cell_w, cell_h = 3.2, 3.0
     fig, axes = plt.subplots(
         n_segs, n_his,
         figsize=(n_his * cell_w, n_segs * cell_h),
@@ -286,12 +286,12 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
         f"세그먼트별 HI 열화 추이 — {cat_title}\n"
         "( 행=SoC 구간,  열=HI 종류,  x=Capacity Ah )\n"
         "■ 파란 계열=MIT   ■ 주황 계열=HUST",
-        fontsize=11, fontweight="bold",
+        fontsize=13, fontweight="bold",
     )
 
     # 열 헤더
     for ci, lbl in enumerate(col_labels):
-        axes[0, ci].set_title(lbl, fontsize=7.5, fontweight="bold", pad=3)
+        axes[0, ci].set_title(lbl, fontsize=10, fontweight="bold", pad=4)
 
     for ri, (seg, hi_keys) in enumerate(seg_keys_list):
         bg = SEG_ROW_BG[ri]
@@ -301,17 +301,17 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
             ax = axes[ri, ci]
             ax.set_facecolor(bg)
             _draw_trend_cell(ax, df, hi_key)
-            ax.set_xlabel("Cap (Ah)", fontsize=6)
+            ax.set_xlabel("Cap (Ah)", fontsize=8)
 
         # 행 레이블: 첫 번째 열 y축
         axes[ri, 0].set_ylabel(
             f"{row_lbl}\n{HI_LABELS.get(hi_keys[0], hi_keys[0])}",
-            fontsize=7,
+            fontsize=9, labelpad=4,
         )
         # 나머지 열: HI 레이블만
         for ci in range(1, n_his):
             axes[ri, ci].set_ylabel(
-                HI_LABELS.get(hi_keys[ci], hi_keys[ci]), fontsize=6)
+                HI_LABELS.get(hi_keys[ci], hi_keys[ci]), fontsize=8)
 
     # 공통 범례
     handles = [

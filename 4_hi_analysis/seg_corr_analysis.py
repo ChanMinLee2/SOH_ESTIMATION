@@ -69,6 +69,13 @@ for _f in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
         continue
 plt.rcParams["axes.unicode_minus"] = False
 
+# ── 카테고리 색상 ─────────────────────────────────────────────────────────────
+CAT_COLORS = {
+    "Stat": "#2980b9",
+    "Diff": "#e67e22",
+    "LFP":  "#27ae60",
+}
+
 # ── 세그먼트 색상 (방전=파랑 계열, 충전=주황 계열) ──────────────────────────
 SEG_COLORS = {
     "dis_hi":  "#1a5276",
@@ -154,6 +161,49 @@ def feature_corr_matrix(df: pd.DataFrame, feat_cols: list) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 랭킹 집계용 헬퍼
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _concept_from_key(feat_key: str) -> str:
+    """stat_v_mean_dis_hi → stat_v_mean  (세그먼트 suffix 2토큰 제거)."""
+    return feat_key.rsplit("_", 2)[0]
+
+
+def _cat_from_concept(concept: str) -> str:
+    """stat_v_mean → Stat"""
+    return {"stat": "Stat", "diff": "Diff", "lfp": "LFP"}.get(
+        concept.split("_")[0], "Stat"
+    )
+
+
+def _short_label(concept: str) -> str:
+    """stat_v_mean → v_mean"""
+    parts = concept.split("_", 1)
+    return parts[1] if len(parts) > 1 else concept
+
+
+def collect_flat(ds_summaries: dict, dataset_name: str) -> pd.DataFrame:
+    """all_summaries[cat][seg] → 행당 (dataset, cat, seg, feat_key, concept, abs_rho)."""
+    records = []
+    for cat, cat_sums in ds_summaries.items():
+        for seg, (summ, _hi_keys) in cat_sums.items():
+            for feat_key, row in summ.iterrows():
+                mean_rho = row["mean"]
+                if pd.isna(mean_rho):
+                    continue
+                records.append({
+                    "dataset":  dataset_name,
+                    "cat":      cat,
+                    "seg":      seg,
+                    "feat_key": feat_key,
+                    "concept":  _concept_from_key(feat_key),
+                    "abs_rho":  abs(float(mean_rho)),
+                    "mean_rho": float(mean_rho),
+                })
+    return pd.DataFrame(records)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Plot 1: 상관계수 랭킹 바 차트 (6 seg × 1 cat)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -179,17 +229,23 @@ def plot_corr_rank(seg_summaries: dict, out_path: Path,
 
     axes_flat = np.array(axes).reshape(-1)
     for ax, (seg, (summ, _hi_keys)) in zip(axes_flat, seg_summaries.items()):
-        color     = SEG_COLORS.get(seg, "steelblue")
-        feat_cols = summ.index.tolist()
+        color = SEG_COLORS.get(seg, "steelblue")
+
+        # NaN mean 피처 분리 (ICA 피크 미탐지 등으로 모든 사이클 NaN인 경우)
+        summ_valid = summ.dropna(subset=["mean"])
+        n_nan      = len(summ) - len(summ_valid)
+
+        feat_cols = summ_valid.index.tolist()
         labels    = [HI_LABELS.get(k, k) for k in feat_cols]
-        means     = summ["mean"].values
+        means     = summ_valid["mean"].values
         means_abs = np.abs(means)
-        stds      = summ["std"].values
+        stds      = summ_valid["std"].fillna(0).values
 
         ax.barh(labels[::-1], means_abs[::-1],
                 xerr=stds[::-1], color=color,
                 alpha=0.82, capsize=3, height=0.65,
                 error_kw={"elinewidth": 1.0, "alpha": 0.6})
+        ax.set_ylim(-0.7, len(labels) - 0.3)   # 위아래 여백 확보 (레이블 잘림 방지)
 
         for i, (m, s) in enumerate(zip(means[::-1], stds[::-1])):
             ax.text(abs(m) + 0.02, i,
@@ -198,8 +254,11 @@ def plot_corr_rank(seg_summaries: dict, out_path: Path,
 
         ax.set_xlim(0, 1.2)
         ax.set_xlabel("|Spearman ρ|", fontsize=9)
-        ax.set_title(SEG_LABELS.get(seg, seg), fontsize=10,
-                     fontweight="bold", color=color, pad=4)
+        title_str = SEG_LABELS.get(seg, seg)
+        if n_nan:
+            nan_names = [HI_LABELS.get(k, k) for k in summ[summ["mean"].isna()].index]
+            title_str += f"\n※ NaN 제외 {n_nan}개: {', '.join(nan_names)}"
+        ax.set_title(title_str, fontsize=9, fontweight="bold", color=color, pad=4)
         ax.tick_params(labelsize=8)
         ax.grid(axis="x", alpha=0.3)
 
@@ -334,15 +393,24 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
                    alpha=0.85, capsize=3, width=0.62,
                    error_kw={"elinewidth": 1.0, "alpha": 0.5})
 
-            for xi, (m, ma, std) in enumerate(zip(means, means_abs, stds)):
-                ax.text(xi, ma + std + 0.04,
-                        f"{ma:.2f}\n{'(+)' if m >= 0 else '(-)'}",
-                        ha="center", va="bottom", fontsize=6,
-                        fontweight="bold", linespacing=1.2)
+            for xi, (m, ma, std, b) in enumerate(zip(means, means_abs, stds, base)):
+                # 막대 내부 인덱스 번호 (크게)
+                feat_idx   = base_keys.index(b) + 1 if b in base_keys else xi + 1
+                txt_color  = "white" if ma > 0.12 else "#333333"
+                ax.text(xi, ma * 0.42, str(feat_idx),
+                        ha="center", va="center",
+                        fontsize=14, fontweight="bold",
+                        color=txt_color, zorder=5)
+                # 막대 상단 값 (작게)
+                ax.text(xi, ma + std + 0.025,
+                        f"{ma:.2f}{'(+)' if m >= 0 else '(-)'}",
+                        ha="center", va="bottom", fontsize=5.5,
+                        fontweight="bold")
 
             ax.set_xticks(x_pos)
-            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=7.5)
-            ax.set_ylim(0, 1.3)
+            ax.set_xticklabels([""] * top_n)   # 번호로 대체 — x축 레이블 제거
+            ax.set_ylim(0, 1.15)
+            ax.axhline(1.0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=0)
             ax.tick_params(axis="y", labelsize=7)
             ax.grid(axis="y", alpha=0.3, lw=0.6)
             ax.set_axisbelow(True)
@@ -356,25 +424,154 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
             if ci == 0:
                 ax.set_ylabel(f"{cat_title_short}\n|ρ|", fontsize=8.5)
 
-    # 카테고리별 범례 (각 카테고리의 feature 색상)
+    # 카테고리별 번호 범례 — idx. 이름 형식
+    _prefix = {"Stat": "stat", "Diff": "diff", "LFP": "lfp"}
     legend_handles = []
     for cat, _, _, _, base_keys in CATEGORIES:
-        legend_handles.append(Patch(color="white", label=f"─ {cat} ─"))
-        for bk in base_keys:
+        legend_handles.append(Patch(color="white", label=f"── {cat} ──"))
+        pfx = _prefix.get(cat, "stat")
+        for idx, bk in enumerate(base_keys, 1):
             col = cat_palettes[cat][bk]
-            lbl = HI_LABELS.get(f"stat_{bk}_dis_hi", bk)  # Stat 기준 레이블 조회
-            legend_handles.append(Patch(facecolor=col, label=lbl))
+            lbl = HI_LABELS.get(f"{pfx}_{bk}_dis_hi", bk)
+            legend_handles.append(Patch(facecolor=col, label=f"{idx:2d}. {lbl}"))
 
     fig.legend(
         handles=legend_handles,
         loc="lower center",
         ncol=16,
-        fontsize=7,
-        framealpha=0.85,
+        fontsize=7.5,
+        framealpha=0.88,
         bbox_to_anchor=(0.5, -0.04),
     )
 
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot 4: Feature 종합 랭킹 — 배터리별 (모든 구간×카테고리 Σ|ρ|)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_feature_rank_battery(flat_df: pd.DataFrame, out_path: Path,
+                               dataset_name: str):
+    """배터리 1개 — 모든 구간·카테고리에 걸쳐 concept별 Σ|ρ| 랭킹."""
+    ranked = (
+        flat_df.groupby("concept")["abs_rho"]
+        .sum()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
+    ranked["cat"]   = ranked["concept"].map(_cat_from_concept)
+    ranked["label"] = ranked["concept"].map(_short_label)
+    colors = [CAT_COLORS.get(c, "#888888") for c in ranked["cat"]]
+
+    n = len(ranked)
+    fig, ax = plt.subplots(figsize=(11, max(6, n * 0.33)), constrained_layout=True)
+    y_pos = np.arange(n)
+
+    ax.barh(y_pos, ranked["abs_rho"], color=colors, alpha=0.85, height=0.72)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(ranked["label"], fontsize=7.5)
+    ax.invert_yaxis()
+
+    for i, (val, cat) in enumerate(zip(ranked["abs_rho"], ranked["cat"])):
+        ax.text(val + 0.04, i, f"{val:.2f}", va="center", fontsize=6.5)
+    for i in range(n):
+        ax.text(-0.1, i, f"#{i+1}", va="center", ha="right",
+                fontsize=6, color="#555555")
+
+    ax.set_xlabel("Σ |Spearman ρ|  (6구간 합산)", fontsize=9)
+    ax.set_title(
+        f"[{dataset_name}] Feature 종합 랭킹\n"
+        "모든 구간·카테고리에 걸쳐 |ρ| 합산 (구간 수 × 최대 1.0)",
+        fontsize=12, fontweight="bold",
+    )
+    ax.grid(axis="x", alpha=0.3, lw=0.7)
+
+    legend_handles = [Patch(facecolor=CAT_COLORS[c], label=c)
+                      for c in ["Stat", "Diff", "LFP"]]
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=8.5)
+
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot 5: Feature 종합 랭킹 — 구간별 (모든 배터리×카테고리 Σ|ρ|)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_feature_rank_seg(all_flat_df: pd.DataFrame, out_path: Path):
+    """구간 6개 서브플롯 — 모든 배터리·카테고리 합산 Σ|ρ| 랭킹 (공통 y-순서)."""
+    segs = [seg for _, _, seg, _ in ALL_SEGS]
+
+    # 전체 합산 기준 공통 y-순서 (가장 많이 쓰이는 concept부터)
+    global_order = (
+        all_flat_df.groupby("concept")["abs_rho"]
+        .sum()
+        .sort_values(ascending=False)
+        .index.tolist()
+    )
+    n = len(global_order)
+    y_pos = np.arange(n)
+
+    n_cols = 3
+    n_rows = 2
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(n_cols * 7, n_rows * max(5, n * 0.3)),
+        constrained_layout=True,
+    )
+    datasets_str = " + ".join(sorted(all_flat_df["dataset"].unique()))
+    fig.suptitle(
+        f"[{datasets_str}] 구간별 Feature 랭킹\n"
+        "모든 배터리·카테고리에 걸쳐 |ρ| 합산  (공통 y-순서: 전체 합산 기준)",
+        fontsize=13, fontweight="bold",
+    )
+
+    bar_colors = [CAT_COLORS.get(_cat_from_concept(c), "#888888") for c in global_order]
+    y_labels   = [_short_label(c) for c in global_order]
+
+    axes_flat = np.array(axes).reshape(-1)
+    for ax, seg in zip(axes_flat, segs):
+        seg_df = all_flat_df[all_flat_df["seg"] == seg]
+        if seg_df.empty:
+            ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=10)
+            continue
+
+        seg_sum = (
+            seg_df.groupby("concept")["abs_rho"]
+            .sum()
+            .reindex(global_order)
+            .fillna(0)
+        )
+
+        ax.barh(y_pos, seg_sum.values, color=bar_colors, alpha=0.85, height=0.72)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(y_labels, fontsize=7)
+        ax.invert_yaxis()
+
+        for i, val in enumerate(seg_sum.values):
+            if val > 0.01:
+                ax.text(val + 0.015, i, f"{val:.2f}", va="center", fontsize=5.5)
+
+        seg_color = SEG_COLORS.get(seg, "steelblue")
+        ax.set_title(SEG_LABELS.get(seg, seg), fontsize=9,
+                     fontweight="bold", color=seg_color)
+        ax.set_xlabel("Σ |ρ|", fontsize=8)
+        ax.grid(axis="x", alpha=0.3, lw=0.7)
+
+    for ax in axes_flat[len(segs):]:
+        ax.set_visible(False)
+
+    legend_handles = [Patch(facecolor=CAT_COLORS[c], label=c)
+                      for c in ["Stat", "Diff", "LFP"]]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=3, fontsize=9.5,
+               bbox_to_anchor=(0.5, -0.025))
+
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  저장: {out_path}")
 
@@ -413,6 +610,8 @@ def main():
 
     datasets = (sorted(df["dataset"].unique().tolist())
                 if args.dataset == "all" else [args.dataset.upper()])
+
+    all_flat_records: list = []   # Plot 5 구간별 랭킹용 누적
 
     for ds_name in datasets:
         df_ds = df[df["dataset"] == ds_name].copy()
@@ -474,6 +673,13 @@ def main():
         plot_top_cross(all_summaries, top_path,
                        top_n=args.top_n, dataset_name=ds_name)
 
+        # ── Plot 4: Feature 종합 랭킹 (배터리별) ─────────────────────────────
+        flat_ds = collect_flat(all_summaries, ds_name)
+        all_flat_records.append(flat_ds)
+        rank_batt_path = OUT_BASE / f"feature_rank_battery_{ds_name.lower()}.png"
+        print(f"\n  [Plot] Feature Rank (battery) → {rank_batt_path.name}")
+        plot_feature_rank_battery(flat_ds, rank_batt_path, ds_name)
+
         # ── 텍스트 요약 ──────────────────────────────────────────────────────
         print(f"\n{'='*70}")
         print(f"  [{ds_name}] Top-3 HI 요약 (|ρ| 기준)")
@@ -488,6 +694,13 @@ def main():
                     for k, row in top3.iterrows()
                 )
                 print(f"  {seg_lbl:<22} {items}")
+
+    # ── Plot 5: Feature 종합 랭킹 (구간별, 전체 배터리 합산) ─────────────────
+    if all_flat_records:
+        all_flat_df = pd.concat(all_flat_records, ignore_index=True)
+        rank_seg_path = OUT_BASE / "feature_rank_seg.png"
+        print(f"\n[Plot] Feature Rank (segment) → {rank_seg_path.name}")
+        plot_feature_rank_seg(all_flat_df, rank_seg_path)
 
     print(f"\n완료 — {OUT_BASE}/")
 

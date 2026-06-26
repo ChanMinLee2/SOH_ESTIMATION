@@ -88,7 +88,7 @@ DIFF_KEYS = [
 ]
 _DIFF_LABELS = {
     "dvdq_mean": "dVQ_mn", "dvdq_std": "dVQ_sd", "dvdq_max_abs": "|dVQ|mx",
-    "dvdq_min": "dVQ_mn",  "dvdq_area": "dVQ_ar",
+    "dvdq_min": "dVQ_mi",  "dvdq_area": "dVQ_ar",
     "dqdv_peak_h": "ICA_h", "dqdv_peak_v": "ICA_V", "dqdv_peak_w": "ICA_w",
     "dqdv_area": "ICA_ar",  "dvdt_slope": "dVdt",
     "dqdv_peak_asym": "ICA_asy", "d2vdq2_rms": "d2V_rm",

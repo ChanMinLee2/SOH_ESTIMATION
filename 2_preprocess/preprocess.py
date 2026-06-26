@@ -16,7 +16,7 @@ MIT / HUST data_unified PKL 에 이상 사이클·행 제거를 적용.
               HUST 비정상 종료 ~4,214건(2.88%) 제거
   [필터7] _remove_shape_outlier_cycles — V-q_frac 형상 편차 기반 이상 사이클 제거
               방전·충전 각각 rolling median 기준 곡선과의 RMSE/max|ΔV| 편차를
-              MAD robust z-score로 평가 → z 또는 z_max > sigma(기본 5.0) 시 제거
+              MAD robust z-score로 평가 → z 또는 z_max > sigma(기본 30.0) 시 제거
 
   ※ DELETE_CELLS (완전 불량 셀 제외) 는 1_convert/convert_unified.py 에서 유지.
      셀 단위 제외이므로 이 스크립트에서는 다루지 않음.
@@ -311,7 +311,7 @@ def _robust_z(x: np.ndarray) -> np.ndarray:
 
 
 def _remove_shape_outlier_cycles(df: pd.DataFrame,
-                                  sigma:   float = 5.0,
+                                  sigma:   float = 30.0,
                                   window:  int   = 11,
                                   grid_n:  int   = 100,
                                   cell_id: str   = "",
@@ -542,8 +542,8 @@ def main():
     parser.add_argument("--vend-min", type=float, default=1.8,
                         help="[필터6] 방전 종지전압 하한 V (기본: 1.8)")
     # 필터7 파라미터
-    parser.add_argument("--shape-sigma",  type=float, default=5.0,
-                        help="[필터7] 형상 편차 robust z 임계값 (기본: 5.0). 낮을수록 더 많이 제거")
+    parser.add_argument("--shape-sigma",  type=float, default=50.0,
+                        help="[필터7] 형상 편차 robust z 임계값 (기본: 30.0). 낮을수록 더 많이 제거")
     parser.add_argument("--shape-window", type=int,   default=11,
                         help="[필터7] 기준 곡선 rolling median 윈도우 (기본: 11)")
     parser.add_argument("--shape-grid",   type=int,   default=100,
@@ -657,11 +657,101 @@ def main():
     df_report.to_csv(report_path, index=False)
     print(f"\n  리포트: {report_path}")
 
+    summary_path = _OUTPUTS_ROOT / "cleaning_summary.txt"
+    _write_cleaning_summary(
+        df_report,
+        params=dict(window=w, sigma=s, min_std=m, vend_min=vm,
+                    shape_sigma=ss, shape_window=sw, shape_grid=sg),
+        out_path=summary_path,
+    )
+
     # 대표 셀 before/after 플롯
     after_caps: dict = {}
     for ds, (cell_id, *_) in before_caps.items():
         after_caps[ds] = _cap_series(POSTPROCESS_ROOT / ds / f"{cell_id}.pkl")
     _plot_preprocess_samples(OUTPUT_DIR, before_caps, after_caps, df_report)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 필터 적용 요약 TXT 저장
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _write_cleaning_summary(df_report: pd.DataFrame,
+                             params: dict,
+                             out_path: Path) -> None:
+    """7개 필터별 전체 제거율 + 셀별 제거율을 TXT 파일로 저장."""
+    import datetime
+
+    total_before    = int(df_report["n_cycles_before"].sum())
+    total_after     = int(df_report["n_cycles_after"].sum())
+    total_empty     = int(df_report["n_removed_empty"].sum())
+    total_rest_rows = int(df_report["n_rows_removed_rest"].sum())
+    total_dt_dis    = int(df_report["n_removed_dt_dis"].sum())
+    total_chg_clean = int(df_report["n_chg_rows_cleaned"].sum())
+    total_chg_seg   = int(df_report["n_chg_seg_flagged"].sum())
+    total_rolling   = int(df_report["n_removed_rolling"].sum())
+    total_vend      = int(df_report["n_removed_vend"].sum())
+    total_shape     = int(df_report["n_removed_shape"].sum())
+    total_removed   = int(df_report["n_removed"].sum())
+
+    def pct(n):
+        return f"{100*n/total_before:.2f}%" if total_before else "—"
+
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = [
+        "=" * 78,
+        "preprocess.py  7단계 필터 적용 요약",
+        f"생성: {now}",
+        "",
+        "파라미터:",
+        f"  [필터5] window={params['window']}, sigma={params['sigma']}, min_std={params['min_std']}",
+        f"  [필터6] vend_min={params['vend_min']}V",
+        f"  [필터7] shape_sigma={params['shape_sigma']}, shape_window={params['shape_window']}, shape_grid={params['shape_grid']}",
+        "=" * 78,
+        "",
+        "[전체 요약]",
+        f"  대상 셀 수                 : {len(df_report):>6}개",
+        f"  전체 사이클 (필터 전)      : {total_before:>8,}개",
+        "",
+        f"  [필터1] 빈 사이클 제거    : {total_empty:>8,}개   ({pct(total_empty)})",
+        f"  [필터2] time 단조 보정    : {'(사이클 유지)':>12}",
+        f"  [필터3] rest 0전류 제거   : {total_rest_rows:>8,}행   (행 단위, 사이클 유지)",
+        f"  [필터4] 방전 단절 제거    : {total_dt_dis:>8,}개   ({pct(total_dt_dis)})",
+        f"  [필터4] 충전 완전중단 삭제: {total_chg_clean:>8,}행   (행 단위, 사이클 유지)",
+        f"  [필터4] 충전 CC갭 플래그  : {total_chg_seg:>8,}개   (플래그만, 제거 아님)",
+        f"  [필터5] Rolling Median    : {total_rolling:>8,}개   ({pct(total_rolling)})",
+        f"  [필터6] 종지전압(v_end)   : {total_vend:>8,}개   ({pct(total_vend)})",
+        f"  [필터7] 형상 편차(shape)  : {total_shape:>8,}개   ({pct(total_shape)})",
+        "",
+        f"  합계 사이클 제거          : {total_removed:>8,}개   ({pct(total_removed)})",
+        f"  잔존 사이클               : {total_after:>8,}개   ({pct(total_after)})",
+        "",
+        "=" * 78,
+        "",
+        "[셀별 상세]  (합계제거 내림차순)",
+        f"{'셀ID':<12} {'DS':<5} {'전체':>6}  "
+        f"{'필1':>4} {'필4':>4} {'필5':>4} {'필6':>4} {'필7':>4}  "
+        f"{'합계':>5} {'잔존':>6}  {'제거율':>7}",
+        "-" * 78,
+    ]
+
+    for _, row in df_report.sort_values("n_removed", ascending=False).iterrows():
+        n_b   = int(row["n_cycles_before"])
+        n_rem = int(row["n_removed"])
+        p     = f"{100*n_rem/n_b:.2f}%" if n_b else "—"
+        lines.append(
+            f"{str(row['cell_id']):<12} {str(row['dataset']):<5} {n_b:>6,}  "
+            f"{int(row['n_removed_empty']):>4} "
+            f"{int(row['n_removed_dt_dis']):>4} "
+            f"{int(row['n_removed_rolling']):>4} "
+            f"{int(row['n_removed_vend']):>4} "
+            f"{int(row['n_removed_shape']):>4}  "
+            f"{n_rem:>5} {int(row['n_cycles_after']):>6,}  {p:>7}"
+        )
+
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"  필터 요약 TXT: {out_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
