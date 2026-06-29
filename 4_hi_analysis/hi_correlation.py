@@ -60,12 +60,21 @@ GLOBAL_HI_KEYS = [
     "ce", "cv_q_frac", "cv_time_frac", "chg_ica_peak1_h", "ica_peak1_asym",
 ]
 _GLOBAL_LABELS = {
-    "q_dis": "Q_dis",     "energy_dis": "E_dis",    "v_mean_dis": "V_dis",
-    "r_dc_est": "R_dc",   "q_plateau_frac": "Qplt%",
-    "ica_peak1_v": "ICA_V", "ica_peak1_h": "ICA_h", "ica_peak1_area": "ICA_ar",
-    "dva_valley_q": "DVA_Q", "dva_valley_depth": "DVA_dp",
-    "ce": "CE",           "cv_q_frac": "CV_Q%",      "cv_time_frac": "CV_t%",
-    "chg_ica_peak1_h": "cICA_h", "ica_peak1_asym": "ICA_asy",
+    "q_dis":           "Q_dis",
+    "energy_dis":      "E_dis",
+    "v_mean_dis":      "μ(V)_dis",
+    "r_dc_est":        "R_dc",
+    "q_plateau_frac":  "Q_plat/Q",
+    "ica_peak1_v":     "V @ peak(dQ/dV)",
+    "ica_peak1_h":     "max(dQ/dV)",
+    "ica_peak1_area":  "∫(dQ/dV)dV",
+    "dva_valley_q":    "Q @ min(dV/dQ)",
+    "dva_valley_depth":"min(dV/dQ)",
+    "ce":              "CE",
+    "cv_q_frac":       "Q_CV/Q",
+    "cv_time_frac":    "t_CV/t",
+    "chg_ica_peak1_h": "max(dQ/dV) [chg]",
+    "ica_peak1_asym":  "ICA asym",
 }
 
 STAT_KEYS = [
@@ -74,11 +83,21 @@ STAT_KEYS = [
     "q_abs", "energy_seg", "v_iqr", "v_range", "v_p10",
 ]
 _STAT_LABELS = {
-    "v_mean": "V_mn",  "v_std": "V_sd",   "v_skew": "V_sk",  "v_kurt": "V_kt",
-    "v_ent": "V_en",   "i_mean": "I_mn",  "i_std": "I_sd",   "v_med": "V_md",
-    "corr_qi": "r(Q,I)", "corr_vi": "r(V,I)",
-    "q_abs": "Q_abs",  "energy_seg": "E_seg",
-    "v_iqr": "V_iqr",  "v_range": "V_rng", "v_p10": "V_p10",
+    "v_mean":    "μ(V)",
+    "v_std":     "σ(V)",
+    "v_skew":    "skew(V)",
+    "v_kurt":    "kurt(V)",
+    "v_ent":     "H(V)",
+    "i_mean":    "μ(|I|)",
+    "i_std":     "σ(|I|)",
+    "v_med":     "med(V)",
+    "corr_qi":   "corr(Q,|I|)",
+    "corr_vi":   "corr(V,|I|)",
+    "q_abs":     "Q_seg",
+    "energy_seg":"E_seg",
+    "v_iqr":     "IQR(V)",
+    "v_range":   "Vmax−Vmin",
+    "v_p10":     "V(10th pct)",
 }
 
 DIFF_KEYS = [
@@ -87,12 +106,21 @@ DIFF_KEYS = [
     "dqdv_peak_asym", "d2vdq2_rms", "dvdq_skew", "dvdq_ent", "r_dyn_seg",
 ]
 _DIFF_LABELS = {
-    "dvdq_mean": "dVQ_mn", "dvdq_std": "dVQ_sd", "dvdq_max_abs": "|dVQ|mx",
-    "dvdq_min": "dVQ_mi",  "dvdq_area": "dVQ_ar",
-    "dqdv_peak_h": "ICA_h", "dqdv_peak_v": "ICA_V", "dqdv_peak_w": "ICA_w",
-    "dqdv_area": "ICA_ar",  "dvdt_slope": "dVdt",
-    "dqdv_peak_asym": "ICA_asy", "d2vdq2_rms": "d2V_rm",
-    "dvdq_skew": "dVQ_sk",  "dvdq_ent": "dVQ_en",  "r_dyn_seg": "R_dyn",
+    "dvdq_mean":     "μ(dV/dQ)",
+    "dvdq_std":      "σ(dV/dQ)",
+    "dvdq_max_abs":  "max|dV/dQ|",
+    "dvdq_min":      "min(dV/dQ)",
+    "dvdq_area":     "∫|dV/dQ|dQ",
+    "dqdv_peak_h":   "max(dQ/dV)",
+    "dqdv_peak_v":   "V @ peak(dQ/dV)",
+    "dqdv_peak_w":   "FWHM(dQ/dV)",
+    "dqdv_area":     "∫(dQ/dV)dV",
+    "dvdt_slope":    "ΔV/Δt",
+    "dqdv_peak_asym":"ICA asym",
+    "d2vdq2_rms":    "rms(d²V/dQ²)",
+    "dvdq_skew":     "skew(dV/dQ)",
+    "dvdq_ent":      "H(dV/dQ)",
+    "r_dyn_seg":     "R_dyn",
 }
 
 LFP_KEYS = [
@@ -102,11 +130,31 @@ LFP_KEYS = [
     "phase_entry_dvdq", "v_q_pearson", "ica_peak_cnt",
 ]
 _LFP_LABELS = {
-    "plateau_frac": "plt%",   "plateau_v_mean": "pltVm",  "plateau_v_std": "pltVs",
-    "plateau_q_frac": "pltQ%","nonlin_idx": "NL_idx",     "v_sag_mid": "V_sag",
-    "v_flatness": "V_flt",    "delta_v_rms": "dV_rms",    "ocv_slope": "OCV_sl",
-    "knee_v": "knee_V",       "knee_q_frac": "knee_Q",    "v_concavity": "V_cnc",
-    "phase_entry_dvdq": "ent_dVQ", "v_q_pearson": "r(V,Q)", "ica_peak_cnt": "ICA_n",
+    "plateau_frac":     "plat. frac.",
+    "plateau_v_mean":   "μ(V)|plat",
+    "plateau_v_std":    "σ(V)|plat",
+    "plateau_q_frac":   "Q_plat/Q_seg",
+    "nonlin_idx":       "NL index",
+    "v_sag_mid":        "V sag(mid)",
+    "v_flatness":       "V flatness",
+    "delta_v_rms":      "rms(ΔV)",
+    "ocv_slope":        "dV/dQ|mid",
+    "knee_v":           "knee V",
+    "knee_q_frac":      "knee q_frac",
+    "v_concavity":      "V concav.",
+    "phase_entry_dvdq": "|dV/dQ|_entry",
+    "v_q_pearson":      "corr(V,Q)",
+    "ica_peak_cnt":     "# ICA peaks",
+}
+
+# 카테고리 D: 형태학적 거리 (BOL 대비 DTW / 이산 Fréchet) × 3곡선 = 6종
+MORPH_KEYS = [
+    "vt_dtw", "vq_dtw", "ve_dtw",
+    "vt_frec", "vq_frec", "ve_frec",
+]
+_MORPH_LABELS = {
+    "vt_dtw":  "DTW(V-t)",       "vq_dtw":  "DTW(V-Q)",       "ve_dtw":  "DTW(V-E)",
+    "vt_frec": "Fréchet(V-t)",   "vq_frec": "Fréchet(V-Q)",   "ve_frec": "Fréchet(V-E)",
 }
 
 DIS_SEGS = [
@@ -132,18 +180,87 @@ for _, _, _seg, _ in ALL_SEGS:
         _HI_META.append((f"diff_{_k}_{_seg}", _DIFF_LABELS[_k]))
     for _k in LFP_KEYS:
         _HI_META.append((f"lfp_{_k}_{_seg}", _LFP_LABELS[_k]))
+    for _k in MORPH_KEYS:
+        _HI_META.append((f"morph_{_k}_{_seg}", _MORPH_LABELS[_k]))
 
-ALL_HI_KEYS = [k for k, _ in _HI_META]   # 15 + 6×45 = 285
+ALL_HI_KEYS = [k for k, _ in _HI_META]   # 15 + 6×51 = 321
 HI_LABELS   = {k: lbl for k, lbl in _HI_META}
 
 HI_GROUPS: "OrderedDict[str, list[str]]" = OrderedDict()
 HI_GROUPS["Global"] = GLOBAL_HI_KEYS[:]
 for _, _, _seg, _seg_lbl in ALL_SEGS:
-    HI_GROUPS[f"{_seg} — Stat"] = [f"stat_{k}_{_seg}" for k in STAT_KEYS]
-    HI_GROUPS[f"{_seg} — Diff"] = [f"diff_{k}_{_seg}" for k in DIFF_KEYS]
-    HI_GROUPS[f"{_seg} — LFP"]  = [f"lfp_{k}_{_seg}"  for k in LFP_KEYS]
+    HI_GROUPS[f"{_seg} — Stat"]  = [f"stat_{k}_{_seg}"  for k in STAT_KEYS]
+    HI_GROUPS[f"{_seg} — Diff"]  = [f"diff_{k}_{_seg}"  for k in DIFF_KEYS]
+    HI_GROUPS[f"{_seg} — LFP"]   = [f"lfp_{k}_{_seg}"   for k in LFP_KEYS]
+    HI_GROUPS[f"{_seg} — Morph"] = [f"morph_{k}_{_seg}" for k in MORPH_KEYS]
 
 HI_GROUP_TAG = {k: gname for gname, keys in HI_GROUPS.items() for k in keys}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 카테고리 D: 형태학적 거리 헬퍼 (top-level — multiprocessing 호환)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MORPH_GRID = 50   # 보간 그리드 해상도 (속도-정밀도 균형)
+_DTW_BAND   = 5    # Sakoe-Chiba 밴드 (그리드의 10% = 위상 이동 허용폭)
+
+
+def _dtw_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """Sakoe-Chiba banded DTW (정규화: / n)."""
+    n = len(a)
+    d = np.abs(a[:, None] - b[None, :])      # n×n 거리행렬 (vectorized)
+    dtw = np.full((n, n), np.inf)
+    dtw[0, 0] = d[0, 0]
+    for j in range(1, min(_DTW_BAND + 1, n)):
+        dtw[0, j] = dtw[0, j - 1] + d[0, j]
+    for i in range(1, n):
+        dtw[i, 0] = dtw[i - 1, 0] + d[i, 0]
+    for i in range(1, n):
+        j_lo = max(1, i - _DTW_BAND)
+        j_hi = min(n, i + _DTW_BAND + 1)
+        for j in range(j_lo, j_hi):
+            best = dtw[i - 1, j]
+            if dtw[i, j - 1] < best:
+                best = dtw[i, j - 1]
+            if dtw[i - 1, j - 1] < best:
+                best = dtw[i - 1, j - 1]
+            dtw[i, j] = d[i, j] + best
+    return float(dtw[n - 1, n - 1]) / n
+
+
+def _frechet_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """이산 Fréchet 거리.
+
+    고정 x-그리드에 보간된 1D 곡선에서는 대각선 경로가 최적이므로
+    max|a[i]-b[i]| 와 동치 — O(n), numpy 연산.
+    """
+    return float(np.max(np.abs(a - b)))
+
+
+def _seg_morph_curves(vs: np.ndarray, ims: np.ndarray, dts: np.ndarray):
+    """세그먼트 → (V-t, V-Q, V-E) 3곡선을 [0,1] 정규화 그리드로 보간.
+
+    Returns: (vt, vq, ve) — 계산 불가 시 None
+    """
+    if len(vs) < 8:
+        return None, None, None
+
+    t_cum = np.cumsum(dts)
+    q_cum = np.cumsum(np.abs(ims) * dts) / 3600.0
+    e_cum = np.cumsum(vs * np.abs(ims) * dts) / 3600.0
+
+    grid = np.linspace(0.0, 1.0, _MORPH_GRID)
+
+    def _interp(x_raw, min_val=1e-9):
+        xf = float(x_raw[-1])
+        if xf < min_val:
+            return None
+        return np.interp(grid, x_raw / xf, vs)
+
+    vt = _interp(t_cum)
+    vq = _interp(q_cum, min_val=1e-4)
+    ve = _interp(e_cum, min_val=1e-7)
+    return vt, vq, ve
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,6 +711,9 @@ def _extract_one_cell(pkl_path_str: str) -> list:
     cell_id = meta.get("cell_id", path.stem)
     records = []
 
+    # 카테고리 D: BOL(최초 유효 사이클) 곡선 참조값 {seg: {"vt": arr, "vq": arr, "ve": arr}}
+    bol_curves: dict = {}
+
     for cyc, grp in df_all.groupby("cycle"):
         if int(cyc) == 0:
             continue
@@ -661,6 +781,19 @@ def _extract_one_cell(pkl_path_str: str) -> list:
                 row.update(_seg_stat(vs_s, ims_s, dts_s, qcs_s, seg))
                 row.update(_seg_diff(vs_s, ims_s, dts_s, qcs_s, seg))
                 row.update(_seg_lfp(vs_s, ims_s, dts_s, qcs_s, seg))
+                # D: 형태학적 거리
+                _mc = _seg_morph_curves(vs_s, ims_s, dts_s)
+                if seg not in bol_curves and all(c is not None for c in _mc):
+                    bol_curves[seg] = dict(zip(("vt", "vq", "ve"), _mc))
+                if seg in bol_curves:
+                    for _ct, _arr in zip(("vt", "vq", "ve"), _mc):
+                        _bol = bol_curves[seg].get(_ct)
+                        if _arr is not None and _bol is not None:
+                            try:
+                                row[f"morph_{_ct}_dtw_{seg}"]  = _dtw_distance(_arr, _bol)
+                                row[f"morph_{_ct}_frec_{seg}"] = _frechet_distance(_arr, _bol)
+                            except Exception:
+                                pass
 
         # ── 충전 HI ───────────────────────────────────────────────────────
         chg_grp = grp[grp["phase"] == "charge"].sort_values("time_s")
@@ -711,6 +844,19 @@ def _extract_one_cell(pkl_path_str: str) -> list:
                         row.update(_seg_stat(vs_c, ims_c, dts_c, qcs_c, seg))
                         row.update(_seg_diff(vs_c, ims_c, dts_c, qcs_c, seg))
                         row.update(_seg_lfp(vs_c, ims_c, dts_c, qcs_c, seg))
+                        # D: 형태학적 거리
+                        _mc_c = _seg_morph_curves(vs_c, ims_c, dts_c)
+                        if seg not in bol_curves and all(c is not None for c in _mc_c):
+                            bol_curves[seg] = dict(zip(("vt", "vq", "ve"), _mc_c))
+                        if seg in bol_curves:
+                            for _ct, _arr in zip(("vt", "vq", "ve"), _mc_c):
+                                _bol = bol_curves[seg].get(_ct)
+                                if _arr is not None and _bol is not None:
+                                    try:
+                                        row[f"morph_{_ct}_dtw_{seg}"]  = _dtw_distance(_arr, _bol)
+                                        row[f"morph_{_ct}_frec_{seg}"] = _frechet_distance(_arr, _bol)
+                                    except Exception:
+                                        pass
 
         records.append(row)
 

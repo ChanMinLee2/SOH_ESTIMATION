@@ -2,11 +2,12 @@
 hi_segment_viz.py
 
 출력 파일:
-  hi_segment_cuts.png          — V vs q_frac 세그먼트 경계 확인
-  hi_trend.png                 — Global HI 15종 열화 추이
-  hi_segment_trend_stat.png    — 6구간 × 15 통계 HI 열화 추이 (카테고리 A)
-  hi_segment_trend_diff.png    — 6구간 × 15 미분 HI 열화 추이 (카테고리 B)
-  hi_segment_trend_lfp.png     — 6구간 × 15 LFP HI 열화 추이 (카테고리 C)
+  hi_segment_cuts.png           — V vs q_frac 세그먼트 경계 확인
+  hi_trend.png                  — Global HI 15종 열화 추이
+  hi_segment_trend_stat.png     — 6구간 × 15 통계 HI 열화 추이 (카테고리 A)
+  hi_segment_trend_diff.png     — 6구간 × 15 미분 HI 열화 추이 (카테고리 B)
+  hi_segment_trend_lfp.png      — 6구간 × 15 LFP HI 열화 추이 (카테고리 C)
+  hi_segment_trend_morph.png    — 6구간 × 6 형태학적 거리 HI 열화 추이 (카테고리 D)
 
 사용:
   python hi_segment_viz.py
@@ -66,9 +67,10 @@ DS_COLOR = {"MIT": "#1f77b4", "HUST": "#d55e00"}
 
 # ── 카테고리 메타 ──────────────────────────────────────────────────────────────
 CATEGORIES = [
-    ("Stat", "카테고리 A: 통계 기반 (S01–S15)",    "hi_segment_trend_stat.png"),
-    ("Diff", "카테고리 B: 미분 기반 (D01–D15)",    "hi_segment_trend_diff.png"),
-    ("LFP",  "카테고리 C: LFP 특징 기반 (L01–L15)", "hi_segment_trend_lfp.png"),
+    ("Stat",  "카테고리 A: 통계 기반 (S01–S15)",          "hi_segment_trend_stat.png"),
+    ("Diff",  "카테고리 B: 미분 기반 (D01–D15)",          "hi_segment_trend_diff.png"),
+    ("LFP",   "카테고리 C: LFP 특징 기반 (L01–L15)",     "hi_segment_trend_lfp.png"),
+    ("Morph", "카테고리 D: 형태학적 거리 (M01–M06)",     "hi_segment_trend_morph.png"),
 ]
 
 
@@ -257,13 +259,16 @@ def plot_hi_trend(df: pd.DataFrame, out_path: Path):
 
 def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
                           category: str, cat_title: str):
-    """6구간 × 15 HI 그리드 — 한 카테고리(Stat/Diff/LFP).
+    """6구간 × N HI 그리드 — 한 카테고리(Stat/Diff/LFP/Morph).
 
-    category : "Stat" | "Diff" | "LFP"
+    category : "Stat" | "Diff" | "LFP" | "Morph"
     cat_title: 플롯 제목에 표시할 카테고리 이름
+    N        : 카테고리별 HI 수 (Stat/Diff/LFP=15, Morph=6)
     """
     df = df.copy()
     df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
+
+    is_morph = (category == "Morph")
 
     # 세그먼트 순서: ALL_SEGS 그대로 (dis_hi/mid/lo, chg_lo/mid/hi)
     seg_keys_list = [
@@ -271,19 +276,26 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
         for _, _, seg, _ in ALL_SEGS
     ]
     n_segs = len(seg_keys_list)        # 6
-    n_his  = len(seg_keys_list[0][1])  # 15
+    n_his  = len(seg_keys_list[0][1])  # Stat/Diff/LFP=15, Morph=6
 
     # 열 헤더: 첫 번째 세그먼트(dis_hi) 기준 HI 레이블
     col_labels = [HI_LABELS.get(k, k) for k in seg_keys_list[0][1]]
 
-    cell_w, cell_h = 3.2, 3.0
+    # Morph는 피처 수가 적으므로 셀 크기 확대
+    cell_w = 5.5 if is_morph else 3.2
+    cell_h = 3.8 if is_morph else 3.0
     fig, axes = plt.subplots(
         n_segs, n_his,
         figsize=(n_his * cell_w, n_segs * cell_h),
         squeeze=False,
     )
+
+    morph_note = (
+        "\n( y=0: BOL 기준곡선과 동일,  열화 진행 → 거리 증가 )"
+        if is_morph else ""
+    )
     fig.suptitle(
-        f"세그먼트별 HI 열화 추이 — {cat_title}\n"
+        f"세그먼트별 HI 열화 추이 — {cat_title}{morph_note}\n"
         "( 행=SoC 구간,  열=HI 종류,  x=Capacity Ah )\n"
         "■ 파란 계열=MIT   ■ 주황 계열=HUST",
         fontsize=13, fontweight="bold",
@@ -302,10 +314,16 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
             ax.set_facecolor(bg)
             _draw_trend_cell(ax, df, hi_key)
             ax.set_xlabel("Cap (Ah)", fontsize=8)
+            if is_morph:
+                # 거리값은 항상 ≥0 (BOL=0, 열화→증가)
+                ax.set_ylim(bottom=0)
+                ax.axhline(0, color="gray", lw=0.8, ls="--",
+                           alpha=0.55, zorder=0)
 
         # 행 레이블: 첫 번째 열 y축
+        y_unit = "dist." if is_morph else HI_LABELS.get(hi_keys[0], hi_keys[0])
         axes[ri, 0].set_ylabel(
-            f"{row_lbl}\n{HI_LABELS.get(hi_keys[0], hi_keys[0])}",
+            f"{row_lbl}\n{y_unit}",
             fontsize=9, labelpad=4,
         )
         # 나머지 열: HI 레이블만
@@ -334,7 +352,7 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="세그먼트 분할 시각화 + HI 열화 추이 (285-HI 전 카테고리)")
+        description="세그먼트 분할 시각화 + HI 열화 추이 (321-HI 전 카테고리 A–D)")
     parser.add_argument("--workers",  type=int, default=4,
                         help="HI 추출 병렬 워커 수 (기본: 4)")
     parser.add_argument("--n-cycles", type=int, default=4,
@@ -364,7 +382,7 @@ def main():
     print("\n=== Global HI 열화 추이 (15종) ===")
     plot_hi_trend(df, hi_plot_dir / "hi_trend.png")
 
-    # ── Figure 3-A/B/C: 카테고리별 세그먼트 HI 열화 추이 ─────────────────
+    # ── Figure 3-A/B/C/D: 카테고리별 세그먼트 HI 열화 추이 ───────────────
     for cat, cat_title, fname in CATEGORIES:
         print(f"\n=== 세그먼트 HI 추이 — {cat_title} ===")
         plot_segment_hi_trend(df, hi_plot_dir / fname, cat, cat_title)

@@ -86,7 +86,7 @@
   │                            corr_matrix_<ds>.png          │
   │                            top7_cross_<ds>.png           │
   │                                                          │
-  │  HI 285종  (Global 15 + Segment 6구간×45)                │
+  │  HI 321종  (Global 15 + Segment 6구간×51)                │
   │  설계 상세: docs/NEW_HIS.md 참조                          │
   │                                                          │
   │  Global (15):                                            │
@@ -95,7 +95,7 @@
   │    dva_valley_q/depth, ce, cv_q_frac, cv_time_frac,      │
   │    chg_ica_peak1_h                                       │
   │                                                          │
-  │  Segment (6구간 × 45):                                   │
+  │  Segment (6구간 × 51):                                   │
   │    세그먼트: dis_hi / dis_mid / dis_lo                   │
   │             chg_lo / chg_mid / chg_hi  (q_frac 기준)    │
   │    카테고리 A — 통계(15): stat_{k}_{seg}                 │
@@ -111,6 +111,10 @@
   │      v_sag_mid, v_flatness, delta_v_rms, ocv_slope,     │
   │      knee_v/q_frac, v_concavity, phase_entry_dvdq,      │
   │      v_q_pearson, ica_peak_cnt                          │
+  │    카테고리 D — 형태학적 거리(6): morph_{k}_{seg}        │
+  │      vt_dtw,  vq_dtw,  ve_dtw   (V-t/V-Q/V-E DTW)      │
+  │      vt_frec, vq_frec, ve_frec  (V-t/V-Q/V-E Fréchet)  │
+  │      BOL(사이클1) 기준 곡선 대비 누적·최대 형상 거리     │
   └───────────────────────────────────────────────────────────┘
              │
              ▼
@@ -129,9 +133,9 @@
 | `2_preprocess/preprocess.py` | 2 | 7단계 이상 사이클·행 제거 (빈 사이클, time 보정, 0전류 rest, 시간 단절, Rolling Median 2-pass, vend_min, 형상 편차) |
 | `2_preprocess/plot_cleaning_report.py` | 2 | cleaning_report.csv 읽어 필터별 시각화 플롯 생성 |
 | `3_integrity/check_integrity.py` | 3 | unified PKL 무결성 검사 → 이상 목록 CSV 저장 |
-| `4_hi_analysis/hi_correlation.py` | 4 | HI 285종 추출 및 풀링 Spearman 상관 시각화 (Global 15 + Segment 6구간×45, temperature 제거) |
-| `4_hi_analysis/hi_segment_viz.py` | 4 | 세그먼트 분할 확인 + HI 열화 추이 시각화 |
-| `4_hi_analysis/seg_corr_analysis.py` | 4 | 세그먼트별 within-cell Spearman 상관계수 랭킹·히트맵·Top-7 비교 |
+| `4_hi_analysis/hi_correlation.py` | 4 | HI 321종 추출 및 풀링 Spearman 상관 시각화 (Global 15 + Segment 6구간×51, 카테고리 A–D) |
+| `4_hi_analysis/hi_segment_viz.py` | 4 | 세그먼트 분할 확인 + 카테고리 A–D HI 열화 추이 시각화 (321-HI) |
+| `4_hi_analysis/seg_corr_analysis.py` | 4 | 세그먼트별 within-cell Spearman 상관계수 랭킹·히트맵·Top-5 비교 + 통합 feature 랭킹 (4카테고리) |
 
 **분석 도구** (파이프라인 외부):
 
@@ -337,6 +341,7 @@ python 4_hi_analysis/hi_segment_viz.py --n-cycles 6
 - `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_stat.png` — 6구간 × 15 통계 HI 열화 추이 (카테고리 A)
 - `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_diff.png` — 6구간 × 15 미분 HI 열화 추이 (카테고리 B)
 - `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_lfp.png` — 6구간 × 15 LFP 특징 HI 열화 추이 (카테고리 C)
+- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_morph.png` — 6구간 × 6 형태학적 거리 HI 열화 추이 (카테고리 D, y=0이 BOL 기준)
 
 #### 4-C. 세그먼트별 상관분석 (`4_hi_analysis/seg_corr_analysis.py`)
 
@@ -363,13 +368,17 @@ python 4_hi_analysis/seg_corr_analysis.py --top-n 7
 ```
 
 출력 (`4_hi_analysis/seg_corr/<MMDD>/`):
-- `corr_rank_stat_<ds>.png` — 카테고리 A: 6구간 × 15 통계 HI |ρ| 랭킹
-- `corr_rank_diff_<ds>.png` — 카테고리 B: 6구간 × 15 미분 HI
-- `corr_rank_lfp_<ds>.png`  — 카테고리 C: 6구간 × 15 LFP HI
+- `corr_rank_stat_<ds>.png`   — 카테고리 A: 6구간 × 15 통계 HI |ρ| 랭킹
+- `corr_rank_diff_<ds>.png`   — 카테고리 B: 6구간 × 15 미분 HI
+- `corr_rank_lfp_<ds>.png`    — 카테고리 C: 6구간 × 15 LFP HI
+- `corr_rank_morph_<ds>.png`  — 카테고리 D: 6구간 × 6 형태학적 거리 HI
 - `corr_matrix_stat_<ds>.png` — 카테고리 A: 6구간 × 15×15 feature 상관행렬
 - `corr_matrix_diff_<ds>.png` — 카테고리 B
 - `corr_matrix_lfp_<ds>.png`  — 카테고리 C
-- `top_cross_<ds>.png` — 3카테고리 × 6구간 Top-5 HI 비교 (전체 요약)
+- `corr_matrix_morph_<ds>.png`— 카테고리 D
+- `top_cross_<ds>.png`        — 4카테고리 × 6구간 Top-5 HI 비교 (전체 요약, 에러바=셀간 std)
+- `feature_rank_battery_<ds>.png` — 전체 카테고리 통합 feature 랭킹 (Σ|ρ| 기준, 배터리별)
+- `feature_rank_seg.png`          — 6구간별 feature 랭킹 (모든 배터리 통합, 공통 y축 순서)
 
 ---
 
@@ -507,11 +516,14 @@ LFP_SOH_prediction/
         hi_segment_trend_stat.png    6구간 × 15 통계 HI (카테고리 A)
         hi_segment_trend_diff.png    6구간 × 15 미분 HI (카테고리 B)
         hi_segment_trend_lfp.png     6구간 × 15 LFP HI (카테고리 C)
+        hi_segment_trend_morph.png   6구간 × 6 형태학적 거리 HI (카테고리 D)
     seg_corr/
-      <MMDD>/                           실행 날짜별 서브폴더
-        corr_rank_{stat|diff|lfp}_*.png  카테고리별 6구간 |ρ| 랭킹
-        corr_matrix_{stat|diff|lfp}_*.png 카테고리별 6구간 feature 상관행렬
-        top_cross_*.png                   3카테고리 × 6구간 Top-5 요약
+      <MMDD>/                                실행 날짜별 서브폴더
+        corr_rank_{stat|diff|lfp|morph}_*.png  카테고리별 6구간 |ρ| 랭킹
+        corr_matrix_{stat|diff|lfp|morph}_*.png 카테고리별 6구간 feature 상관행렬
+        top_cross_*.png                          4카테고리 × 6구간 Top-5 요약
+        feature_rank_battery_*.png               배터리별 통합 feature 랭킹 (Σ|ρ|)
+        feature_rank_seg.png                     6구간별 통합 feature 랭킹 (Σ|ρ|)
     cell/
       cell_cycles_*.png            셀별 전체 사이클 시각화
     segment/
@@ -521,7 +533,7 @@ LFP_SOH_prediction/
     HUST/
   docs/
     PIPELINE.md
-    NEW_HIS.md                       285-HI 설계 상세 (LFP 도메인 전문가 관점, 온도 피처 제외)
+    NEW_HIS.md                       321-HI 설계 상세 (카테고리 A–D, LFP 도메인 전문가 관점)
     HI_DESCRIPTION.md
     DATASET_ANOMALIES.md           파이프라인 단계별 이상치 처리 정리
     correlation_comparison.md      preprocess.ipynb vs 현재 / 풀링 vs within-cell 비교

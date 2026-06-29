@@ -53,6 +53,7 @@ from hi_correlation import (
     STAT_KEYS,
     DIFF_KEYS,
     LFP_KEYS,
+    MORPH_KEYS,
 )
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
@@ -71,9 +72,10 @@ plt.rcParams["axes.unicode_minus"] = False
 
 # ── 카테고리 색상 ─────────────────────────────────────────────────────────────
 CAT_COLORS = {
-    "Stat": "#2980b9",
-    "Diff": "#e67e22",
-    "LFP":  "#27ae60",
+    "Stat":  "#2980b9",
+    "Diff":  "#e67e22",
+    "LFP":   "#27ae60",
+    "Morph": "#8e44ad",
 }
 
 # ── 세그먼트 색상 (방전=파랑 계열, 충전=주황 계열) ──────────────────────────
@@ -96,9 +98,10 @@ SEG_LABELS = {
 
 # ── 카테고리 메타 ─────────────────────────────────────────────────────────────
 CATEGORIES = [
-    ("Stat", "카테고리 A: 통계 기반",      "corr_rank_stat",   "corr_matrix_stat",   STAT_KEYS),
-    ("Diff", "카테고리 B: 미분 기반",      "corr_rank_diff",   "corr_matrix_diff",   DIFF_KEYS),
-    ("LFP",  "카테고리 C: LFP 특징 기반", "corr_rank_lfp",    "corr_matrix_lfp",    LFP_KEYS),
+    ("Stat",  "카테고리 A: 통계 기반",        "corr_rank_stat",   "corr_matrix_stat",   STAT_KEYS),
+    ("Diff",  "카테고리 B: 미분 기반",        "corr_rank_diff",   "corr_matrix_diff",   DIFF_KEYS),
+    ("LFP",   "카테고리 C: LFP 특징 기반",   "corr_rank_lfp",    "corr_matrix_lfp",    LFP_KEYS),
+    ("Morph", "카테고리 D: 형태학적 거리",   "corr_rank_morph",  "corr_matrix_morph",  MORPH_KEYS),
 ]
 
 # tab20 팔레트 (15개 feature 색 고정)
@@ -170,8 +173,8 @@ def _concept_from_key(feat_key: str) -> str:
 
 
 def _cat_from_concept(concept: str) -> str:
-    """stat_v_mean → Stat"""
-    return {"stat": "Stat", "diff": "Diff", "lfp": "LFP"}.get(
+    """stat_v_mean → Stat,  morph_vt_dtw → Morph"""
+    return {"stat": "Stat", "diff": "Diff", "lfp": "LFP", "morph": "Morph"}.get(
         concept.split("_")[0], "Stat"
     )
 
@@ -217,8 +220,15 @@ def plot_corr_rank(seg_summaries: dict, out_path: Path,
     n_cols = 3
     n_rows = (n_segs + n_cols - 1) // n_cols
 
+    # 피처 수에 비례해 행 높이 결정 (Stat/Diff/LFP=15→~9", Morph=6→~4")
+    n_his_max = max(
+        (len(summ.dropna(subset=["mean"])) for summ, _ in seg_summaries.values()),
+        default=15,
+    )
+    fig_h_row = max(4.0, min(10.0, n_his_max * 0.58))
+
     fig, axes = plt.subplots(n_rows, n_cols,
-                              figsize=(n_cols * 7, n_rows * 9),
+                              figsize=(n_cols * 7, n_rows * fig_h_row),
                               constrained_layout=True)
     ds_lbl = f"[{dataset_name}] " if dataset_name else ""
     fig.suptitle(
@@ -337,11 +347,11 @@ def plot_corr_matrix(seg_matrices: dict, out_path: Path,
 
 def plot_top_cross(all_summaries: dict, out_path: Path,
                    top_n: int = 5, dataset_name: str = ""):
-    """3 × 6 그리드 — rows=카테고리(Stat/Diff/LFP), cols=세그먼트.
+    """4 × 6 그리드 — rows=카테고리(Stat/Diff/LFP/Morph), cols=세그먼트.
 
     all_summaries: {cat: {seg: (summary_df, hi_keys)}}
     """
-    cats     = list(all_summaries.keys())      # ["Stat","Diff","LFP"]
+    cats     = list(all_summaries.keys())      # ["Stat","Diff","LFP","Morph"]
     segs     = [seg for _, _, seg, _ in ALL_SEGS]  # 6 segments
     n_cats   = len(cats)
     n_segs   = len(segs)
@@ -425,7 +435,7 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
                 ax.set_ylabel(f"{cat_title_short}\n|ρ|", fontsize=8.5)
 
     # 카테고리별 번호 범례 — idx. 이름 형식
-    _prefix = {"Stat": "stat", "Diff": "diff", "LFP": "lfp"}
+    _prefix = {"Stat": "stat", "Diff": "diff", "LFP": "lfp", "Morph": "morph"}
     legend_handles = []
     for cat, _, _, _, base_keys in CATEGORIES:
         legend_handles.append(Patch(color="white", label=f"── {cat} ──"))
@@ -435,13 +445,14 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
             lbl = HI_LABELS.get(f"{pfx}_{bk}_dis_hi", bk)
             legend_handles.append(Patch(facecolor=col, label=f"{idx:2d}. {lbl}"))
 
+    # 4카테고리(Stat15+Diff15+LFP15+Morph6+구분자4=55항) → ncol=16 기준 ~4행
     fig.legend(
         handles=legend_handles,
         loc="lower center",
         ncol=16,
         fontsize=7.5,
         framealpha=0.88,
-        bbox_to_anchor=(0.5, -0.04),
+        bbox_to_anchor=(0.5, -0.07),
     )
 
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
