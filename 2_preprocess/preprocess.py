@@ -1,7 +1,7 @@
-"""
+﻿"""
 preprocess.py
 
-MIT / HUST data_unified PKL 에 이상 사이클·행 제거를 적용.
+MIT / HUST _1_data_unified PKL 에 이상 사이클·행 제거를 적용.
 1_convert/convert_unified.py 변환 이후, 4_hi_analysis/ HI 추출 전에 실행.
 
 필터 적용 순서:
@@ -21,8 +21,8 @@ MIT / HUST data_unified PKL 에 이상 사이클·행 제거를 적용.
   ※ DELETE_CELLS (완전 불량 셀 제외) 는 1_convert/convert_unified.py 에서 유지.
      셀 단위 제외이므로 이 스크립트에서는 다루지 않음.
 
-입력:  data_unified/MIT/*.pkl, data_unified/HUST/*.pkl
-출력:  data_postprocess/MIT/*.pkl, data_postprocess/HUST/*.pkl
+입력:  _1_data_unified/MIT/*.pkl, _1_data_unified/HUST/*.pkl
+출력:  _2_data_clean/MIT/*.pkl, _2_data_clean/HUST/*.pkl
        2_preprocess/outputs/cleaning_report.csv
 
 사용:
@@ -50,7 +50,7 @@ from tqdm.auto import tqdm
 PROJECT_ROOT     = Path(__file__).resolve().parent.parent
 _OUTPUTS_ROOT    = Path(__file__).resolve().parent / "outputs"
 OUTPUT_DIR       = _OUTPUTS_ROOT / date.today().strftime("%m%d")
-POSTPROCESS_ROOT = PROJECT_ROOT / "data_postprocess"
+POSTPROCESS_ROOT = PROJECT_ROOT / "_2_data_clean"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,11 +189,6 @@ def _remove_dt_gap_cycles(df: pd.DataFrame,
     n_chg_rows = int(chg_mask.sum())
     if n_chg_rows > 0:
         df_clean = df_clean[~chg_mask].copy()
-
-    # CC 전환 갭: chg_gap_seg 플래그 컬럼 기록 (hi_correlation 에서 읽음)
-    df_clean["chg_gap_seg"] = False
-    if chg_bad_seg:
-        df_clean.loc[df_clean["cycle"].isin(chg_bad_seg), "chg_gap_seg"] = True
 
     df_clean = df_clean.reset_index(drop=True)
     return (df_clean,
@@ -374,6 +369,40 @@ def _remove_shape_outlier_cycles(df: pd.DataFrame,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 출력 스키마 변환
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_clean_schema(df: pd.DataFrame, cell_id: str) -> pd.DataFrame:
+    """7단계 필터 완료 후 _2_data_clean 출력 스키마로 변환.
+
+    - phase, chg_gap_seg 제거
+    - cell_id, segment_id 추가
+    - segment_id: 사이클 내 phase 연속 블록 번호(0-indexed), 사이클마다 초기화
+    - 출력 컬럼: [cell_id, cycle, segment_id, time_s, voltage_V, current_A, capacity_Ah]
+    """
+    df = df.sort_values(["cycle", "time_s"]).reset_index(drop=True)
+
+    # phase 또는 cycle 경계에서 segment 전환
+    change = (
+        df["phase"].ne(df["phase"].shift()) | df["cycle"].ne(df["cycle"].shift())
+    )
+    change.iloc[0] = True
+    global_seg = change.cumsum()
+
+    # 사이클마다 0 기준으로 리베이스
+    df["segment_id"] = (
+        global_seg - global_seg.groupby(df["cycle"]).transform("first")
+    ).astype(int)
+
+    df["cell_id"] = cell_id
+
+    drop_cols = [c for c in ["phase", "chg_gap_seg"] if c in df.columns]
+    df = df.drop(columns=drop_cols)
+
+    return df[["cell_id", "cycle", "segment_id", "time_s", "voltage_V", "current_A", "capacity_Ah"]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 워커
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -423,6 +452,9 @@ def _preprocess_worker(args) -> tuple:
             meta["n_cycles"]          = n_after
             meta["n_outliers_removed"] = meta.get("n_outliers_removed", 0) + n_cycles_removed
 
+        # 출력 스키마 변환: phase/chg_gap_seg 제거, cell_id/segment_id 추가
+        df = _to_clean_schema(df, _cell_id)
+
         dst.parent.mkdir(parents=True, exist_ok=True)
         with open(dst, "wb") as f:
             pickle.dump({"meta": meta, "cycles": df}, f)
@@ -443,13 +475,13 @@ def _preprocess_worker(args) -> tuple:
             "n_removed_vend":           n_vend,
             "n_removed_shape":          n_shape,
             "n_removed":                n_cycles_removed,
-            "removed_empty_cycles":     sorted(empty_cycles),
-            "removed_dt_dis_cycles":    sorted(dt_dis_cycles),
-            "dt_chg_cycles_cleaned":    sorted(dt_chg_cycles),
-            "dt_chg_seg_cycles":        sorted(dt_chg_seg_cycles),
-            "removed_rolling_cycles":   sorted(rolling_cycles),
-            "removed_vend_cycles":      sorted(vend_cycles),
-            "removed_shape_cycles":     sorted(shape_cycles),
+            "removed_empty_cycles":     [int(c) for c in sorted(empty_cycles)],
+            "removed_dt_dis_cycles":    [int(c) for c in sorted(dt_dis_cycles)],
+            "dt_chg_cycles_cleaned":    [int(c) for c in sorted(dt_chg_cycles)],
+            "dt_chg_seg_cycles":        [int(c) for c in sorted(dt_chg_seg_cycles)],
+            "removed_rolling_cycles":   [int(c) for c in sorted(rolling_cycles)],
+            "removed_vend_cycles":      [int(c) for c in sorted(vend_cycles)],
+            "removed_shape_cycles":     [int(c) for c in sorted(shape_cycles)],
         })
     except Exception:
         return ("err", f"{src.stem}:\n{traceback.format_exc()}")
@@ -575,7 +607,7 @@ def main():
     before_caps: dict = {}
 
     if args.dataset in ("mit", "all"):
-        mit_src = PROJECT_ROOT / "data_unified" / "MIT"
+        mit_src = PROJECT_ROOT / "_1_data_unified" / "MIT"
         mit_dst = POSTPROCESS_ROOT / "MIT"
         if not mit_src.exists():
             print(f"\n[SKIP] MIT 폴더 없음: {mit_src}")
@@ -589,7 +621,7 @@ def main():
                             ss, sw, sg, args.workers))
 
     if args.dataset in ("hust", "all"):
-        hust_src = PROJECT_ROOT / "data_unified" / "HUST"
+        hust_src = PROJECT_ROOT / "_1_data_unified" / "HUST"
         hust_dst = POSTPROCESS_ROOT / "HUST"
         if not hust_src.exists():
             print(f"\n[SKIP] HUST 폴더 없음: {hust_src}")
@@ -759,13 +791,18 @@ def _write_cleaning_summary(df_report: pd.DataFrame,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cap_series(pkl_path: Path):
-    """PKL에서 방전 용량 시리즈 (cycles, caps) 반환."""
+    """PKL에서 방전 용량 시리즈 (cycles, caps) 반환.
+
+    _1_data_unified (phase 컬럼 있음)와 _2_data_clean (phase 없음) 모두 지원.
+    """
     if not pkl_path.exists():
         return np.array([]), np.array([])
     with open(pkl_path, "rb") as f:
         raw = pickle.load(f)
-    dis = raw["cycles"][raw["cycles"]["phase"] == "discharge"]
-    cap = dis.groupby("cycle")["capacity_Ah"].first().dropna().sort_index()
+    df = raw["cycles"] if isinstance(raw, dict) else raw
+    if "phase" in df.columns:
+        df = df[df["phase"] == "discharge"]
+    cap = df.groupby("cycle")["capacity_Ah"].max().dropna().sort_index()
     return cap.index.to_numpy(), cap.values
 
 

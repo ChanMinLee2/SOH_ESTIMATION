@@ -1,4 +1,4 @@
-# LFP SOH Prediction — 데이터 파이프라인
+﻿# LFP SOH Prediction — 데이터 파이프라인
 
 원본 데이터(.mat / .pkl)를 모델 학습까지 처리하는 전체 흐름.
 
@@ -8,8 +8,8 @@
 
 ```
 원본 데이터
-  ├── data_raw/FastCharge/*.mat          MIT (FastCharge, HDF5 포맷)
-  └── data_raw/data_raw/our_data/our_data/*.pkl   HUST (our_data 원본)
+  ├── _0_data_raw/FastCharge/*.mat          MIT (FastCharge, HDF5 포맷)
+  └── _0_data_raw/_0_data_raw/our_data/our_data/*.pkl   HUST (our_data 원본)
              │
              ▼
   ┌─────────────────────────────────────────────────┐
@@ -20,18 +20,18 @@
              │
              ├──────────────────────────────────────────┐
              ▼                                          ▼
-  data_raw/                                  data_unified/
+  _0_data_raw/                                  _1_data_unified/
     ├── MIT/  b1c0.pkl, b1c0.csv, ...          ├── MIT/  b1c0.pkl, b1c0.csv, ...
     │         (이상치 제거 없음,                │         (필터 적용, 123셀)
     │          DELETE_CELLS 포함)               └── HUST/ 1-1.pkl,  1-1.csv, ...
     └── HUST/ 1-1.pkl,  1-1.csv, ...                     (필터 적용,  77셀)
               (이상치 제거 없음)
-    ★ data_raw/FastCharge/ (MIT 원본 .mat) 와 공존
+    ★ _0_data_raw/FastCharge/ (MIT 원본 .mat) 와 공존
 
   PKL 스키마: {"meta": dict, "cycles": DataFrame}
-  data_raw cycles 컬럼:     cycle, time_s, voltage_V, current_A,
+  _0_data_raw cycles 컬럼:     cycle, time_s, voltage_V, current_A,
                              temperature_C, capacity_Ah, phase
-  data_unified cycles 컬럼: cycle, time_s, voltage_V, current_A,
+  _1_data_unified cycles 컬럼: cycle, time_s, voltage_V, current_A,
                              capacity_Ah, phase  (temperature_C 제외)
              │
              ▼
@@ -53,7 +53,7 @@
   │              RMSE·max|ΔV|의 MAD robust z > σ(기본5.0) 제거 │
   │              + KNOWN_SHAPE_ANOMALIES 수동 지정 사이클 추가   │
   │                MIT b1c23 charge #1003, b1c36 discharge #73  │
-  │    data_unified 원본 유지 → data_postprocess에 저장          │
+  │    _1_data_unified 원본 유지 → _2_data_clean에 저장          │
   │    PKL: 전체 셀 / CSV: 제거 발생 셀만                       │
   │    → outputs/cleaning_report.csv (필터별 통계 + 사이클 번호) │
   │    → outputs/<MMDD>/*.png  (plot_cleaning_report.py 시각화) │
@@ -61,7 +61,7 @@
   └──────────────────────────────────────────────────────────────┘
              │
              ▼
-  data_postprocess/
+  _2_data_clean/
     ├── MIT/  b1c0.pkl, [b1c0.csv], ...   (전처리 적용)
     └── HUST/ 1-1.pkl,  [1-1.csv],  ...   (CSV는 제거 셀만)
              │
@@ -159,11 +159,11 @@
 | `--dataset` | `all` | 변환할 데이터셋: `mit` / `hust` / `all` |
 | `--workers` | `3` | 병렬 프로세스 수. CPU 코어 수 이하로 설정 권장 |
 | `--cell` | (없음) | HUST 단일 셀만 변환 (예: `1-1`). MIT는 항상 전체 변환 |
-| `--output-root` | `data_unified/` | 출력 디렉토리 (변경 불필요) |
-| `--no-cache` | `False` | `data_raw/` 캐시 무시 — 원본 MAT/PKL부터 재파싱 |
+| `--output-root` | `_1_data_unified/` | 출력 디렉토리 (변경 불필요) |
+| `--no-cache` | `False` | `_0_data_raw/` 캐시 무시 — 원본 MAT/PKL부터 재파싱 |
 
 ```powershell
-# 권장 — MIT + HUST 전체 변환 (data_raw/ 캐시 있으면 자동 사용)
+# 권장 — MIT + HUST 전체 변환 (_0_data_raw/ 캐시 있으면 자동 사용)
 python 1_convert/convert_unified.py --dataset all --workers 3
 
 # 캐시 무시하고 원본부터 재파싱
@@ -181,8 +181,8 @@ python 1_convert/convert_unified.py --dataset hust --cell 1-1
 ```
 
 출력:
-- `data_raw/MIT/*.pkl` / `data_raw/HUST/*.pkl` — 원본 파싱 결과 (필터 없음, 캐시로 재사용)
-- `data_unified/MIT/*.pkl` / `data_unified/HUST/*.pkl` — 필터 적용 결과 (셀당 .csv도 생성)
+- `_0_data_raw/MIT/*.pkl` / `_0_data_raw/HUST/*.pkl` — 원본 파싱 결과 (필터 없음, 캐시로 재사용)
+- `_1_data_unified/MIT/*.pkl` / `_1_data_unified/HUST/*.pkl` — 필터 적용 결과 (셀당 .csv도 생성)
 
 ---
 
@@ -231,12 +231,12 @@ python 2_preprocess/preprocess.py --dis-gap-s 1200 --dis-gap-factor 100
 ```
 
 출력:
-- `data_postprocess/MIT/*.pkl` / `data_postprocess/HUST/*.pkl` — 전체 셀 저장
-- `data_postprocess/MIT/*.csv` / `data_postprocess/HUST/*.csv` — 제거 발생 셀만
+- `_2_data_clean/MIT/*.pkl` / `_2_data_clean/HUST/*.pkl` — 전체 셀 저장
+- `_2_data_clean/MIT/*.csv` / `_2_data_clean/HUST/*.csv` — 제거 발생 셀만
 - `2_preprocess/outputs/cleaning_report.csv` — 셀별 제거 사이클 수 + 번호 리포트
 
 > **주의**: Step 1 재실행 후에는 반드시 Step 2도 재실행해야 필터가 적용됨.  
-> `data_unified/` 원본은 변경되지 않음 — 후속 분석은 `data_postprocess/` 사용.
+> `_1_data_unified/` 원본은 변경되지 않음 — 후속 분석은 `_2_data_clean/` 사용.
 
 #### 2-B. 전처리 리포트 시각화 (`2_preprocess/plot_cleaning_report.py`)
 
@@ -272,7 +272,7 @@ python 3_integrity/check_integrity.py --workers 8
 검사 항목:
 
 필수 컬럼 기준: `cycle, time_s, voltage_V, current_A, capacity_Ah, phase`  
-(temperature_C는 data_raw에만 저장; data_unified 검사 대상 아님)
+(temperature_C는 _0_data_raw에만 저장; _1_data_unified 검사 대상 아님)
 
 | 수준 | criterion | 설명 |
 |------|-----------|------|
@@ -317,7 +317,7 @@ python 4_hi_analysis/hi_correlation.py --force
 출력:
 - `4_hi_analysis/hi_plot/<MMDD>/hi_correlation.png` — HI×용량 풀링 Spearman ρ 히트맵 + 산점도
 - `4_hi_analysis/hi_features.pkl` — 전체 HI 추출 결과 캐시 (4-B·4-C와 공유)
-- `data_HI/MIT/{cell_id}.pkl` / `data_HI/HUST/{cell_id}.pkl` — 셀별 HI 특성 (첫 실행 또는 `--force` 시)
+- `_4_data_hi/MIT/{cell_id}.pkl` / `_4_data_hi/HUST/{cell_id}.pkl` — 셀별 HI 특성 (첫 실행 또는 `--force` 시)
 
 #### 4-B. 세그먼트 시각화 (`4_hi_analysis/hi_segment_viz.py`)
 
@@ -475,15 +475,15 @@ python 4_hi_analysis/seg_corr_analysis.py          # 캐시에서 로드
 
 ```
 LFP_SOH_prediction/
-  data_raw/
+  _0_data_raw/
     FastCharge/                    MIT 원본 .mat 파일 (입력)
     our_data/our_data/             HUST 원본 .pkl 파일 (입력)
     MIT/                           파싱 원본 .pkl / .csv  (이상치 제거 없음, DELETE_CELLS 포함)
     HUST/                          파싱 원본 .pkl / .csv  (이상치 제거 없음)
-  data_unified/
+  _1_data_unified/
     MIT/                           변환된 셀별 .pkl / .csv  (필터 적용, Step 1 출력)
     HUST/                          변환된 셀별 .pkl / .csv  (필터 적용, Step 1 출력)
-  data_postprocess/
+  _2_data_clean/
     MIT/                           전처리된 셀별 .pkl + .csv (제거 셀만)
     HUST/                          전처리된 셀별 .pkl + .csv (제거 셀만)
   1_convert/
@@ -528,7 +528,7 @@ LFP_SOH_prediction/
       cell_cycles_*.png            셀별 전체 사이클 시각화
     segment/
       segment_*.png                단일 사이클 세그먼트 시각화
-  data_HI/
+  _4_data_hi/
     MIT/                           셀별 HI 특성 .pkl (hi_correlation.py 출력)
     HUST/
   docs/

@@ -1,23 +1,22 @@
 """
 check_integrity.py
 
-data_unified/MIT/, data_unified/HUST/ 전체 pkl 무결성 검사.
+_2_data_clean/MIT/, _2_data_clean/HUST/ 전체 pkl 무결성 검사.
 
 검사 항목:
   [셀 수준]
-    1. 파일 수 (MIT=123, HUST=77)
-    2. pkl 로드 가능 여부
-    3. 스키마 컬럼 존재
-    4. phase 값이 charge/discharge/rest 만 존재하는지
-    5. 전류 방향 (MIT: 방전=양수 / HUST: 방전=음수)
-    6. capacity_Ah 유효성 (방전 사이클)
-    7. NaN 비율
-    8. meta.n_cycles vs 실제 cycle 수 일치
+    1. pkl 로드 가능 여부
+    2. 스키마 컬럼 존재
+       [cell_id, cycle, segment_id, time_s, voltage_V, current_A, capacity_Ah]
+    3. cell_id 컬럼 값이 파일명과 일치
+    4. segment_id 유효성 (사이클마다 0에서 시작, 단조 비감소)
+    5. capacity_Ah 유효성 (사이클별 최댓값 기준)
+    6. NaN 비율
+    7. meta.n_cycles vs 실제 cycle 수 일치
 
   [사이클 수준]
-    9.  전압 범위 이상 (V < 1.5V 또는 V > 4.5V)
-    10. rest 행 비율 과다 (>80% — 오염/비정상 프로토콜)
-    11. time_s 단조 증가 위반
+    8.  전압 범위 이상 (V < 1.5V 또는 V > 4.5V)
+    9.  time_s 단조 증가 위반
 
 출력:
   3_integrity/outputs/integrity_report.csv   — 셀 요약 통계
@@ -34,21 +33,14 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MIT_DIR  = PROJECT_ROOT / "data_unified" / "MIT"
-HUST_DIR = PROJECT_ROOT / "data_unified" / "HUST"
+MIT_DIR  = PROJECT_ROOT / "_2_data_clean" / "MIT"
+HUST_DIR = PROJECT_ROOT / "_2_data_clean" / "HUST"
 OUT_DIR  = Path(__file__).resolve().parent / "outputs"
 
-EXPECTED_COLS = {"cycle", "time_s", "voltage_V", "current_A",
-                 "capacity_Ah", "phase"}
-# temperature_C는 data_raw에만 저장; data_unified는 온도 제외
-VALID_PHASES  = {"charge", "discharge", "rest"}
-VALID_STAGES  = {"D0", "D1", "D2", "D3", ""}
+EXPECTED_COLS = {"cell_id", "cycle", "segment_id", "time_s",
+                 "voltage_V", "current_A", "capacity_Ah"}
 
-MIT_DATASET_LABELS = {"MIT", "MIT_MAT"}
-
-V_MIN, V_MAX     = 1.5, 4.5
-CAP_MIN          = 0.1
-REST_RATIO_WARN  = 0.80   # 사이클 내 rest 행 비율 > 이 값이면 경고
+V_MIN, V_MAX = 1.5, 4.5
 
 
 # ── 셀 단위 검사 ──────────────────────────────────────────────────────────────
@@ -75,8 +67,8 @@ def check_cell(pkl_path: Path) -> tuple:
         _flag("ERROR", "load_fail", str(e))
         return {}, issues
 
-    meta    = raw.get("meta", {})
-    df      = raw.get("cycles")
+    meta    = raw.get("meta", {}) if isinstance(raw, dict) else {}
+    df      = raw.get("cycles") if isinstance(raw, dict) else raw
     dataset = meta.get("dataset", "")
 
     if df is None or not isinstance(df, pd.DataFrame):
@@ -88,45 +80,37 @@ def check_cell(pkl_path: Path) -> tuple:
     if missing_cols:
         _flag("ERROR", "missing_cols", f"컬럼 누락: {sorted(missing_cols)}", dataset=dataset)
 
-    # ── 2. phase 값 ───────────────────────────────────────────────────────────
-    bad_phases = set(df["phase"].unique()) - VALID_PHASES
-    if bad_phases:
-        _flag("ERROR", "invalid_phase", f"비정상 phase: {bad_phases}", dataset=dataset)
+    # ── 2. cell_id 일치 ───────────────────────────────────────────────────────
+    if "cell_id" in df.columns:
+        unique_cells = df["cell_id"].unique()
+        if len(unique_cells) != 1 or str(unique_cells[0]) != cell_id:
+            _flag("ERROR", "cell_id_mismatch",
+                  f"df.cell_id={list(unique_cells)} ≠ 파일명={cell_id}", dataset=dataset)
 
-    phase_counts = df["phase"].value_counts().to_dict()
-    n_charge    = phase_counts.get("charge", 0)
-    n_discharge = phase_counts.get("discharge", 0)
-    n_rest      = phase_counts.get("rest", 0)
+    # ── 3. segment_id 유효성 ─────────────────────────────────────────────────
+    if "segment_id" in df.columns and "cycle" in df.columns:
+        seg_min_per_cycle = df.groupby("cycle")["segment_id"].min()
+        bad_start = int((seg_min_per_cycle != 0).sum())
+        if bad_start > 0:
+            _flag("ERROR", "segment_id_start",
+                  f"segment_id가 0에서 시작하지 않는 사이클: {bad_start}개", dataset=dataset)
 
-    if n_discharge == 0:
-        _flag("WARN", "no_discharge", "discharge 행 없음", dataset=dataset)
-    if n_charge == 0:
-        _flag("WARN", "no_charge", "charge 행 없음", dataset=dataset)
-
-    # ── 3. 전류 방향 ──────────────────────────────────────────────────────────
-    dis_df = df[df["phase"] == "discharge"]
-    if dataset in MIT_DATASET_LABELS and len(dis_df) > 0:
-        mean_i = dis_df["current_A"].mean()
-        if mean_i > 0:
-            _flag("ERROR", "current_direction",
-                  f"MIT 방전 전류 평균 양수({mean_i:.3f}A) — phase 오류 의심", dataset=dataset)
-    if dataset == "HUST" and len(dis_df) > 0:
-        mean_i = dis_df["current_A"].mean()
-        if mean_i > 0:
-            _flag("ERROR", "current_direction",
-                  f"HUST 방전 전류 평균 양수({mean_i:.3f}A) — phase 오류 의심", dataset=dataset)
+        def _has_decrease(grp):
+            return bool((grp["segment_id"].diff().dropna() < 0).any())
+        bad_mono = int(df.groupby("cycle").apply(_has_decrease).sum())
+        if bad_mono > 0:
+            _flag("WARN", "segment_id_nonmono",
+                  f"segment_id 감소하는 사이클: {bad_mono}개", dataset=dataset)
 
     # ── 4. capacity_Ah 유효성 ─────────────────────────────────────────────────
-    dis_cycles = dis_df["cycle"].unique() if len(dis_df) > 0 else []
-    cap_by_cyc = (df[df["cycle"].isin(dis_cycles)]
-                  .groupby("cycle")["capacity_Ah"].first())
+    cap_by_cyc = df.groupby("cycle")["capacity_Ah"].max()
     valid_caps = cap_by_cyc.dropna()
 
-    if len(dis_cycles) > 0 and len(valid_caps) == 0:
-        _flag("ERROR", "no_capacity", "방전 사이클에 capacity_Ah 없음", dataset=dataset)
+    if len(valid_caps) == 0:
+        _flag("ERROR", "no_capacity", "capacity_Ah 전체 NaN", dataset=dataset)
     elif len(valid_caps) > 10:
-        first_q = valid_caps.iloc[:len(valid_caps)//4].mean()
-        last_q  = valid_caps.iloc[-len(valid_caps)//4:].mean()
+        first_q = valid_caps.iloc[:len(valid_caps) // 4].mean()
+        last_q  = valid_caps.iloc[-len(valid_caps) // 4:].mean()
         if last_q > first_q * 1.05:
             _flag("WARN", "capacity_increasing",
                   f"용량 증가 추세: 초기 {first_q:.4f} → 말기 {last_q:.4f} Ah", dataset=dataset)
@@ -134,8 +118,6 @@ def check_cell(pkl_path: Path) -> tuple:
     # ── 5. NaN 비율 ───────────────────────────────────────────────────────────
     nan_ratio = df.isnull().mean()
     for col, ratio in nan_ratio.items():
-        if col == "temperature_C":
-            continue
         if ratio > 0.5:
             _flag("WARN", "high_nan", f"{col} NaN {ratio:.1%}", dataset=dataset)
 
@@ -146,51 +128,41 @@ def check_cell(pkl_path: Path) -> tuple:
         _flag("WARN", "cycle_count_mismatch",
               f"meta.n_cycles={meta_n} ≠ 실제 {real_n}", dataset=dataset)
 
-    # ── 7~9. 사이클 단위 검사 ─────────────────────────────────────────────────
+    # ── 7~8. 사이클 단위 검사 ────────────────────────────────────────────────
     for cyc, grp in df.groupby("cycle"):
-        n_cyc = len(grp)
-
         # 7. 전압 범위
         v_cyc = grp["voltage_V"].dropna()
         if len(v_cyc) > 0:
             if v_cyc.max() > V_MAX:
-                bad_ph = sorted(grp.loc[grp["voltage_V"] > V_MAX, "phase"].unique())
                 _flag("WARN", "voltage_high",
-                      f"v_max={v_cyc.max():.3f}V > {V_MAX}V  phase={bad_ph}",
+                      f"v_max={v_cyc.max():.3f}V > {V_MAX}V",
                       cycle=int(cyc), dataset=dataset)
             if v_cyc.min() < V_MIN:
-                bad_ph = sorted(grp.loc[grp["voltage_V"] < V_MIN, "phase"].unique())
                 _flag("WARN", "voltage_low",
-                      f"v_min={v_cyc.min():.3f}V < {V_MIN}V  phase={bad_ph}",
+                      f"v_min={v_cyc.min():.3f}V < {V_MIN}V",
                       cycle=int(cyc), dataset=dataset)
 
-        # 8. rest 행 비율 과다
-        n_rest_cyc = (grp["phase"] == "rest").sum()
-        rest_ratio = n_rest_cyc / n_cyc if n_cyc > 0 else 0
-        if rest_ratio > REST_RATIO_WARN:
-            _flag("WARN", "rest_dominant",
-                  f"rest 비율 {rest_ratio:.1%} ({n_rest_cyc}/{n_cyc}행)",
-                  cycle=int(cyc), dataset=dataset)
-
-        # 9. time_s 단조 증가 위반
+        # 8. time_s 단조 증가 위반
         t = grp["time_s"].values
         if len(t) > 1 and np.any(np.diff(t) < 0):
             _flag("WARN", "time_nonmono", "time_s 단조 증가 위반",
                   cycle=int(cyc), dataset=dataset)
 
     v_all = df["voltage_V"].dropna()
+    avg_segs_per_cycle = (
+        float(df.groupby("cycle")["segment_id"].max().mean()) + 1
+        if "segment_id" in df.columns else np.nan
+    )
     return {
-        "cell_id":     cell_id,
-        "dataset":     dataset,
-        "total_rows":  len(df),
-        "n_cycles":    real_n,
-        "n_charge":    n_charge,
-        "n_discharge": n_discharge,
-        "n_rest":      n_rest,
-        "v_min":       float(v_all.min()) if len(v_all) else np.nan,
-        "v_max":       float(v_all.max()) if len(v_all) else np.nan,
-        "cap_init":    float(valid_caps.iloc[0])  if len(valid_caps) > 0 else np.nan,
-        "cap_final":   float(valid_caps.iloc[-1]) if len(valid_caps) > 0 else np.nan,
+        "cell_id":             cell_id,
+        "dataset":             dataset,
+        "total_rows":          len(df),
+        "n_cycles":            real_n,
+        "avg_segs_per_cycle":  round(avg_segs_per_cycle, 2),
+        "v_min":               float(v_all.min()) if len(v_all) else np.nan,
+        "v_max":               float(v_all.max()) if len(v_all) else np.nan,
+        "cap_init":            float(valid_caps.iloc[0])  if len(valid_caps) > 0 else np.nan,
+        "cap_final":           float(valid_caps.iloc[-1]) if len(valid_caps) > 0 else np.nan,
     }, issues
 
 
@@ -247,13 +219,14 @@ def run_check(pkl_dir: Path, expected: int, label: str,
         return pd.DataFrame(), all_issues
 
     df = pd.DataFrame(records)
-    print(f"\n  총 데이터 행    : {df.total_rows.sum():,}")
-    print(f"  셀별 사이클 수  : {df.n_cycles.min()} ~ {df.n_cycles.max()} (평균 {df.n_cycles.mean():.1f})")
-    print(f"  전압 전체 범위  : {df.v_min.min():.3f} ~ {df.v_max.max():.3f} V")
+    print(f"\n  총 데이터 행       : {df.total_rows.sum():,}")
+    print(f"  셀별 사이클 수     : {df.n_cycles.min()} ~ {df.n_cycles.max()} (평균 {df.n_cycles.mean():.1f})")
+    print(f"  사이클당 평균 세그먼트: {df.avg_segs_per_cycle.mean():.2f}")
+    print(f"  전압 전체 범위     : {df.v_min.min():.3f} ~ {df.v_max.max():.3f} V")
     cap_v = df[df.cap_init.notna()]
     if len(cap_v) > 0:
-        print(f"  초기 용량 범위  : {cap_v.cap_init.min():.4f} ~ {cap_v.cap_init.max():.4f} Ah")
-        print(f"  최종 용량 범위  : {cap_v.cap_final.min():.4f} ~ {cap_v.cap_final.max():.4f} Ah")
+        print(f"  초기 용량 범위     : {cap_v.cap_init.min():.4f} ~ {cap_v.cap_init.max():.4f} Ah")
+        print(f"  최종 용량 범위     : {cap_v.cap_final.min():.4f} ~ {cap_v.cap_final.max():.4f} Ah")
     return df, all_issues
 
 
@@ -261,7 +234,7 @@ def run_check(pkl_dir: Path, expected: int, label: str,
 
 if __name__ == "__main__":
     import argparse, os
-    parser = argparse.ArgumentParser(description="data_unified PKL 무결성 검사")
+    parser = argparse.ArgumentParser(description="_2_data_clean PKL 무결성 검사")
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1),
                         help="병렬 프로세스 수 (기본: 4)")
     args = parser.parse_args()

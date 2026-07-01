@@ -1,4 +1,4 @@
-"""
+﻿"""
 plot_cell_cycles.py
 
 특정 셀의 전체 사이클을 한 plot에 시각화.
@@ -45,10 +45,10 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# MIT_DIR  = PROJECT_ROOT / "data_postprocess" / "MIT"
-# HUST_DIR = PROJECT_ROOT / "data_postprocess" / "HUST"
-MIT_DIR  = PROJECT_ROOT / "data_unified" / "MIT"
-HUST_DIR = PROJECT_ROOT / "data_unified" / "HUST"
+# MIT_DIR  = PROJECT_ROOT / "_2_data_clean" / "MIT"
+# HUST_DIR = PROJECT_ROOT / "_2_data_clean" / "HUST"
+MIT_DIR  = PROJECT_ROOT / "_1_data_unified" / "MIT"
+HUST_DIR = PROJECT_ROOT / "_1_data_unified" / "HUST"
 STEP_DIR = Path(__file__).resolve().parent
 SHAPE_CSV = PROJECT_ROOT / "2_preprocess" / "outputs" / "shape_outlier_report.csv"
 MANUAL_CSV = PROJECT_ROOT / "2_preprocess" / "manual_outliers.csv"

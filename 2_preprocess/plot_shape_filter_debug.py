@@ -1,4 +1,4 @@
-"""
+﻿"""
 plot_shape_filter_debug.py
 
 [진단 전용 — 데이터 수정 없음]
@@ -38,7 +38,7 @@ from matplotlib.collections import LineCollection
 # ── 경로 ────────────────────────────────────────────────────────────────────
 HERE         = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
-MIT_DIR      = PROJECT_ROOT / "data_unified" / "MIT"
+MIT_DIR      = PROJECT_ROOT / "_1_data_unified" / "MIT"
 OUT_DIR      = HERE / "outputs" / "shape_debug"
 
 # ── 한글 폰트 ────────────────────────────────────────────────────────────────

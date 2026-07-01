@@ -1,4 +1,4 @@
-# DATASET_ANOMALIES.md
+﻿# DATASET_ANOMALIES.md
 
 데이터 파이프라인 각 단계에서 발생하는 이상 유형과 처리 방법을 단계별로 정리.
 
@@ -9,7 +9,7 @@
 | 항목 | MIT FastCharge | HUST |
 |------|---------------|------|
 | 원본 셀 수 | 128 (batch1 25 + batch2 45 + batch3 44, CONTINUING 5셀은 batch1에 병합) | 77 |
-| 변환 후 (`data_unified`) | **123** (12셀 DELETE_CELLS 제외) | **77** |
+| 변환 후 (`_1_data_unified`) | **123** (12셀 DELETE_CELLS 제외) | **77** |
 | 배터리 화학계 | LFP 18650 | LFP (공칭 1.1 Ah) |
 | 방전 전류 부호 규약 | 음수 (−) | 음수 (−) |
 
@@ -17,7 +17,7 @@
 
 ## 단계별 제거 통계 요약
 
-> 기준: `data_raw` 원본 사이클 수 (MIT **114,738** / HUST **146,122**)
+> 기준: `_0_data_raw` 원본 사이클 수 (MIT **114,738** / HUST **146,122**)
 
 | 단계 | 필터 | 단위 | MIT 제거 | MIT % | HUST 제거 | HUST % |
 |------|------|------|---------|-------|---------|-------|
@@ -25,7 +25,7 @@
 | Step 1-B | `_remove_empty_cycles` | 사이클 | **40** | 0.03% | 0 | — |
 | Step 1-D | `_remove_zero_current_rest` | **행(row)** | **5,126,620 rows** | — | 0 | — |
 | Step 1-E | `_remove_outlier_cycles` | 사이클 | **23** | 0.02% | 0 | — |
-| **Step 1 후** | data_unified | — | **123셀 / 99,748 cycles** | 잔존 **87.0%** | **77셀 / 146,122 cycles** | 잔존 **100%** |
+| **Step 1 후** | _1_data_unified | — | **123셀 / 99,748 cycles** | 잔존 **87.0%** | **77셀 / 146,122 cycles** | 잔존 **100%** |
 | Step 2-1 | `_remove_empty_cycles` | 사이클 | (Step 1 이후 잔존분) | — | 0 | — |
 | Step 2-2 | `_fix_time_monotonicity` | 행 | (행 수 유지) | — | — | — |
 | Step 2-3 | `_remove_zero_current_rest` | **행(row)** | (Step 1 이후 잔존분) | — | 0 | — |
@@ -33,25 +33,25 @@
 | Step 2-4 | 충전 시간 단절 → 충전 phase 행 제거 | 행 | **~수천 행** | — | 0 | — |
 | Step 2-5 | Rolling Median | 사이클 | **1** | 0.001% | 0 | — |
 | Step 2-6 | `vend_min` 1.8V | 사이클 | 0 | — | **~4,214** | **2.88%** |
-| **Step 2 후** | data_postprocess | — | **~99,701 cycles** | 잔존 **86.9%** | **~141,907 cycles** | 잔존 **97.1%** |
+| **Step 2 후** | _2_data_clean | — | **~99,701 cycles** | 잔존 **86.9%** | **~141,907 cycles** | 잔존 **97.1%** |
 
 **주요 포인트**:
 - MIT 제거의 대부분(**13.0%p**)은 Step 1-A DELETE_CELLS — 필터 로직이 아닌 수동 제외 (Step 1에서만 처리)
 - HUST 제거는 거의 전량 Step 2-6 `vend_min` 비정상 종료 사이클 (**2.88%**)
-- Step 2-1~3은 data_unified 에 이미 적용됐으나 Step 2에서 재적용해 안전망 역할
+- Step 2-1~3은 _1_data_unified 에 이미 적용됐으나 Step 2에서 재적용해 안전망 역할
 - Step 2-4 충전 단절: 사이클 전체 제거 대신 **충전 phase 행만 제거** — 방전 HI 계산 보존
-- `hi_correlation.py` 는 `data_postprocess/` 를 읽으므로 인라인 dt-gap 감지 불필요
+- `hi_correlation.py` 는 `_2_data_clean/` 를 읽으므로 인라인 dt-gap 감지 불필요
 
 ---
 
 ## Step 1 — `convert_unified.py` 변환 단계
 
-원본 파일(.mat / .pkl)을 파싱해 `data_unified/` 에 저장하는 과정에서 아래 처리가 순서대로 적용됨.  
-`data_raw/` 에는 이 처리들이 **적용되지 않은** 원본 파싱 결과가 저장됨.
+원본 파일(.mat / .pkl)을 파싱해 `_1_data_unified/` 에 저장하는 과정에서 아래 처리가 순서대로 적용됨.  
+`_0_data_raw/` 에는 이 처리들이 **적용되지 않은** 원본 파싱 결과가 저장됨.
 
 ### 1-A. DELETE_CELLS — 완전 불량 셀 제외
 
-`data_unified/` 저장 자체를 건너뜀. `data_raw/` 에는 포함.
+`_1_data_unified/` 저장 자체를 건너뜀. `_0_data_raw/` 에는 포함.
 
 | 셀 | 배치 | 제외 이유 |
 |----|------|----------|
@@ -59,7 +59,7 @@
 | `b1c18` | batch1 | rest 구간 전압 오염 — cycle 34~39: 최대 4.6V / cycle 50~53: 0.7~6.6V 무작위값 |
 | `b3c2`, `b3c23`, `b3c32`, `b3c37`, `b3c42`, `b3c43` | batch3 | 측정 오류 / 비정상 프로토콜 |
 
-DELETE_CELLS 합계: **12셀** → `data_unified/MIT/` 에는 **123셀** 저장
+DELETE_CELLS 합계: **12셀** → `_1_data_unified/MIT/` 에는 **123셀** 저장
 
 ---
 
@@ -86,8 +86,8 @@ HUST는 빈 사이클 없음 — 이 단계는 MIT에만 적용.
 
 영향 셀: MIT 79셀 / 209사이클 (주로 Batch1/2). HUST는 영향 없음.
 
-> `data_raw/` 에는 누적 시간이 미적용된 상태(사이클별 상대 시간)로 저장.  
-> 캐시 모드(--no-cache 없이 재실행)에서는 `data_raw/` 를 읽은 뒤 이 단계부터 동일하게 적용.
+> `_0_data_raw/` 에는 누적 시간이 미적용된 상태(사이클별 상대 시간)로 저장.  
+> 캐시 모드(--no-cache 없이 재실행)에서는 `_0_data_raw/` 를 읽은 뒤 이 단계부터 동일하게 적용.
 
 ---
 
@@ -122,9 +122,9 @@ MIT/HUST 양쪽 모두 적용.
 ```
 원본 파싱 (MAT / PKL)
   │
-  ├─▶ data_raw/ 저장 (필터 없음, DELETE_CELLS 포함, 누적 시간 미적용)
+  ├─▶ _0_data_raw/ 저장 (필터 없음, DELETE_CELLS 포함, 누적 시간 미적용)
   │
-  ▼ DELETE_CELLS → data_unified 저장 건너뜀
+  ▼ DELETE_CELLS → _1_data_unified 저장 건너뜀
   │
   ▼ [MIT만] _remove_empty_cycles()    — cycle 1 아티팩트 제거
   │
@@ -134,15 +134,15 @@ MIT/HUST 양쪽 모두 적용.
   │
   ▼ _remove_outlier_cycles()           — RPT / HPPC / 스파이크 제거
   │
-  └─▶ data_unified/ 저장
+  └─▶ _1_data_unified/ 저장
 ```
 
 ---
 
 ## Step 2 — `preprocess.py` 전처리 단계
 
-`data_unified/` 를 읽어 6단계 이상 사이클·행 제거를 수행한 뒤 `data_postprocess/` 에 저장.  
-원본 `data_unified/` 는 변경하지 않음. `hi_correlation.py` 는 `data_postprocess/` 를 입력으로 사용.
+`_1_data_unified/` 를 읽어 6단계 이상 사이클·행 제거를 수행한 뒤 `_2_data_clean/` 에 저장.  
+원본 `_1_data_unified/` 는 변경하지 않음. `hi_correlation.py` 는 `_2_data_clean/` 를 입력으로 사용.
 
 ### 필터1 — `_remove_empty_cycles()` — 빈 사이클 제거
 
@@ -226,7 +226,7 @@ python 2_preprocess/preprocess.py --vend-min 1.9  # 더 엄격하게
 ### Step 2 처리 순서 요약
 
 ```
-data_unified/
+_1_data_unified/
   │
   ▼ [필터1] _remove_empty_cycles()         — charge/discharge 5행 미만 사이클 제거
   │
@@ -242,7 +242,7 @@ data_unified/
   │
   ▼ [필터6] _remove_bad_vend_cycles()       — 비정상 종료 사이클 (v_end < 1.8V)
   │
-  └─▶ data_postprocess/ 저장
+  └─▶ _2_data_clean/ 저장
         PKL: 전 셀 / CSV: 제거 발생 셀만
         outputs/cleaning_report.csv (필터별 제거 수 + 사이클 번호)
 ```
@@ -251,7 +251,7 @@ data_unified/
 
 ## Step 3 — `check_integrity.py` 무결성 검사
 
-`data_unified/` 를 대상으로 이상 여부를 검사. 이상치 제거는 수행하지 않음.
+`_1_data_unified/` 를 대상으로 이상 여부를 검사. 이상치 제거는 수행하지 않음.
 
 | 수준 | 검사 항목 | 설명 |
 |------|-----------|------|
@@ -270,7 +270,7 @@ data_unified/
 
 ## Step 4 — `hi_correlation.py` HI 추출 단계
 
-`data_postprocess/` 를 읽어 HI 148종을 사이클별로 계산.  
+`_2_data_clean/` 를 읽어 HI 148종을 사이클별로 계산.  
 시간 단절 등 이상 처리는 Step 2에서 완료된 상태이므로 HI 추출 단계에서는 별도 필터링 없음.
 
 > **구버전 Step 4-A (방전/충전 시간 단절 인라인 감지)** 는 **Step 2 [필터4]** 로 통합됨.  

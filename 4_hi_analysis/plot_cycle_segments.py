@@ -1,4 +1,4 @@
-"""
+﻿"""
 plot_cycle_segments.py
 
 특정 셀·사이클의 충전 → 방전 세그먼트를 3행 단일 plot으로 시각화.
@@ -23,8 +23,8 @@ import matplotlib.patches as mpatches
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MIT_DIR  = PROJECT_ROOT / "data_unified" / "MIT"
-HUST_DIR = PROJECT_ROOT / "data_unified" / "HUST"
+MIT_DIR  = PROJECT_ROOT / "_1_data_unified" / "MIT"
+HUST_DIR = PROJECT_ROOT / "_1_data_unified" / "HUST"
 STEP_DIR = Path(__file__).resolve().parent
 
 for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:

@@ -1,4 +1,4 @@
-"""
+﻿"""
 profile_hi_timing.py  —  HI 카테고리·피처별 계산 시간 프로파일링
 
 출력:
@@ -119,6 +119,50 @@ def _time_stat(vs, ims, dts, qcs, seg) -> dict[str, float]:
     t = _pc(); _ = float(np.percentile(vs, 75) - np.percentile(vs, 25)); T[f"stat_v_iqr_{seg}"]   = _pc() - t
     t = _pc(); _ = float(vs.max() - vs.min());            T[f"stat_v_range_{seg}"]    = _pc() - t
     t = _pc(); _ = float(np.percentile(vs, 10));          T[f"stat_v_p10_{seg}"]      = _pc() - t
+
+    # S16 v_p90
+    t = _pc(); _ = float(np.percentile(vs, 90));          T[f"stat_v_p90_{seg}"]      = _pc() - t
+
+    # S17 v_samp_ent (SampEn vectorized)
+    t = _pc()
+    if n >= 10:
+        r_t = 0.2 * float(np.std(vs))
+        if r_t > 0:
+            xs = vs[::max(1, n // 200)] if n > 200 else vs
+            ns = len(xs)
+            if ns >= 10:
+                w2 = np.column_stack([xs[:-1], xs[1:]])
+                w3 = np.column_stack([xs[:-2], xs[1:-1], xs[2:]])
+                c2 = np.max(np.abs(w2[:, None, :] - w2[None, :, :]), axis=2)
+                c3 = np.max(np.abs(w3[:, None, :] - w3[None, :, :]), axis=2)
+                np.fill_diagonal(c2, np.inf)
+                np.fill_diagonal(c3, np.inf)
+                B_se = int(np.sum(c2 <= r_t))
+                A_se = int(np.sum(c3 <= r_t))
+    T[f"stat_v_samp_ent_{seg}"] = _pc() - t
+
+    # S18 corr_vt, S20 v_detrended_std — shared t_seg
+    t = _pc()
+    t_s = np.zeros(n); t_s[1:] = np.cumsum(dts[1:])
+    t_tot = float(t_s[-1])
+    if t_tot > 0 and np.std(vs) > 1e-6:
+        _ = float(np.corrcoef(vs, t_s / t_tot)[0, 1])
+    T[f"stat_corr_vt_{seg}"] = _pc() - t
+
+    t = _pc()
+    if t_tot > 0:
+        A_ = np.column_stack([t_s / t_tot, np.ones(n)])
+        coef_ = np.linalg.lstsq(A_, vs, rcond=None)[0]
+        _ = float(np.std(vs - A_ @ coef_))
+    T[f"stat_v_detrended_std_{seg}"] = _pc() - t
+
+    # S19 i_q_slope
+    t = _pc()
+    if np.std(q_rel) > 1e-9:
+        A_ = np.column_stack([q_rel, np.ones(n)])
+        _ = np.linalg.lstsq(A_, ims, rcond=None)[0][0]
+    T[f"stat_i_q_slope_{seg}"] = _pc() - t
+
     return T
 
 
@@ -225,6 +269,41 @@ def _time_diff(vs, ims, dts, qcs, seg,
             r_d = r_d[r_d < 1000.0]
             if len(r_d) > 0: _ = float(np.mean(r_d))
     T[f"diff_r_dyn_seg_{seg}"] = _pc() - t
+
+    # D16–D17 IC valley
+    t = _pc()
+    if len(vmids_ica) >= 6:
+        pk16 = int(np.argmax(dqdv_sm_ica))
+        pk16_h = float(dqdv_sm_ica[pk16])
+        if pk16_h > 0 and pk16 >= 2 and pk16 <= len(dqdv_sm_ica) - 3:
+            li = int(np.argmin(dqdv_sm_ica[:pk16]))
+            ri = pk16 + 1 + int(np.argmin(dqdv_sm_ica[pk16 + 1:]))
+    T[f"diff_dqdv_valley_h_{seg}"] = _pc() - t
+
+    t = _pc()
+    T[f"diff_dqdv_valley_v_{seg}"] = _pc() - t  # same ops as valley_h
+
+    # D18–D19 VQ peak/valley Q positions
+    t = _pc()
+    fin18 = np.isfinite(dvdq_sm)
+    if q_tot > 0.005 and fin18.sum() >= 3:
+        qmf18 = qm[fin18]; dvf18 = dvdq_sm[fin18]
+        _ = float(qmf18[int(np.argmax(np.abs(dvf18)))])
+    T[f"diff_dvdq_peak_q_{seg}"] = _pc() - t
+
+    t = _pc()
+    if q_tot > 0.005 and fin18.sum() >= 3:
+        _ = float(qmf18[int(np.argmin(dvf18))])
+    T[f"diff_dvdq_valley_q_{seg}"] = _pc() - t
+
+    # D20 IC area asymmetry
+    t = _pc()
+    if len(vmids_ica) >= 4:
+        pk20 = int(np.argmax(dqdv_sm_ica))
+        if float(dqdv_sm_ica[pk20]) > 0 and pk20 >= 1 and pk20 <= len(dqdv_sm_ica) - 2:
+            al = float(np.trapezoid(np.maximum(dqdv_sm_ica[:pk20 + 1], 0), vmids_ica[:pk20 + 1]))
+            ar = float(np.trapezoid(np.maximum(dqdv_sm_ica[pk20:],     0), vmids_ica[pk20:]))
+    T[f"diff_dqdv_area_asym_{seg}"] = _pc() - t
 
     return T
 
@@ -356,6 +435,57 @@ def _time_lfp(vs, ims, dts, qcs, seg,
         except Exception:
             pass
     T[f"lfp_ica_peak_cnt_{seg}"] = _pc() - t
+
+    # L16 plateau_v_slope
+    t = _pc()
+    if plt_mask.sum() >= 5:
+        qp16 = qm[plt_mask]; vp16 = v_sm[plt_mask]
+        if len(qp16) > 1 and float(qp16[-1] - qp16[0]) > 1e-9:
+            A16 = np.column_stack([qp16, np.ones(len(qp16))])
+            _ = np.linalg.lstsq(A16, vp16, rcond=None)[0][0]
+    T[f"lfp_plateau_v_slope_{seg}"] = _pc() - t
+
+    # L17 v_gradient_exit
+    t = _pc()
+    n5e = max(1, int(0.05 * n_b))
+    exit_mask = np.zeros(n_b, dtype=bool)
+    exit_mask[max(0, n_b - n5e):] = True
+    valid_exit = exit_mask & fin_b
+    if valid_exit.sum() >= 1:
+        _ = float(np.mean(np.abs(dvdq_sm[valid_exit])))
+    T[f"lfp_v_gradient_exit_{seg}"] = _pc() - t
+
+    # L18 plateau_q_onset
+    t = _pc()
+    plt_idx18 = np.where(plt_mask)[0]
+    if len(plt_idx18) > 0 and q_tot > 0:
+        _ = float(qm[plt_idx18[0]]) / q_tot
+    T[f"lfp_plateau_q_onset_{seg}"] = _pc() - t
+
+    # L19 dv_dt_plateau
+    t = _pc()
+    if plt_mask.sum() >= 2 and q_tot > 0 and n > 1:
+        q_lo19 = float(qm[plt_mask][0]) - dq_b / 2
+        q_hi19 = float(qm[plt_mask][-1]) + dq_b / 2
+        raw19  = (q_rel >= q_lo19) & (q_rel <= q_hi19)
+        if raw19.sum() >= 3:
+            dts_p19 = dts[raw19]
+            slow19  = dts_p19[1:] >= 1.0
+            if slow19.sum() >= 3:
+                _ = float(np.mean(
+                    np.abs(np.diff(vs[raw19])[slow19] / dts_p19[1:][slow19])
+                )) * 1000.0
+    T[f"lfp_dv_dt_plateau_{seg}"] = _pc() - t
+
+    # L20 v_ent_plateau
+    t = _pc()
+    if plt_mask.sum() >= 10:
+        _cnt_p = np.histogram(v_sm[plt_mask], bins=10)[0].astype(float)
+        _tot_p = _cnt_p.sum()
+        if _tot_p > 0:
+            p_v = _cnt_p[_cnt_p > 0] / _tot_p
+            _ = float(-np.sum(p_v * np.log(p_v)))
+    T[f"lfp_v_ent_plateau_{seg}"] = _pc() - t
 
     return T
 
@@ -834,7 +964,7 @@ def main():
         random.sample(hust_pkls, min(args.n_cells - n_half, len(hust_pkls)))
     )
     if not selected:
-        print("[ERROR] PKL 파일을 찾을 수 없습니다. data_postprocess/ 경로를 확인하세요.")
+        print("[ERROR] PKL 파일을 찾을 수 없습니다. _2_data_clean/ 경로를 확인하세요.")
         return
 
     print(f"프로파일링 대상: {len(selected)}개 셀, 셀당 최대 {args.n_cycles}사이클, workers={args.workers}")

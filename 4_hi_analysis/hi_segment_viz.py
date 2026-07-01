@@ -52,15 +52,15 @@ DIS_SEG_LABELS = ["SoC 60~100%\n(초반·고전압)", "SoC 30~60%\n(플래토)",
 CHG_SEG_COLORS = ["#f9e79f", "#a9dfbf", "#aed6f1"]
 CHG_SEG_LABELS = ["SoC 0~30%\n(초반·저전압)", "SoC 30~60%\n(플래토)", "SoC 60~100%\n(후반·CV)"]
 
-# ── 행 배경색 (방전=파랑, 충전=주황) ──────────────────────────────────────────
-SEG_ROW_BG = ["#eaf4fb"] * 3 + ["#fef5eb"] * 3   # dis_hi/mid/lo, chg_lo/mid/hi
+# ── 행 배경색 (충전=주황, 방전=파랑) — segment_id 시간 순서 반영 ───────────
+SEG_ROW_BG = ["#fef5eb"] * 3 + ["#eaf4fb"] * 3   # chg_lo/mid/hi, dis_hi/mid/lo
 SEG_ROW_LABEL = [
-    "dis_hi\n(SoC 60–100%)",
-    "dis_mid\n(SoC 30–60%)",
-    "dis_lo\n(SoC 0–30%)",
     "chg_lo\n(SoC 0–40%)",
     "chg_mid\n(SoC 40–70%)",
     "chg_hi\n(SoC 70–100%)",
+    "dis_hi\n(SoC 60–100%)",
+    "dis_mid\n(SoC 30–60%)",
+    "dis_lo\n(SoC 0–30%)",
 ]
 
 DS_COLOR = {"MIT": "#1f77b4", "HUST": "#d55e00"}

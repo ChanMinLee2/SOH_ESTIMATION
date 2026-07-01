@@ -1,19 +1,20 @@
 """
 seg_corr_analysis.py
 
-285-HI 구조 기준 세그먼트 × 카테고리별 상관분석.
+411-HI 구조 기준 세그먼트 × 카테고리별 상관분석 + Scenario 구분 능력 분석.
 
-분석 단위: 6구간(dis_hi/mid/lo, chg_lo/mid/hi) × 3카테고리(Stat/Diff/LFP) = 18 그룹
+분석 단위: 6구간(dis_hi/mid/lo, chg_lo/mid/hi) × 4카테고리(Stat/Diff/LFP/Morph) = 24 그룹
 정답(target): capacity_Ah (셀 내부 Spearman 상관계수 → 전체 셀 평균)
 
 출력: 4_hi_analysis/seg_corr/<MMDD>/
-  corr_rank_stat_{ds}.png    — 카테고리 A: 6구간 × 15 통계 HI 상관계수 랭킹
-  corr_rank_diff_{ds}.png    — 카테고리 B: 6구간 × 15 미분 HI
-  corr_rank_lfp_{ds}.png     — 카테고리 C: 6구간 × 15 LFP HI
-  corr_matrix_stat_{ds}.png  — 카테고리 A: 6구간 × 15×15 feature 상관행렬
+  corr_rank_stat_{ds}.png    — 카테고리 A: 6구간 × 20 통계 HI 상관계수 랭킹
+  corr_rank_diff_{ds}.png    — 카테고리 B: 6구간 × 20 미분 HI
+  corr_rank_lfp_{ds}.png     — 카테고리 C: 6구간 × 20 LFP HI
+  corr_matrix_stat_{ds}.png  — 카테고리 A: 6구간 × 20×20 feature 상관행렬
   corr_matrix_diff_{ds}.png  — 카테고리 B
   corr_matrix_lfp_{ds}.png   — 카테고리 C
-  top_cross_{ds}.png         — 3카테고리 × 6구간 Top-5 HI 비교 (전체 요약)
+  top_cross_{ds}.png         — 4카테고리 × 6구간 Top-5 HI 비교 (전체 요약)
+  scenario_eps2_{ds}.png     — HI 컨셉별 Scenario(hi/mid/lo) 구분 능력 ε²
 
 사용:
   python 4_hi_analysis/seg_corr_analysis.py
@@ -33,6 +34,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import numpy as np
 import pandas as pd
+from scipy.stats import kruskal as _kruskal
 from scipy.stats import spearmanr
 
 import matplotlib
@@ -588,11 +590,165 @@ def plot_feature_rank_seg(all_flat_df: pd.DataFrame, out_path: Path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plot 6: Scenario ε² (Kruskal-Wallis) — q_frac 레벨(hi/mid/lo) 구분 능력
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CAT_MAP = {"stat": "Stat", "diff": "Diff", "lfp": "LFP", "morph": "Morph"}
+
+_MODE_SEGS = {
+    "discharge": ("dis_hi", "dis_mid", "dis_lo"),
+    "charge":    ("chg_lo", "chg_mid", "chg_hi"),
+}
+
+_ALL_CONCEPTS = (
+    [("stat",  k) for k in STAT_KEYS]
+    + [("diff", k) for k in DIFF_KEYS]
+    + [("lfp",  k) for k in LFP_KEYS]
+    + [("morph", k) for k in MORPH_KEYS]
+)
+
+
+def compute_scenario_eps2(df: pd.DataFrame) -> pd.DataFrame:
+    """각 HI 컨셉별 scenario(hi/mid/lo 레벨) 구분 능력 ε² 계산.
+
+    ε² = max(0, (H − k + 1) / (N − k))
+      H = Kruskal-Wallis 통계량, k = 그룹 수(3), N = 전체 샘플 수
+    범위 ≈ [0, 1]: 0 → 레벨 간 분포 동일, 1 → 완전 분리.
+
+    Returns
+    -------
+    DataFrame: concept, cat, short_label, mode, eps2, H, pvalue, n_samples
+    """
+    records = []
+    for mode_name, segs in _MODE_SEGS.items():
+        for prefix, key in _ALL_CONCEPTS:
+            concept  = f"{prefix}_{key}"
+            col_keys = [f"{concept}_{s}" for s in segs]
+            avail    = [ck for ck in col_keys if ck in df.columns]
+            if len(avail) < 2:
+                continue
+
+            groups = [df[ck].dropna().values for ck in avail]
+            groups = [g for g in groups if len(g) >= 3]
+            k      = len(groups)
+            if k < 2:
+                continue
+
+            N = int(sum(len(g) for g in groups))
+            try:
+                H, pval = _kruskal(*groups)
+                eps2 = max(0.0, (H - k + 1) / (N - k)) if N > k else np.nan
+            except Exception:
+                H = pval = eps2 = np.nan
+
+            records.append({
+                "concept":     concept,
+                "cat":         _CAT_MAP.get(prefix, "Stat"),
+                "short_label": _short_label(concept),
+                "mode":        mode_name,
+                "eps2":        float(eps2) if np.isfinite(eps2) else np.nan,
+                "H":           float(H)    if np.isfinite(H)    else np.nan,
+                "pvalue":      float(pval) if np.isfinite(pval) else np.nan,
+                "n_samples":   N,
+            })
+
+    return pd.DataFrame(records)
+
+
+def plot_scenario_eps2(eps2_df: pd.DataFrame, out_path: Path,
+                       dataset_name: str = ""):
+    """HI 컨셉별 scenario ε² 수평 바 차트.
+
+    왼쪽 패널: 방전(dis_hi / dis_mid / dis_lo)
+    오른쪽 패널: 충전(chg_lo / chg_mid / chg_hi)
+    ε²가 높은 컨셉일수록 레벨 구분 능력이 강함 → Classifier HI 후보.
+    """
+    mode_cfg = [
+        ("discharge", "방전  (dis_hi / dis_mid / dis_lo)"),
+        ("charge",    "충전  (chg_lo / chg_mid / chg_hi)"),
+    ]
+
+    n_concepts = eps2_df["concept"].nunique()
+    fig_h      = max(10, n_concepts * 0.30)
+
+    fig, axes = plt.subplots(1, 2, figsize=(24, fig_h), constrained_layout=True)
+    ds_lbl = f"[{dataset_name}] " if dataset_name else ""
+    fig.suptitle(
+        f"{ds_lbl}HI 컨셉별 Scenario(hi/mid/lo) 구분 능력\n"
+        r"$\varepsilon^2$ (Kruskal-Wallis, $k$=3)  — "
+        r"높을수록 q_frac 레벨 분포 차이 큼 → Classifier HI 후보",
+        fontsize=13, fontweight="bold",
+    )
+
+    for ax, (mode_name, mode_title) in zip(axes, mode_cfg):
+        sub = (
+            eps2_df[eps2_df["mode"] == mode_name]
+            .dropna(subset=["eps2"])
+            .sort_values("eps2", ascending=False)
+            .reset_index(drop=True)
+        )
+        if sub.empty:
+            ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=11)
+            continue
+
+        y_pos  = np.arange(len(sub))
+        colors = [CAT_COLORS.get(c, "#888888") for c in sub["cat"]]
+        x_max  = float(sub["eps2"].max())
+
+        ax.barh(y_pos, sub["eps2"], color=colors, alpha=0.82, height=0.72)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(sub["short_label"], fontsize=7)
+        ax.invert_yaxis()
+        ax.set_xlim(0, min(1.05, x_max * 1.18 + 0.04))
+        ax.set_xlabel(r"$\varepsilon^2$", fontsize=10)
+        ax.set_title(mode_title, fontsize=10, fontweight="bold")
+
+        # 값 레이블
+        for i, (val, pv) in enumerate(zip(sub["eps2"], sub["pvalue"])):
+            if not np.isfinite(val):
+                continue
+            sig = "***" if pv < 0.001 else "**" if pv < 0.01 else "*" if pv < 0.05 else ""
+            ax.text(val + x_max * 0.012, i,
+                    f"{val:.3f}{sig}", va="center", fontsize=6.3)
+
+        # 효과 크기 기준선
+        for thr, lbl, col in [(0.01, "small", "#aaaaaa"),
+                               (0.06, "medium", "#e67e22"),
+                               (0.14, "large",  "#c0392b")]:
+            if thr <= x_max:
+                ax.axvline(thr, color=col, lw=0.9, ls="--", alpha=0.55, zorder=0)
+                ax.text(thr + x_max * 0.005, len(sub) - 0.5,
+                        lbl, color=col, fontsize=6.5, va="top", alpha=0.8)
+
+        ax.grid(axis="x", alpha=0.25, lw=0.7)
+
+    # 카테고리 범례
+    cat_handles = [Patch(facecolor=CAT_COLORS[c], label=c)
+                   for c in ["Stat", "Diff", "LFP", "Morph"]]
+    # 유의성 범례
+    sig_handles = [
+        Patch(facecolor="none", edgecolor="none", label="유의성: * p<0.05"),
+        Patch(facecolor="none", edgecolor="none", label="** p<0.01"),
+        Patch(facecolor="none", edgecolor="none", label="*** p<0.001"),
+    ]
+    fig.legend(
+        handles=cat_handles + sig_handles,
+        loc="lower center", ncol=7, fontsize=8.5,
+        bbox_to_anchor=(0.5, -0.025),
+    )
+
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="285-HI 세그먼트 × 카테고리 상관분석")
+    parser = argparse.ArgumentParser(description="411-HI 세그먼트 × 카테고리 상관분석 + Scenario ε²")
     parser.add_argument("--pkl",        default=str(PKL_DEFAULT))
     parser.add_argument("--dataset",    default="all", choices=["all", "mit", "hust"])
     parser.add_argument("--min-cycles", type=int, default=5)
@@ -690,6 +846,28 @@ def main():
         rank_batt_path = OUT_BASE / f"feature_rank_battery_{ds_name.lower()}.png"
         print(f"\n  [Plot] Feature Rank (battery) → {rank_batt_path.name}")
         plot_feature_rank_battery(flat_ds, rank_batt_path, ds_name)
+
+        # ── Plot 6: Scenario ε² ───────────────────────────────────────────────
+        print(f"\n  [Plot] Scenario ε² 계산 중...")
+        eps2_df   = compute_scenario_eps2(df_ds)
+        eps2_path = OUT_BASE / f"scenario_eps2_{ds_name.lower()}.png"
+        plot_scenario_eps2(eps2_df, eps2_path, dataset_name=ds_name)
+
+        # ε² Top-10 텍스트 요약
+        print(f"\n  {'─'*60}")
+        for mode_name in ("discharge", "charge"):
+            mode_lbl = "방전(dis_hi/mid/lo)" if mode_name == "discharge" else "충전(chg_lo/mid/hi)"
+            top10 = (
+                eps2_df[eps2_df["mode"] == mode_name]
+                .dropna(subset=["eps2"])
+                .nlargest(10, "eps2")
+            )
+            print(f"\n  Scenario ε² Top-10  [{mode_lbl}]")
+            for _, r in top10.iterrows():
+                sig = ("***" if r["pvalue"] < 0.001 else
+                       "**"  if r["pvalue"] < 0.01  else
+                       "*"   if r["pvalue"] < 0.05  else " ")
+                print(f"    {r['short_label']:<32} ε²={r['eps2']:.4f} {sig}  [{r['cat']}]")
 
         # ── 텍스트 요약 ──────────────────────────────────────────────────────
         print(f"\n{'='*70}")

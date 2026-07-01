@@ -1,7 +1,7 @@
-"""
+﻿"""
 plot_all_mit_cells.py
 
-data_unified/MIT 폴더의 모든 셀에 대해 plot_cell_cycles.py 를 한 번씩 실행.
+_1_data_unified/MIT 폴더의 모든 셀에 대해 plot_cell_cycles.py 를 한 번씩 실행.
 각 셀마다 cell/cell_cycles_mit_<cell>.png 가 생성된다.
 
 각 PNG 에는 방전·충전 사이클이 함께 그려진다.
@@ -20,8 +20,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# MIT_DIR = PROJECT_ROOT / "data_postprocess" / "MIT"
-MIT_DIR = PROJECT_ROOT / "data_unified" / "MIT"
+# MIT_DIR = PROJECT_ROOT / "_2_data_clean" / "MIT"
+MIT_DIR = PROJECT_ROOT / "_1_data_unified" / "MIT"
 PLOT_SCRIPT = Path(__file__).resolve().parent / "plot_cell_cycles.py"
 
 

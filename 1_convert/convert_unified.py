@@ -1,4 +1,4 @@
-"""
+﻿"""
 convert_unified.py
 
 MIT(FastCharge) / HUST 데이터를 배터리 ID별 통일 구조로 변환.
@@ -10,17 +10,17 @@ MIT는 .mat (HDF5) 파일 직접 파싱, HUST는 원본 pkl 변환.
   HUST : data/our_data/our_data/{cell_id}.pkl
 
 출력:
-  data_raw/MIT/{bNcN}.pkl  + .csv       (이상치 제거 없는 파싱 원본, DELETE_CELLS 포함)
-  data_raw/HUST/{cell_id}.pkl + .csv
-  data_unified/MIT/{bNcN}.pkl  + .csv   (b1c0 ~ b3c46, 필터 적용)
-  data_unified/HUST/{cell_id}.pkl + .csv
+  _0_data_raw/MIT/{bNcN}.pkl  + .csv       (이상치 제거 없는 파싱 원본, DELETE_CELLS 포함)
+  _0_data_raw/HUST/{cell_id}.pkl + .csv
+  _1_data_unified/MIT/{bNcN}.pkl  + .csv   (b1c0 ~ b3c46, 필터 적용)
+  _1_data_unified/HUST/{cell_id}.pkl + .csv
   docs/mit_conversion_summary.csv
   docs/hust_conversion_summary.csv
 
 cycles DataFrame 컬럼:
-  data_raw    : cycle, time_s, voltage_V, current_A, temperature_C, capacity_Ah, phase
-  data_unified: cycle, time_s, voltage_V, current_A, capacity_Ah, phase
-  (온도는 HI 추출에 사용하지 않으므로 data_unified에서 제거)
+  _0_data_raw    : cycle, time_s, voltage_V, current_A, temperature_C, capacity_Ah, phase
+  _1_data_unified: cycle, time_s, voltage_V, current_A, capacity_Ah, phase
+  (온도는 HI 추출에 사용하지 않으므로 _1_data_unified에서 제거)
 
 사용:
   python convert_unified.py --dataset all --workers 3
@@ -30,8 +30,8 @@ cycles DataFrame 컬럼:
   python convert_unified.py --no-cache                  # 캐시 무시, 원본부터 재변환
 
 캐시 동작:
-  data_raw/MIT/ 또는 data_raw/HUST/ 에 PKL 파일이 있으면 MAT/원본 파싱을 건너뛰고
-  캐시에서 로드 후 동일한 이상치 제거 파이프라인을 적용해 data_unified/ 를 재생성.
+  _0_data_raw/MIT/ 또는 _0_data_raw/HUST/ 에 PKL 파일이 있으면 MAT/원본 파싱을 건너뛰고
+  캐시에서 로드 후 동일한 이상치 제거 파이프라인을 적용해 _1_data_unified/ 를 재생성.
   캐시 PKL에는 누적 시간이 미적용된 상태(사이클별 상대 시간)로 저장됨.
 """
 
@@ -49,10 +49,10 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 PROJECT_ROOT  = Path(__file__).resolve().parent.parent
-MIT_MAT_DIR   = PROJECT_ROOT / "data_raw" / "FastCharge"
-HUST_PKL_DIR  = PROJECT_ROOT / "data_raw" / "our_data" / "our_data"
-OUTPUT_ROOT     = PROJECT_ROOT / "data_unified"
-RAW_OUTPUT_ROOT = PROJECT_ROOT / "data_raw"
+MIT_MAT_DIR   = PROJECT_ROOT / "_0_data_raw" / "FastCharge"
+HUST_PKL_DIR  = PROJECT_ROOT / "_0_data_raw" / "our_data" / "our_data"
+OUTPUT_ROOT     = PROJECT_ROOT / "_1_data_unified"
+RAW_OUTPUT_ROOT = PROJECT_ROOT / "_0_data_raw"
 
 PHASE_POS =  0.01   # A 초과 → charge
 PHASE_NEG = -0.01   # A 미만 → discharge
@@ -345,7 +345,7 @@ def _process_and_save_mit(cell_key: str, cell_data: dict, batch_num: int,
         "n_cycles":      df["cycle"].nunique(),
     }, df)
 
-    # 불량 셀은 data_unified에 저장하지 않음
+    # 불량 셀은 _1_data_unified에 저장하지 않음
     if is_deleted:
         return {}
 
@@ -416,7 +416,7 @@ def convert_mit(out_root: Path, target_cell: str = None, n_workers: int = 3,
     all_stats = []
 
     if use_cache:
-        # ── 캐시 모드: data_raw/MIT/ PKL → 이상치 제거 → data_unified ────────
+        # ── 캐시 모드: _0_data_raw/MIT/ PKL → 이상치 제거 → _1_data_unified ────────
         print(f"\n=== MIT 캐시 모드: {len(raw_pkls)}개 셀  ({raw_out_dir}) ===")
         all_delete = {k for keys in DELETE_CELLS.values() for k in keys}
         for key in sorted(all_delete):
@@ -463,7 +463,7 @@ def convert_mit(out_root: Path, target_cell: str = None, n_workers: int = 3,
         raw_out_dir.mkdir(parents=True, exist_ok=True)
 
         all_delete = {k for keys in DELETE_CELLS.values() for k in keys}
-        print("\n=== data_unified 제외 셀 (data_raw에는 포함) ===")
+        print("\n=== _1_data_unified 제외 셀 (_0_data_raw에는 포함) ===")
         for key in sorted(all_delete):
             print(f"  {key}")
         for key in sorted(all_delete):
@@ -593,7 +593,7 @@ def convert_hust_cell(pkl_path: Path, out_dir: Path, raw_out_dir: Path) -> dict:
         "temperature_C": 30.0,
     }, df)
 
-    # ── 이상치 제거 후 data_unified에 저장 ───────────────────────────────────
+    # ── 이상치 제거 후 _1_data_unified에 저장 ───────────────────────────────────
     df = _fix_time_monotonicity(df)
     df, n_rest_removed = _remove_zero_current_rest(df)
     df, n_outliers = _remove_outlier_cycles(df)
@@ -647,7 +647,7 @@ def _hust_worker(args):
 
 
 def _mit_cache_worker(args):
-    """top-level 함수 — data_raw/MIT/ PKL → 이상치 제거 → data_unified/MIT/ 저장."""
+    """top-level 함수 — _0_data_raw/MIT/ PKL → 이상치 제거 → _1_data_unified/MIT/ 저장."""
     cell_key, out_dir_str, raw_out_dir_str, is_deleted = args
     try:
         if is_deleted:
@@ -701,7 +701,7 @@ def _mit_cache_worker(args):
 
 
 def _hust_cache_worker(args):
-    """top-level 함수 — data_raw/HUST/ PKL → 이상치 제거 → data_unified/HUST/ 저장."""
+    """top-level 함수 — _0_data_raw/HUST/ PKL → 이상치 제거 → _1_data_unified/HUST/ 저장."""
     cell_key, out_dir_str, raw_out_dir_str = args
     try:
         raw_pkl = Path(raw_out_dir_str) / f"{cell_key}.pkl"
@@ -846,7 +846,7 @@ def main():
     parser.add_argument("--workers",      type=int, default=3,
                         help="병렬 프로세스 수 (기본: 3)")
     parser.add_argument("--no-cache",     action="store_true",
-                        help="캐시 무시 — data_raw/ 가 있어도 원본 파일부터 재변환")
+                        help="캐시 무시 — _0_data_raw/ 가 있어도 원본 파일부터 재변환")
     args = parser.parse_args()
 
     out_root = Path(args.output_root)
