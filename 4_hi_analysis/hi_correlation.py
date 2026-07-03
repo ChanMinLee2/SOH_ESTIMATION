@@ -22,7 +22,7 @@ import os
 import pickle
 import warnings
 from collections import OrderedDict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
@@ -51,7 +51,7 @@ HI_ROOT      = PROJECT_ROOT / "_4_data_hi"
 # ─────────────────────────────────────────────────────────────────────────────
 # HI 키 상수 정의
 # ─────────────────────────────────────────────────────────────────────────────
-THETA_FLAT = 0.05  # V/Ah — LFP 플래토 판별 임계값 (|dV/dQ| < θ_flat)
+THETA_FLAT = 0.25  # V/Ah — LFP 플래토 판별 임계값 (|dV/dQ| < θ_flat)
 
 GLOBAL_HI_KEYS = [
     "q_dis", "energy_dis", "v_mean_dis", "r_dc_est", "q_plateau_frac",
@@ -863,6 +863,7 @@ def plot_plateau_debug(
     cycle_id: int = 0,
     cell_id: str = "",
     out_path=None,
+    theta_flat: float = THETA_FLAT,
 ) -> None:
     """6개 세그먼트별 플래토 판정 시각화 + 전체 사이클 V-Q 개요.
 
@@ -937,7 +938,7 @@ def plot_plateau_debug(
         n_bins = max(8, min(30, int(m.sum()) // 3))
         qm, v_sm, dvdq_sm, q_tot = _build_vq_curve(vs_s, ims_s, dts_s, n_bins=n_bins)
         fin_b    = np.isfinite(dvdq_sm) & np.isfinite(v_sm)
-        plt_mask = fin_b & (np.abs(dvdq_sm) < THETA_FLAT)
+        plt_mask = fin_b & (np.abs(dvdq_sm) < theta_flat)
         seg_data.append((vs_s, q_rel_raw, qm * 1000, v_sm, dvdq_sm,
                          q_tot, plt_mask, fin_b, seg_lbl, lo * 1000))
 
@@ -956,7 +957,7 @@ def plot_plateau_debug(
         n_bins = max(8, min(30, int(m.sum()) // 3))
         qm, v_sm, dvdq_sm, q_tot = _build_vq_curve(vs_s, ims_s, dts_s, n_bins=n_bins)
         fin_b    = np.isfinite(dvdq_sm) & np.isfinite(v_sm)
-        plt_mask = fin_b & (np.abs(dvdq_sm) < THETA_FLAT)
+        plt_mask = fin_b & (np.abs(dvdq_sm) < theta_flat)
         seg_data.append((vs_s, q_rel_raw, qm * 1000, v_sm, dvdq_sm,
                          q_tot, plt_mask, fin_b, seg_lbl, lo * 1000))
 
@@ -1026,7 +1027,7 @@ def plot_plateau_debug(
         pf = total_plt / max(1, total_bins)
         ax_ov.set_title(
             f"{mode_lbl}  |  전체 플래토 비율: {pf:.1%}  "
-            f"({total_plt}/{total_bins} bins, θ={THETA_FLAT} V/Ah)",
+            f"({total_plt}/{total_bins} bins, θ={theta_flat} V/Ah)",
             fontsize=9, pad=4,
         )
         ax_ov.set_xlabel("Q_cumulative [mAh]", fontsize=8)
@@ -1092,7 +1093,7 @@ def plot_plateau_debug(
                              linewidths=0.6, zorder=3,
                              label=f"plateau ({n_plt}/{n_bins_total} bins)")
             ax_v.set_title(
-                f"{seg_lbl}\nplateau_frac = {plt_frac:.1%}  (θ = {THETA_FLAT} V/Ah)",
+                f"{seg_lbl}\nplateau_frac = {plt_frac:.1%}  (θ = {theta_flat} V/Ah)",
                 fontsize=8.5, pad=3,
             )
             ax_v.set_ylabel("V [V]", fontsize=8)
@@ -1104,15 +1105,15 @@ def plot_plateau_debug(
             abs_dvdq = np.abs(dvdq_sm)
             ax_dv.plot(qm_mAh, abs_dvdq, color="darkorange", lw=1.4, zorder=2,
                        label="|dV/dQ|")
-            ax_dv.axhline(THETA_FLAT, color="red", ls="--", lw=1.3, zorder=3,
-                          label=f"θ = {THETA_FLAT}")
+            ax_dv.axhline(theta_flat, color="red", ls="--", lw=1.3, zorder=3,
+                          label=f"θ = {theta_flat}")
             ax_dv.fill_between(
                 qm_mAh, 0,
-                np.where(abs_dvdq < THETA_FLAT, abs_dvdq, np.nan),
+                np.where(abs_dvdq < theta_flat, abs_dvdq, np.nan),
                 color="limegreen", alpha=0.45, zorder=1, label="plateau zone",
             )
-            p90 = float(np.nanpercentile(abs_dvdq[fin_b], 90)) if fin_b.any() else THETA_FLAT
-            ax_dv.set_ylim(0, max(3.0 * THETA_FLAT, p90 * 1.2))
+            p90 = float(np.nanpercentile(abs_dvdq[fin_b], 90)) if fin_b.any() else theta_flat
+            ax_dv.set_ylim(0, max(3.0 * theta_flat, p90 * 1.2))
             ax_dv.set_ylabel("|dV/dQ| [V/Ah]", fontsize=8)
             ax_dv.set_xlabel("Q_seg [mAh]", fontsize=8)
             ax_dv.tick_params(labelsize=7)
@@ -1125,7 +1126,7 @@ def plot_plateau_debug(
 
     fig.suptitle(
         f"Plateau Detection Debug  |  cell: {cell_id}  cycle: {cycle_id}  "
-        f"|  θ_flat = {THETA_FLAT} V/Ah",
+        f"|  θ_flat = {theta_flat} V/Ah",
         fontsize=11, fontweight="bold", y=1.005,
     )
 
@@ -1270,7 +1271,130 @@ def plot_plateau_fraction_summary(df: pd.DataFrame, out_path=None) -> None:
     plt.close(fig)
 
 
-def _run_plateau_debug(dataset: str, cell_id: str, cycle: int) -> None:
+_DEBUG_THETAS = (0.01, 0.05, 0.10, 0.15, 0.20, 0.25)
+_SEGS_ORDER   = ["dis_hi", "dis_mid", "dis_lo", "chg_lo", "chg_mid", "chg_hi"]
+
+
+def _compute_plateau_fracs(df_cyc: pd.DataFrame, theta_flat: float) -> dict:
+    """단일 사이클에서 6개 세그먼트별 플래토 비율 계산.
+
+    Returns
+    -------
+    dict: {'overall': float, 'dis_hi': float, ..., 'chg_hi': float}
+          데이터 부족 시 해당 키 = np.nan
+    """
+    result = {"overall": np.nan, **{s: np.nan for s in _SEGS_ORDER}}
+
+    df_cyc = df_cyc.copy()
+    if "phase" not in df_cyc.columns:
+        df_cyc = _add_phase(df_cyc)
+
+    dis = df_cyc[df_cyc["phase"] == "discharge"].sort_values("time_s")
+    chg = df_cyc[df_cyc["phase"] == "charge"].sort_values("time_s")
+    if len(dis) < 30:
+        return result
+
+    def _build(rows):
+        v  = rows["voltage_V"].values.astype(float)
+        i  = np.abs(rows["current_A"].values.astype(float))
+        t  = rows["time_s"].values.astype(float)
+        dt = np.clip(np.diff(t, prepend=t[0]), 0, None)
+        return v, i, dt, np.cumsum(i * dt) / 3600.0
+
+    v_d, i_d, dt_d, q_d = _build(dis)
+    q_tot_d = float(q_d[-1])
+    has_chg = len(chg) >= 30
+    if has_chg:
+        v_c, i_c, dt_c, q_c = _build(chg)
+        q_tot_c = float(q_c[-1])
+
+    total_plt = total_bins = 0
+
+    for q_lo_f, q_hi_f, seg_name, _ in DIS_SEGS:
+        lo, hi = q_lo_f * q_tot_d, q_hi_f * q_tot_d
+        m = (q_d >= lo) & (q_d < hi)
+        if m.sum() < 8:
+            continue
+        n_bins = max(8, min(30, int(m.sum()) // 3))
+        qm, v_sm, dvdq_sm, _ = _build_vq_curve(
+            v_d[m], i_d[m], dt_d[m], n_bins=n_bins)
+        fin_b    = np.isfinite(dvdq_sm) & np.isfinite(v_sm)
+        plt_mask = fin_b & (np.abs(dvdq_sm) < theta_flat)
+        n_plt = int(plt_mask.sum()); n_tot = len(qm)
+        result[seg_name] = n_plt / max(1, n_tot)
+        total_plt += n_plt; total_bins += n_tot
+
+    if has_chg:
+        for q_lo_f, q_hi_f, seg_name, _ in CHG_SEGS:
+            lo, hi = q_lo_f * q_tot_c, q_hi_f * q_tot_c
+            m = (q_c >= lo) & (q_c < hi)
+            if m.sum() < 8:
+                continue
+            n_bins = max(8, min(30, int(m.sum()) // 3))
+            qm, v_sm, dvdq_sm, _ = _build_vq_curve(
+                v_c[m], i_c[m], dt_c[m], n_bins=n_bins)
+            fin_b    = np.isfinite(dvdq_sm) & np.isfinite(v_sm)
+            plt_mask = fin_b & (np.abs(dvdq_sm) < theta_flat)
+            n_plt = int(plt_mask.sum()); n_tot = len(qm)
+            result[seg_name] = n_plt / max(1, n_tot)
+            total_plt += n_plt; total_bins += n_tot
+
+    result["overall"] = total_plt / max(1, total_bins)
+    return result
+
+
+def _cell_plateau_worker(args):
+    """병렬 워커: 셀 1개의 first/last/avg 플래토 비율을 모든 theta에 대해 계산.
+
+    Returns
+    -------
+    (cell_id, results_by_theta, error_msg)
+    results_by_theta: {theta: (cyc_first, fracs_first, cyc_last, fracs_last,
+                                n_cycs, fracs_avg)}
+    """
+    pkl_path, thetas = args
+    cid = pkl_path.stem
+    try:
+        with open(pkl_path, "rb") as f:
+            raw = pickle.load(f)
+        df2 = raw.get("cycles")
+        if df2 is None:
+            return cid, None, "cycles 키 없음"
+        avail = sorted(df2["cycle"].unique())
+        if not avail:
+            return cid, None, "사이클 없음"
+
+        cyc_first = avail[0]
+        cyc_last  = avail[-1]
+        df_first  = df2[df2["cycle"] == cyc_first]
+        df_last   = df2[df2["cycle"] == cyc_last]
+        keys      = ["overall"] + _SEGS_ORDER
+
+        results = {}
+        for theta in thetas:
+            fracs_first = _compute_plateau_fracs(df_first, theta)
+            fracs_last  = _compute_plateau_fracs(df_last,  theta)
+
+            acc = {k: [] for k in keys}
+            for cyc in avail:
+                fr = _compute_plateau_fracs(df2[df2["cycle"] == cyc], theta)
+                for k in keys:
+                    v = fr.get(k, np.nan)
+                    if np.isfinite(v):
+                        acc[k].append(v)
+            fracs_avg = {k: (float(np.mean(v)) if v else np.nan)
+                         for k, v in acc.items()}
+
+            results[theta] = (cyc_first, fracs_first,
+                               cyc_last,  fracs_last,
+                               len(avail), fracs_avg)
+        return cid, results, None
+    except Exception as e:
+        return cid, None, str(e)
+
+
+def _run_plateau_debug(dataset: str, cell_id: str, cycle: int,
+                       workers: int = 4) -> None:
     """CLI --plateau-debug 진입점: pkl 로드 → plot_plateau_debug() 호출."""
     root = MIT_DIR if dataset.upper().startswith("MIT") else HUST_DIR
     matches = list(root.glob(f"{cell_id}*.pkl"))
@@ -1292,15 +1416,346 @@ def _run_plateau_debug(dataset: str, cell_id: str, cycle: int) -> None:
 
     cycles_avail = sorted(df_all["cycle"].unique())
     if cycle not in cycles_avail:
-        print(f"[plateau_debug] 사이클 {cycle} 없음. 가용: {cycles_avail[:10]}…")
-        cycle = cycles_avail[len(cycles_avail) // 2]   # 중간 사이클로 대체
-        print(f"[plateau_debug] 중간 사이클 {cycle} 사용")
+        nearest = min(cycles_avail, key=lambda c: abs(c - cycle))
+        print(f"[plateau_debug] 사이클 {cycle} 없음 → 가장 가까운 사이클 {nearest} 사용")
+        cycle = nearest
 
     df_cyc = df_all[df_all["cycle"] == cycle]
 
-    out_dir = STEP_DIR / "outputs" / "plateau_debug"
-    out_path = out_dir / f"plateau_debug_{cell_id}_cyc{cycle:04d}.png"
-    plot_plateau_debug(df_cyc, cycle_id=cycle, cell_id=cell_id, out_path=out_path)
+    out_dir = STEP_DIR / "outputs" / "plateau_debug" / f"{cell_id}_cyc{cycle:04d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── 1. PNG: 지정 셀 × 6 theta ────────────────────────────────────────
+    for theta in _DEBUG_THETAS:
+        theta_tag = f"{theta:.2f}".replace(".", "p")
+        out_path  = out_dir / f"plateau_debug_{cell_id}_cyc{cycle:04d}_th{theta_tag}.png"
+        plot_plateau_debug(df_cyc, cycle_id=cycle, cell_id=cell_id,
+                           out_path=out_path, theta_flat=theta)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Curve Debug: 6-세그먼트 × 5-커브 시각화 (HI 유효성 검증용)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 시간 순 세그먼트 정의: (q_lo_f, q_hi_f, seg_name, label, phase, bg_color)
+_CURVE_SEG_ORDER = [
+    (0.0, 0.4, "chg_lo",  "chg_lo\n(SoC 0–40%)",   "charge",    "#fff8f0"),
+    (0.4, 0.7, "chg_mid", "chg_mid\n(SoC 40–70%)",  "charge",    "#fff0eb"),
+    (0.7, 1.0, "chg_hi",  "chg_hi\n(SoC 70–100%)",  "charge",    "#ffeef4"),
+    (0.0, 0.4, "dis_hi",  "dis_hi\n(SoC 60–100%)",  "discharge", "#eef5ff"),
+    (0.4, 0.7, "dis_mid", "dis_mid\n(SoC 30–60%)",  "discharge", "#eeeeff"),
+    (0.7, 1.0, "dis_lo",  "dis_lo\n(SoC 0–30%)",    "discharge", "#eef7ee"),
+]
+
+
+def plot_curve_debug(
+    df_all: pd.DataFrame,
+    cycles_to_show: "list[int] | None" = None,
+    cell_id: str = "",
+    n_cycles: int = 5,
+    out_path=None,
+) -> None:
+    """6-세그먼트 × 5-커브 시각화로 HI 계산 기반 곡선 유효성 검증.
+
+    열 순서 (시간 순): chg_lo / chg_mid / chg_hi / dis_hi / dis_mid / dis_lo
+    행 0: V-t      — V vs 세그먼트 상대 시간 [s]
+    행 1: V-Q      — V vs 누적 Q [mAh], 스무딩 + 플래토 삼각 마커
+    행 2: dV/dQ    — Q 축 [mAh], SG 스무딩, θ_flat 기준선 + 피크 위치
+    행 3: dQ/dV    — V 축 [V], SG 스무딩 (ICA), 피크 위치
+    행 4: Morph    — [0,1] 정규화 V-t(파랑)/V-Q(빨강)/V-E(초록) 오버레이
+
+    복수 사이클을 동일 서브플롯에 오버레이: 용량 高(BOL)=파랑, 低(EOL)=빨강.
+    첫 번째(BOL) 사이클의 Morph 곡선은 회색 점선으로 별도 표시.
+    """
+    import matplotlib.cm as mcm
+    import matplotlib.colors as mcolors
+    import matplotlib.lines as mlines
+
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)
+
+    # ── 사이클 선택 ───────────────────────────────────────────────────────────
+    all_cycs = sorted(c for c in df_all["cycle"].unique() if c > 0)
+    if not all_cycs:
+        print("[curve_debug] 유효 사이클 없음")
+        return
+
+    if cycles_to_show is None:
+        idx = np.linspace(0, len(all_cycs) - 1, min(n_cycles, len(all_cycs))).astype(int)
+        cycles_to_show = [all_cycs[i] for i in idx]
+
+    cycles_to_show = sorted(c for c in cycles_to_show if c in all_cycs)
+    if not cycles_to_show:
+        print("[curve_debug] 지정된 사이클이 데이터에 없음")
+        return
+
+    # BOL = 선택 사이클 중 가장 이른 사이클
+    bol_cyc = cycles_to_show[0]
+
+    # ── 용량 기준 colormap ────────────────────────────────────────────────────
+    caps: dict = {}
+    for cyc in cycles_to_show:
+        grp = df_all[df_all["cycle"] == cyc]
+        dis = grp[grp["phase"] == "discharge"]
+        if len(dis) > 0 and "capacity_Ah" in dis.columns:
+            caps[cyc] = float(dis["capacity_Ah"].iloc[0])
+        else:
+            caps[cyc] = np.nan
+
+    valid_caps = [v for v in caps.values() if np.isfinite(v)]
+    cap_lo = min(valid_caps) if valid_caps else 0.0
+    cap_hi = max(valid_caps) if valid_caps else 1.0
+    cmap = mcm.get_cmap("RdYlBu")
+
+    def _cyc_color(cyc):
+        c = caps.get(cyc, np.nan)
+        if not np.isfinite(c) or cap_hi == cap_lo:
+            return "gray"
+        return cmap((c - cap_lo) / (cap_hi - cap_lo))
+
+    # ── Figure 레이아웃 ───────────────────────────────────────────────────────
+    N_SEG  = len(_CURVE_SEG_ORDER)
+    N_ROWS = 5
+    ROW_YLABELS = [
+        "V [V]\n(V-t)",
+        "V [V]\n(V-Q smooth)",
+        "dV/dQ [V/Ah]\n(DVA)",
+        "dQ/dV [Ah/V]\n(ICA)",
+        "V [V]\n(Morph norm.)",
+    ]
+
+    fig, axes = plt.subplots(
+        N_ROWS, N_SEG,
+        figsize=(N_SEG * 3.4, N_ROWS * 2.6),
+        constrained_layout=True,
+    )
+    fig.patch.set_facecolor("#f5f5f5")
+
+    for col, (_, _, _, lbl, _, bg) in enumerate(_CURVE_SEG_ORDER):
+        axes[0, col].set_title(lbl, fontsize=8, fontweight="bold", pad=3)
+    for row, yl in enumerate(ROW_YLABELS):
+        axes[row, 0].set_ylabel(yl, fontsize=7, labelpad=3)
+    for row in range(N_ROWS):
+        for col, (*_, bg) in enumerate(_CURVE_SEG_ORDER):
+            axes[row, col].set_facecolor(bg)
+            axes[row, col].tick_params(labelsize=5.5)
+
+    # BOL morph 참조선 저장: seg → {"vt": arr, "vq": arr, "ve": arr}
+    bol_morph: dict = {}
+
+    # ── 사이클별 그리기 ───────────────────────────────────────────────────────
+    alpha_base = max(0.30, min(0.90, 2.5 / len(cycles_to_show)))
+    lw = 1.1
+
+    for cyc in cycles_to_show:
+        grp    = df_all[df_all["cycle"] == cyc]
+        clr    = _cyc_color(cyc)
+        is_bol = (cyc == bol_cyc)
+
+        for col, (q_lo_f, q_hi_f, seg, _, mode, _) in enumerate(_CURVE_SEG_ORDER):
+            phase_grp = grp[grp["phase"] == mode].sort_values("time_s")
+            if len(phase_grp) < 15:
+                continue
+
+            tv  = phase_grp["time_s"].values.astype(float)
+            vv  = phase_grp["voltage_V"].values.astype(float)
+            iv  = np.abs(phase_grp["current_A"].values.astype(float))
+            dtv = np.clip(np.diff(tv, prepend=tv[0]), 0.0, None)
+
+            q_cum = np.cumsum(iv * dtv) / 3600.0
+            q_tot = float(q_cum[-1])
+            if q_tot < 0.01:
+                continue
+
+            lo = q_lo_f * q_tot
+            hi = q_hi_f * q_tot
+            m_s = (q_cum >= lo) & (q_cum < hi)
+            if m_s.sum() < 8:
+                continue
+
+            vs_s  = vv[m_s]
+            ims_s = iv[m_s]
+            dts_s = dtv[m_s]
+            ts_s  = tv[m_s] - tv[m_s][0]
+
+            # ─ Row 0: V-t ──────────────────────────────────────────────────
+            ax = axes[0, col]
+            ax.plot(ts_s, vs_s, color=clr, lw=lw, alpha=alpha_base)
+            ax.set_xlabel("t [s]", fontsize=6)
+
+            # ─ Row 1: V-Q (빈 평균 스무딩 + 플래토 마커) ────────────────────
+            ax = axes[1, col]
+            qm, v_sm, dvdq_sm, _ = _build_vq_curve(vs_s, ims_s, dts_s)
+            qm_mAh = qm * 1000.0
+            fin_b  = np.isfinite(v_sm) & np.isfinite(dvdq_sm)
+            if fin_b.any():
+                ax.plot(qm_mAh[fin_b], v_sm[fin_b], color=clr, lw=lw, alpha=alpha_base)
+                plt_mask = fin_b & (np.abs(dvdq_sm) < THETA_FLAT)
+                if plt_mask.any():
+                    ax.scatter(
+                        qm_mAh[plt_mask], v_sm[plt_mask],
+                        s=14, color=clr, marker="^",
+                        alpha=min(1.0, alpha_base * 1.6),
+                        linewidths=0, zorder=4,
+                    )
+            ax.set_xlabel("Q [mAh]", fontsize=6)
+
+            # ─ Row 2: dV/dQ (DVA) ──────────────────────────────────────────
+            ax = axes[2, col]
+            if fin_b.any():
+                ax.plot(qm_mAh[fin_b], dvdq_sm[fin_b], color=clr, lw=lw, alpha=alpha_base)
+                ax.axhline( THETA_FLAT, color="dimgray", ls=":", lw=0.7, alpha=0.5)
+                ax.axhline(-THETA_FLAT, color="dimgray", ls=":", lw=0.7, alpha=0.5)
+                ax.axhline(0.0,         color="dimgray", ls="-", lw=0.5, alpha=0.25)
+                # |dV/dQ| 최대 위치 표시 (D18: dvdq_peak_q)
+                abs_dv = np.abs(dvdq_sm[fin_b])
+                if abs_dv.size > 0:
+                    pk_q = qm_mAh[fin_b][int(np.argmax(abs_dv))]
+                    ax.axvline(pk_q, color=clr, ls="--", lw=0.7, alpha=alpha_base * 0.7)
+            if col == 0:
+                ax.text(0.02, 0.97, f"θ=±{THETA_FLAT}", transform=ax.transAxes,
+                        fontsize=5.5, va="top", color="dimgray")
+            ax.set_xlabel("Q [mAh]", fontsize=6)
+
+            # ─ Row 3: dQ/dV ICA ────────────────────────────────────────────
+            ax = axes[3, col]
+            vmids, dqdv_sm = _build_ica_seg(vs_s, ims_s, dts_s)
+            if len(vmids) >= 4:
+                ax.plot(vmids, dqdv_sm, color=clr, lw=lw, alpha=alpha_base)
+                ax.axhline(0.0, color="dimgray", ls="-", lw=0.5, alpha=0.25)
+                # ICA 피크 위치 표시 (D06: dqdv_peak_v)
+                if dqdv_sm.max() > 0:
+                    pk_idx = int(np.argmax(dqdv_sm))
+                    ax.axvline(vmids[pk_idx], color=clr, ls="--",
+                               lw=0.7, alpha=alpha_base * 0.7)
+            ax.set_xlabel("V [V]", fontsize=6)
+
+            # ─ Row 4: Morph 정규화 V-t / V-Q / V-E ────────────────────────
+            ax = axes[4, col]
+            vt_n, vq_n, ve_n = _seg_morph_curves(vs_s, ims_s, dts_s)
+            grid_x = np.linspace(0.0, 1.0, _MORPH_GRID)
+            for arr_n, mc in zip([vt_n, vq_n, ve_n],
+                                 ["#5c7aff", "#e64040", "#3dad6b"]):
+                if arr_n is not None:
+                    ax.plot(grid_x, arr_n, color=mc, lw=lw * 0.9, alpha=alpha_base)
+
+            # BOL 참조선 저장
+            if is_bol:
+                bol_morph.setdefault(seg, {})
+                for arr_n, key in zip([vt_n, vq_n, ve_n], ["vt", "vq", "ve"]):
+                    if arr_n is not None:
+                        bol_morph[seg][key] = arr_n
+
+            ax.set_xlabel("norm. fraction", fontsize=6)
+
+    # ── BOL 참조선 오버레이 (행 4) ────────────────────────────────────────────
+    grid_x = np.linspace(0.0, 1.0, _MORPH_GRID)
+    for col, (_, _, seg, *_) in enumerate(_CURVE_SEG_ORDER):
+        ax = axes[4, col]
+        for key, mc in zip(["vt", "vq", "ve"],
+                           ["#5c7aff", "#e64040", "#3dad6b"]):
+            arr = bol_morph.get(seg, {}).get(key)
+            if arr is not None:
+                ax.plot(grid_x, arr, color=mc, lw=2.2, alpha=0.35,
+                        ls="--", zorder=2)
+
+    # ── 범례 ─────────────────────────────────────────────────────────────────
+    # 행 1: 플래토 마커 범례
+    axes[1, N_SEG - 1].scatter([], [], s=14, color="gray", marker="^",
+                               label="plateau bin")
+    axes[1, N_SEG - 1].legend(fontsize=6, loc="best", framealpha=0.7)
+
+    # 행 4: Morph 곡선 범례
+    morph_handles = [
+        mlines.Line2D([], [], color="#5c7aff", lw=1.5, label="V-t"),
+        mlines.Line2D([], [], color="#e64040", lw=1.5, label="V-Q"),
+        mlines.Line2D([], [], color="#3dad6b", lw=1.5, label="V-E"),
+        mlines.Line2D([], [], color="gray",    lw=1.8, ls="--",
+                      alpha=0.6, label=f"BOL (cyc {bol_cyc})"),
+    ]
+    axes[4, N_SEG - 1].legend(handles=morph_handles, fontsize=6,
+                               loc="best", framealpha=0.75)
+
+    # ── Colorbar (용량) ───────────────────────────────────────────────────────
+    if valid_caps and cap_hi > cap_lo:
+        sm = plt.cm.ScalarMappable(
+            cmap=cmap,
+            norm=mcolors.Normalize(vmin=cap_lo, vmax=cap_hi),
+        )
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=axes[:, -1], shrink=0.55, pad=0.02)
+        cbar.set_label("Capacity (Ah)", fontsize=8)
+        cbar.ax.tick_params(labelsize=7)
+
+    # ── 제목 ─────────────────────────────────────────────────────────────────
+    n_cyc_str  = len(cycles_to_show)
+    cyc_range  = f"cyc {cycles_to_show[0]}–{cycles_to_show[-1]}"
+    cap_range  = (f"{cap_hi:.3f}→{cap_lo:.3f} Ah (BOL→EOL)"
+                  if valid_caps else "capacity n/a")
+    fig.suptitle(
+        f"Curve Debug  |  cell: {cell_id}  |  {n_cyc_str} cycles ({cyc_range})"
+        f"  |  {cap_range}  |  High cap=Blue, Low cap=Red",
+        fontsize=9.5, fontweight="bold",
+    )
+
+    if out_path is None:
+        plt.show()
+    else:
+        out_p = Path(out_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_p, dpi=140, bbox_inches="tight")
+        print(f"  [curve_debug] 저장 완료: {out_p}")
+    plt.close(fig)
+
+
+def _run_curve_debug(
+    dataset: str,
+    cell_id: str,
+    cycles_str: str = "",
+    n_cycles: int = 5,
+) -> None:
+    """CLI --curve-debug 진입점."""
+    root = MIT_DIR if dataset.upper().startswith("MIT") else HUST_DIR
+    matches = sorted(root.glob(f"{cell_id}*.pkl"))
+    if not matches:
+        matches = [p for p in sorted(root.glob("*.pkl")) if cell_id in p.stem]
+    if not matches:
+        print(f"[curve_debug] 파일 없음: {root}/{cell_id}*.pkl")
+        return
+
+    pkl_path = matches[0]
+    print(f"[curve_debug] 로드: {pkl_path}")
+    with open(pkl_path, "rb") as f:
+        raw = pickle.load(f)
+
+    df_all = raw if isinstance(raw, pd.DataFrame) else raw.get("cycles")
+    if df_all is None:
+        print("[curve_debug] DataFrame 로드 실패 (키: 'cycles' 없음)")
+        return
+
+    meta    = raw.get("meta", {}) if isinstance(raw, dict) else {}
+    cell_lbl = meta.get("cell_id", pkl_path.stem)
+
+    cycles_to_show = None
+    if cycles_str:
+        try:
+            cycles_to_show = [int(c.strip()) for c in cycles_str.split(",") if c.strip()]
+        except ValueError:
+            print(f"[curve_debug] --cycles 파싱 오류: {cycles_str!r}")
+            return
+
+    suffix   = (f"_cyc{cycles_str.replace(',', '_')}" if cycles_str
+                else f"_n{n_cycles}")
+    out_path = STEP_DIR / "outputs" / "curve_debug" / f"curve_debug_{cell_lbl}{suffix}.png"
+
+    plot_curve_debug(
+        df_all,
+        cycles_to_show=cycles_to_show,
+        cell_id=cell_lbl,
+        n_cycles=n_cycles,
+        out_path=out_path,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1858,7 +2313,27 @@ def main():
                         help="셀 ID (pkl 파일명 기준, 예: CH-Bat-000)")
     parser.add_argument("--cycle",   type=int, default=0,
                         help="시각화할 사이클 번호 (0이면 첫 유효 사이클)")
+    parser.add_argument("--curve-debug", action="store_true",
+                        help="6-세그먼트 × 5-커브 시각화 (HI 유효성 검증)")
+    parser.add_argument("--cycles", type=str, default="",
+                        help="curve-debug 대상 사이클 (쉼표 구분, 예: 1,100,300,500). "
+                             "미지정 시 --n-cycles 개수만큼 자동 선택")
+    parser.add_argument("--n-cycles", type=int, default=5,
+                        help="curve-debug 자동 선택 사이클 수 (기본: 5)")
     args = parser.parse_args()
+
+    # ── curve debug 단독 실행 ──────────────────────────────────────────────
+    if args.curve_debug:
+        if not args.cell:
+            root = MIT_DIR if args.dataset.upper().startswith("MIT") else HUST_DIR
+            pkls = sorted(root.glob("*.pkl"))
+            if not pkls:
+                print(f"[curve_debug] {root} 에 pkl 파일 없음"); return
+            args.cell = pkls[0].stem
+            print(f"[curve_debug] --cell 미지정 → 첫 셀 사용: {args.cell}")
+        _run_curve_debug(args.dataset, args.cell,
+                         cycles_str=args.cycles, n_cycles=args.n_cycles)
+        return
 
     # ── 플래토 디버그 단독 실행 ─────────────────────────────────────────────
     if args.plateau_debug:
@@ -1869,7 +2344,7 @@ def main():
                 print(f"[plateau_debug] {root} 에 pkl 파일 없음"); return
             args.cell = pkls[0].stem
             print(f"[plateau_debug] --cell 미지정 → 첫 셀 사용: {args.cell}")
-        _run_plateau_debug(args.dataset, args.cell, args.cycle)
+        _run_plateau_debug(args.dataset, args.cell, args.cycle, args.workers)
         return
 
     # ── plateau_frac 전체 요약 플롯 ────────────────────────────────────────
