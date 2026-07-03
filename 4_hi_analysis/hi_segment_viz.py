@@ -2,12 +2,16 @@
 hi_segment_viz.py
 
 출력 파일:
-  hi_segment_cuts.png           — V vs q_frac 세그먼트 경계 확인
-  hi_trend.png                  — Global HI 15종 열화 추이
-  hi_segment_trend_stat.png     — 6구간 × 15 통계 HI 열화 추이 (카테고리 A)
-  hi_segment_trend_diff.png     — 6구간 × 15 미분 HI 열화 추이 (카테고리 B)
-  hi_segment_trend_lfp.png      — 6구간 × 15 LFP HI 열화 추이 (카테고리 C)
-  hi_segment_trend_morph.png    — 6구간 × 6 형태학적 거리 HI 열화 추이 (카테고리 D)
+  hi_segment_cuts.png           -V vs q_frac 세그먼트 경계 확인
+  hi_trend.png                  -Global HI 15종 열화 추이
+  hi_segment_trend_stat.png     -6구간 × 통계 HI 열화 추이 (카테고리 A)  [행=시나리오, 열=HI]
+  hi_segment_trend_diff.png     -6구간 × 미분 HI 열화 추이 (카테고리 B)
+  hi_segment_trend_lfp.png      -6구간 × LFP HI 열화 추이 (카테고리 C)
+  hi_segment_trend_morph.png    -6구간 × 형태학적 거리 HI 열화 추이 (카테고리 D)
+  hi_overlay_stat.png           -통계 HI 시나리오 오버레이 (카테고리 A)  [서브플랏=HI, 6시나리오 동시]
+  hi_overlay_diff.png           -미분 HI 시나리오 오버레이 (카테고리 B)
+  hi_overlay_lfp.png            -LFP HI 시나리오 오버레이 (카테고리 C)
+  hi_overlay_morph.png          -형태학적 거리 HI 시나리오 오버레이 (카테고리 D)
 
 사용:
   python hi_segment_viz.py
@@ -15,9 +19,16 @@ hi_segment_viz.py
 """
 
 import argparse
+import io
 import pickle
+import sys
 from datetime import date
 from pathlib import Path
+
+# Windows 콘솔 cp949 → UTF-8 강제 적용
+if hasattr(sys.stdout, "buffer") and sys.stdout.encoding.lower() not in ("utf-8", "utf_8"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -52,25 +63,53 @@ DIS_SEG_LABELS = ["SoC 60~100%\n(초반·고전압)", "SoC 30~60%\n(플래토)",
 CHG_SEG_COLORS = ["#f9e79f", "#a9dfbf", "#aed6f1"]
 CHG_SEG_LABELS = ["SoC 0~30%\n(초반·저전압)", "SoC 30~60%\n(플래토)", "SoC 60~100%\n(후반·CV)"]
 
-# ── 행 배경색 (충전=주황, 방전=파랑) — segment_id 시간 순서 반영 ───────────
-SEG_ROW_BG = ["#fef5eb"] * 3 + ["#eaf4fb"] * 3   # chg_lo/mid/hi, dis_hi/mid/lo
+# ── 행 배경색 (충전=주황, 방전=파랑) -segment_id 시간 순서 반영 ───────────
+SEG_ROW_BG = ["#eaf4fb"] * 3 + ["#fef5eb"] * 3   # dis_hi/mid/lo, chg_lo/mid/hi
 SEG_ROW_LABEL = [
-    "chg_lo\n(SoC 0–40%)",
-    "chg_mid\n(SoC 40–70%)",
-    "chg_hi\n(SoC 70–100%)",
     "dis_hi\n(SoC 60–100%)",
     "dis_mid\n(SoC 30–60%)",
     "dis_lo\n(SoC 0–30%)",
+    "chg_lo\n(SoC 0–40%)",
+    "chg_mid\n(SoC 40–70%)",
+    "chg_hi\n(SoC 70–100%)",
 ]
 
 DS_COLOR = {"MIT": "#1f77b4", "HUST": "#d55e00"}
 
+# ── 시나리오 오버레이용 색상 ────────────────────────────────────────────────────
+# 충전(주황 계열): chg_lo → chg_mid → chg_hi  (연→진)
+# 방전(파란 계열): dis_hi → dis_mid → dis_lo  (연→진)
+_SCEN_COLORS = {
+    "chg_lo":  "#FDB863",   # 연한 주황 (SoC 0–40%)
+    "chg_mid": "#E08214",   # 중간 주황 (SoC 40–70%)
+    "chg_hi":  "#8E3B06",   # 짙은 갈색 (SoC 70–100%, CV 구간 포함)
+    "dis_hi":  "#6BAED6",   # 연한 파랑 (SoC 60–100%)
+    "dis_mid": "#2171B5",   # 중간 파랑 (SoC 30–60%)
+    "dis_lo":  "#08306B",   # 짙은 남색 (SoC 0–30%)
+}
+_SCEN_LABELS = {
+    "chg_lo":  "chg_lo  (0–40%)",
+    "chg_mid": "chg_mid (40–70%)",
+    "chg_hi":  "chg_hi  (70–100%)",
+    "dis_hi":  "dis_hi  (60–100%)",
+    "dis_mid": "dis_mid (30–60%)",
+    "dis_lo":  "dis_lo  (0–30%)",
+}
+# 시간 순 (충전 먼저 → 방전)
+_SCEN_ORDER = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
+
 # ── 카테고리 메타 ──────────────────────────────────────────────────────────────
 CATEGORIES = [
-    ("Stat",  "카테고리 A: 통계 기반 (S01–S15)",          "hi_segment_trend_stat.png"),
-    ("Diff",  "카테고리 B: 미분 기반 (D01–D15)",          "hi_segment_trend_diff.png"),
-    ("LFP",   "카테고리 C: LFP 특징 기반 (L01–L15)",     "hi_segment_trend_lfp.png"),
-    ("Morph", "카테고리 D: 형태학적 거리 (M01–M06)",     "hi_segment_trend_morph.png"),
+    ("Stat",  "카테고리 A: 통계 기반 (S01–S20)",         "hi_segment_trend_stat.png"),
+    ("Diff",  "카테고리 B: 미분 기반 (D01–D20)",         "hi_segment_trend_diff.png"),
+    ("LFP",   "카테고리 C: LFP 특징 기반 (L01–L20)",    "hi_segment_trend_lfp.png"),
+    ("Morph", "카테고리 D: 형태학적 거리 (M01–M06)",    "hi_segment_trend_morph.png"),
+]
+OVERLAY_CATEGORIES = [
+    ("Stat",  "카테고리 A: 통계 기반 (S01–S20)",         "hi_overlay_stat.png"),
+    ("Diff",  "카테고리 B: 미분 기반 (D01–D20)",         "hi_overlay_diff.png"),
+    ("LFP",   "카테고리 C: LFP 특징 기반 (L01–L20)",    "hi_overlay_lfp.png"),
+    ("Morph", "카테고리 D: 형태학적 거리 (M01–M06)",    "hi_overlay_morph.png"),
 ]
 
 
@@ -93,9 +132,14 @@ def _pick_cycles(cyc_series, n=4):
 
 
 def _vq_frac(cycle_df, phase):
-    grp = cycle_df[cycle_df["phase"] == phase]
+    # _2_data_clean PKL에는 phase 컬럼이 없으므로 전류 부호로 판별
+    if phase == "discharge":
+        grp = cycle_df[cycle_df["current_A"] < -0.1]
+    else:
+        grp = cycle_df[cycle_df["current_A"] > 0.1]
     if len(grp) < 10:
         return None, None
+    grp = grp.sort_values("time_s")
     tc = grp["time_s"].values.astype(float)
     vc = grp["voltage_V"].values.astype(float)
     ic = np.abs(grp["current_A"].values.astype(float))
@@ -108,8 +152,8 @@ def _vq_frac(cycle_df, phase):
 
 
 def _cap_from_group(cycle_df):
-    dis = cycle_df[cycle_df["phase"] == "discharge"]
-    return float(dis["capacity_Ah"].iloc[0]) if len(dis) > 0 else np.nan
+    vals = cycle_df["capacity_Ah"].dropna()
+    return float(vals.iloc[0]) if len(vals) > 0 else np.nan
 
 
 def _draw_trend_cell(ax, df, hi_key):
@@ -180,7 +224,7 @@ def plot_segment_cuts(mit_pkls, hust_pkls, out_path: Path, n_cycles: int = 4):
     n = len(selected)
     fig, axes = plt.subplots(n, 2, figsize=(14, 4.2 * n), squeeze=False)
     fig.suptitle(
-        "세그먼트 분할 확인 — V vs q_frac  ( 배경색: SoC 구간 / 선: early→late 사이클 )",
+        "세그먼트 분할 확인 -V vs q_frac  ( 배경색: SoC 구간 / 선: early→late 사이클 )",
         fontsize=11, fontweight="bold",
     )
     for ri, (pkl_path, ds) in enumerate(selected):
@@ -202,7 +246,7 @@ def plot_segment_cuts(mit_pkls, hust_pkls, out_path: Path, n_cycles: int = 4):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_hi_trend(df: pd.DataFrame, out_path: Path):
-    """Global HI 15종 전체 — 용량 열화 추이."""
+    """Global HI 15종 전체 -용량 열화 추이."""
     df = df.copy()
     df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
 
@@ -214,7 +258,7 @@ def plot_hi_trend(df: pd.DataFrame, out_path: Path):
                               figsize=(ncols * 3.8, nrows * 3.2),
                               squeeze=False)
     fig.suptitle(
-        "Global HI 15종 — 열화 추이  (x=Capacity Ah, 선=셀별 궤적)\n"
+        "Global HI 15종 -열화 추이  (x=Capacity Ah, 선=셀별 궤적)\n"
         "■ 파란 계열=MIT   ■ 주황 계열=HUST",
         fontsize=11, fontweight="bold",
     )
@@ -254,12 +298,12 @@ def plot_hi_trend(df: pd.DataFrame, out_path: Path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 3: 세그먼트별 HI 열화 추이 — 카테고리별 (6 seg × 15 HI 그리드)
+# Figure 3: 세그먼트별 HI 열화 추이 -카테고리별 (6 seg × 15 HI 그리드)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
                           category: str, cat_title: str):
-    """6구간 × N HI 그리드 — 한 카테고리(Stat/Diff/LFP/Morph).
+    """6구간 × N HI 그리드 -한 카테고리(Stat/Diff/LFP/Morph).
 
     category : "Stat" | "Diff" | "LFP" | "Morph"
     cat_title: 플롯 제목에 표시할 카테고리 이름
@@ -295,7 +339,7 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
         if is_morph else ""
     )
     fig.suptitle(
-        f"세그먼트별 HI 열화 추이 — {cat_title}{morph_note}\n"
+        f"세그먼트별 HI 열화 추이 -{cat_title}{morph_note}\n"
         "( 행=SoC 구간,  열=HI 종류,  x=Capacity Ah )\n"
         "■ 파란 계열=MIT   ■ 주황 계열=HUST",
         fontsize=13, fontweight="bold",
@@ -347,6 +391,162 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Figure 4: 시나리오 오버레이 -한 서브플랏에 1 HI × 6 시나리오
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
+                             category: str, cat_title: str) -> None:
+    """한 서브플랏에 1 HI의 6개 시나리오 열화 추이를 동시 표시.
+
+    - 충전(주황 계열): chg_lo(연) / chg_mid(중) / chg_hi(진)
+    - 방전(파란 계열): dis_hi(연) / dis_mid(중) / dis_lo(진)
+    - MIT = 실선,  HUST = 점선
+    - 셀별 궤적(얇고 반투명) + 데이터셋별 중앙값 추세선(굵음)
+    """
+    df = df.copy()
+    df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
+
+    # ── 기준 세그먼트에서 HI base name 목록 추출 ─────────────────────────────
+    ref_seg   = ALL_SEGS[0][2]          # "dis_hi"
+    ref_group = HI_GROUPS.get(f"{ref_seg} — {category}", [])
+    if not ref_group:
+        print(f"  [overlay] {category} 그룹 키 없음, 건너뜀")
+        return
+
+    seg_suffix = f"_{ref_seg}"
+    base_names = [k[: -len(seg_suffix)] for k in ref_group if k.endswith(seg_suffix)]
+    n_his = len(base_names)
+    if n_his == 0:
+        return
+
+    # ── 레이아웃 ─────────────────────────────────────────────────────────────
+    is_morph = (category == "Morph")
+    ncols    = 3 if is_morph else 5
+    nrows    = (n_his + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(ncols * 4.0, nrows * 3.2),
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("#f5f5f5")
+    fig.suptitle(
+        f"시나리오 오버레이 -{cat_title}\n"
+        "서브플랏 = 1 HI,  6개 시나리오 동시 표시  (x = Capacity Ah)\n"
+        "충전: 주황 계열 ●  |  방전: 파란 계열 ●  |  실선 = MIT  /  점선 = HUST",
+        fontsize=12, fontweight="bold",
+    )
+
+    # ── 캔터 빈 Q 범위 계산 (capacity 축 통일) ───────────────────────────────
+    cap_all = df["capacity_Ah"].dropna()
+    cap_lo  = float(cap_all.quantile(0.01)) if len(cap_all) else 0.0
+    cap_hi  = float(cap_all.quantile(0.99)) if len(cap_all) else 2.0
+    n_bins  = 40   # 중앙값 추세선 Q-빈 수
+
+    def _median_trend(sub_df, key):
+        """capacity_Ah를 n_bins 구간으로 나눠 HI 중앙값 반환 (x, y)."""
+        sub = sub_df[["capacity_Ah", key]].dropna()
+        if len(sub) < 5:
+            return np.array([]), np.array([])
+        bins  = np.linspace(cap_lo, cap_hi, n_bins + 1)
+        mids  = (bins[:-1] + bins[1:]) / 2
+        meds  = []
+        for lo, hi in zip(bins[:-1], bins[1:]):
+            seg_vals = sub.loc[(sub["capacity_Ah"] >= lo) & (sub["capacity_Ah"] < hi), key]
+            meds.append(np.nanmedian(seg_vals) if len(seg_vals) >= 3 else np.nan)
+        meds  = np.array(meds, dtype=float)
+        valid = np.isfinite(meds)
+        return mids[valid], meds[valid]
+
+    # ── 서브플랏 그리기 ───────────────────────────────────────────────────────
+    for ai, base in enumerate(base_names):
+        ax = axes[ai // ncols][ai % ncols]
+        ax.set_facecolor("white")
+        has_data = False
+
+        for scen in _SCEN_ORDER:
+            full_key = f"{base}_{scen}"
+            if full_key not in df.columns:
+                continue
+            color = _SCEN_COLORS[scen]
+            scen_lbl = _SCEN_LABELS[scen]
+
+            for ds, ls in [("MIT", "-"), ("HUST", "--")]:
+                sub = df[df["dataset"] == ds][
+                    ["cell_id", full_key, "capacity_Ah"]
+                ].dropna()
+                if len(sub) == 0:
+                    continue
+                has_data = True
+
+                # 셀별 궤적 (얇고 반투명)
+                for _, grp in sub.groupby("cell_id"):
+                    grp_s = grp.sort_values("capacity_Ah", ascending=False)
+                    ax.plot(
+                        grp_s["capacity_Ah"], grp_s[full_key],
+                        color=color, lw=0.7, alpha=0.18, ls=ls,
+                    )
+
+                # 데이터셋별 중앙값 추세선 (굵음, 범례 첫 MIT만 레이블)
+                mx, my = _median_trend(sub, full_key)
+                if len(mx) >= 2:
+                    lbl = (f"{scen_lbl} / {ds}"
+                           if (ds == "MIT" and ls == "-") else None)
+                    ax.plot(mx, my, color=color, lw=2.0, alpha=0.85,
+                            ls=ls, label=lbl, zorder=3)
+
+        if not has_data:
+            ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=9, color="gray")
+
+        # 서브플랏 장식
+        hi_lbl = HI_LABELS.get(f"{base}_{ref_seg}", base)
+        ax.set_title(base.replace("stat_", "").replace("diff_", "")
+                        .replace("lfp_", "").replace("morph_", ""),
+                     fontsize=8.5, fontweight="bold", pad=3)
+        ax.set_xlabel("Cap (Ah)", fontsize=7)
+        ax.set_ylabel(hi_lbl, fontsize=7)
+        ax.tick_params(labelsize=6.5)
+        ax.grid(True, lw=0.3, alpha=0.35)
+        ax.set_xlim(cap_lo, cap_hi)
+
+        if is_morph:
+            ax.set_ylim(bottom=0)
+            ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5, zorder=0)
+
+    # 빈 axes 숨기기
+    for ai in range(n_his, nrows * ncols):
+        axes[ai // ncols][ai % ncols].set_visible(False)
+
+    # ── 공통 범례 ─────────────────────────────────────────────────────────────
+    handles = []
+    # 시나리오 색상 (실선 아이콘)
+    for scen in _SCEN_ORDER:
+        handles.append(
+            plt.Line2D([0], [0], color=_SCEN_COLORS[scen], lw=2.2, ls="-",
+                       label=_SCEN_LABELS[scen])
+        )
+    # 데이터셋 구분 (굵은 선 vs 점선)
+    handles += [
+        plt.Line2D([0], [0], color="dimgray", lw=2.0, ls="-",  label="MIT (실선)"),
+        plt.Line2D([0], [0], color="dimgray", lw=2.0, ls="--", label="HUST (점선)"),
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower right",
+        fontsize=8.5,
+        framealpha=0.90,
+        bbox_to_anchor=(1.0, 0.0),
+        ncol=2,
+    )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(out_path, dpi=140, bbox_inches="tight")
+    print(f"  저장: {out_path}")
+    plt.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -384,8 +584,13 @@ def main():
 
     # ── Figure 3-A/B/C/D: 카테고리별 세그먼트 HI 열화 추이 ───────────────
     for cat, cat_title, fname in CATEGORIES:
-        print(f"\n=== 세그먼트 HI 추이 — {cat_title} ===")
+        print(f"\n=== 세그먼트 HI 추이 -{cat_title} ===")
         plot_segment_hi_trend(df, hi_plot_dir / fname, cat, cat_title)
+
+    # ── Figure 4-A/B/C/D: 시나리오 오버레이 ─────────────────────────────
+    for cat, cat_title, fname in OVERLAY_CATEGORIES:
+        print(f"\n=== 시나리오 오버레이 -{cat_title} ===")
+        plot_segment_hi_overlay(df, hi_plot_dir / fname, cat, cat_title)
 
     print("\n완료!")
 

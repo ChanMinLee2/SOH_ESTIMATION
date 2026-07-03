@@ -574,7 +574,7 @@ def main():
     parser.add_argument("--vend-min", type=float, default=1.8,
                         help="[필터6] 방전 종지전압 하한 V (기본: 1.8)")
     # 필터7 파라미터
-    parser.add_argument("--shape-sigma",  type=float, default=50.0,
+    parser.add_argument("--shape-sigma",  type=float, default=5.0,
                         help="[필터7] 형상 편차 robust z 임계값 (기본: 30.0). 낮을수록 더 많이 제거")
     parser.add_argument("--shape-window", type=int,   default=11,
                         help="[필터7] 기준 곡선 rolling median 윈도우 (기본: 11)")

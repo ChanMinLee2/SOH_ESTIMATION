@@ -1,7 +1,7 @@
 """
 seg_corr_analysis.py
 
-411-HI 구조 기준 세그먼트 × 카테고리별 상관분석 + Scenario 구분 능력 분석.
+411-HI 구조 기준 세그먼트 × 카테고리별 상관분석 + MI 분석 + Scenario 구분 능력 분석.
 
 분석 단위: 6구간(dis_hi/mid/lo, chg_lo/mid/hi) × 4카테고리(Stat/Diff/LFP/Morph) = 24 그룹
 정답(target): capacity_Ah (셀 내부 Spearman 상관계수 → 전체 셀 평균)
@@ -15,6 +15,9 @@ seg_corr_analysis.py
   corr_matrix_lfp_{ds}.png   — 카테고리 C
   top_cross_{ds}.png         — 4카테고리 × 6구간 Top-5 HI 비교 (전체 요약)
   scenario_eps2_{ds}.png     — HI 컨셉별 Scenario(hi/mid/lo) 구분 능력 ε²
+  mi_rank_category_{ds}.png  — 4카테고리별 HI Mutual Information 랭킹
+  mi_vs_rho_{ds}.png         — MI vs |ρ| 산점도 (⚠ 항목 식별)
+  corr_3d_{ds}.png           — 시나리오(hi/mid/lo)별 |ρ| 3D 산점도
 
 사용:
   python 4_hi_analysis/seg_corr_analysis.py
@@ -36,6 +39,13 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kruskal as _kruskal
 from scipy.stats import spearmanr
+
+try:
+    from sklearn.feature_selection import mutual_info_regression as _mir
+    _HAS_SKLEARN = True
+except ImportError:
+    _HAS_SKLEARN = False
+    print("[경고] scikit-learn 미설치 — MI 계산 건너뜀")
 
 import matplotlib
 matplotlib.use("Agg")
@@ -157,6 +167,51 @@ def summarise(cell_corr_df: pd.DataFrame) -> pd.DataFrame:
         "median":  cell_corr_df.median(skipna=True),
         "n_valid": cell_corr_df.notna().sum(),
     }).sort_values("mean", key=abs, ascending=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mutual Information 계산
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cell_mi(args):
+    cell_key, sub, feat_cols, min_cycles = args
+    cap = sub["capacity_Ah"].values
+    if len(cap) < min_cycles or not _HAS_SKLEARN:
+        return cell_key, None
+    result = {}
+    for col in feat_cols:
+        vals = sub[col].values
+        mask = np.isfinite(vals) & np.isfinite(cap)
+        if mask.sum() < min_cycles:
+            result[col] = np.nan
+        else:
+            mi = _mir(vals[mask].reshape(-1, 1), cap[mask],
+                      discrete_features=False, random_state=42)[0]
+            result[col] = float(mi)
+    return cell_key, pd.Series(result)
+
+
+def compute_mi(df: pd.DataFrame, feat_cols: list,
+               min_cycles: int = 5, workers: int = 4) -> pd.DataFrame:
+    """셀별 MI(feature, capacity_Ah). 반환: (n_cells, n_feats), 값 ≥ 0 (nats)."""
+    groups = list(df.groupby(["dataset", "cell_id"]))
+    args   = [(key, sub[feat_cols + ["capacity_Ah"]], feat_cols, min_cycles)
+              for key, sub in groups]
+    rows = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for key, ser in ex.map(_cell_mi, args):
+            if ser is not None:
+                rows[key] = ser
+    return pd.DataFrame(rows).T
+
+
+def summarise_mi(cell_mi_df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({
+        "mean":    cell_mi_df.mean(skipna=True),
+        "std":     cell_mi_df.std(skipna=True),
+        "median":  cell_mi_df.median(skipna=True),
+        "n_valid": cell_mi_df.notna().sum(),
+    }).sort_values("mean", ascending=False)
 
 
 def feature_corr_matrix(df: pd.DataFrame, feat_cols: list) -> pd.DataFrame:
@@ -744,6 +799,308 @@ def plot_scenario_eps2(eps2_df: pd.DataFrame, out_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plot 7: MI 카테고리별 랭킹
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
+                          dataset_name: str = ""):
+    """4 카테고리 서브플롯 — HI base 이름별 avg MI 랭킹.
+
+    all_mi_summaries: {cat: {seg: (mi_summary_df, hi_keys)}}
+    막대 = 6세그먼트 평균 MI,  점 = 세그먼트별 MI (색=SEG_COLORS).
+    """
+    n_cats = len(CATEGORIES)
+    fig_h  = sum(max(3.5, len(bk) * 0.55) for _, _, _, _, bk in CATEGORIES)
+
+    fig, axes = plt.subplots(n_cats, 1, figsize=(12, fig_h),
+                              constrained_layout=True)
+    if n_cats == 1:
+        axes = [axes]
+
+    ds_lbl = f"[{dataset_name}] " if dataset_name else ""
+    fig.suptitle(
+        f"{ds_lbl}카테고리별 HI Mutual Information 랭킹\n"
+        "막대 = 6세그먼트 평균 MI (nats)   점 = 세그먼트별 MI",
+        fontsize=13, fontweight="bold",
+    )
+
+    for ax, (cat, cat_title, _, _, base_keys) in zip(axes, CATEGORIES):
+        color    = CAT_COLORS.get(cat, "#888888")
+        seg_sums = all_mi_summaries.get(cat, {})
+        if not seg_sums:
+            ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center",
+                    transform=ax.transAxes)
+            continue
+
+        # base key → {seg → avg_mi} 집계
+        base_mi: dict = {}
+        for seg, (mi_summ, _hi_keys) in seg_sums.items():
+            for feat_key in mi_summ.index:
+                concept = _concept_from_key(feat_key)
+                base    = _short_label(concept)
+                base_mi.setdefault(base, {})[seg] = mi_summ.loc[feat_key, "mean"]
+
+        if not base_mi:
+            ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                    transform=ax.transAxes)
+            continue
+
+        avg_mi       = {b: np.nanmean(list(sv.values())) for b, sv in base_mi.items()}
+        sorted_bases = sorted(avg_mi, key=lambda b: avg_mi[b], reverse=True)
+        means        = [avg_mi[b] for b in sorted_bases]
+
+        # 높은 것이 위: sorted_bases[::-1] = ascending from bottom
+        y_pos = np.arange(len(sorted_bases))
+        ax.barh(y_pos, means[::-1], color=color, alpha=0.72, height=0.60)
+
+        # 세그먼트별 점
+        for yi, base in enumerate(sorted_bases[::-1]):
+            for seg, seg_color in SEG_COLORS.items():
+                mi_val = base_mi.get(base, {}).get(seg, np.nan)
+                if np.isfinite(mi_val):
+                    ax.scatter(mi_val, yi, color=seg_color, s=22, zorder=5,
+                               edgecolors="white", linewidths=0.4, alpha=0.85)
+
+        # 값 레이블
+        for yi, m in enumerate(means[::-1]):
+            if np.isfinite(m) and m > 0:
+                ax.text(m + 0.001, yi, f"{m:.3f}", va="center", fontsize=7)
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(sorted_bases[::-1], fontsize=8)
+        ax.set_xlabel("MI (nats)", fontsize=9)
+        ax.set_title(cat_title, fontsize=10, fontweight="bold", color=color)
+        ax.grid(axis="x", alpha=0.3, lw=0.7)
+
+    seg_handles = [Patch(facecolor=SEG_COLORS[s], label=s) for s in SEG_COLORS]
+    fig.legend(handles=seg_handles, loc="lower center", ncol=6,
+               fontsize=8.5, bbox_to_anchor=(0.5, -0.03),
+               title="점 = 세그먼트별 MI")
+
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot 8: MI vs |ρ| 산점도
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_mi_vs_rho(all_summaries: dict, all_mi_summaries: dict,
+                   out_path: Path, dataset_name: str = ""):
+    """MI vs |ρ| 산점도 — 각 점 = (HI concept, seg) 조합.
+
+    상단 왼쪽(고MI/저|ρ|) → 비단조 관계, ⚠ 항목 재평가 후보.
+    상단 오른쪽(고MI/고|ρ|) → 우수 HI 후보.
+    점선 = Gaussian 이론: MI = −½ln(1−ρ²).
+    """
+    records = []
+    for cat, _cat_title, _, _, _base_keys in CATEGORIES:
+        for seg in SEG_COLORS:
+            corr_entry = all_summaries.get(cat, {}).get(seg)
+            mi_entry   = all_mi_summaries.get(cat, {}).get(seg)
+            if corr_entry is None or mi_entry is None:
+                continue
+            summ_rho, _ = corr_entry
+            summ_mi,  _ = mi_entry
+            for feat_key in summ_rho.index:
+                if feat_key not in summ_mi.index:
+                    continue
+                rho_val = summ_rho.loc[feat_key, "mean"]
+                mi_val  = summ_mi.loc[feat_key, "mean"]
+                if pd.isna(rho_val) or pd.isna(mi_val):
+                    continue
+                records.append({
+                    "cat":     cat,
+                    "seg":     seg,
+                    "base":    _short_label(_concept_from_key(feat_key)),
+                    "abs_rho": abs(float(rho_val)),
+                    "mi":      float(mi_val),
+                })
+
+    if not records:
+        print("  [MI vs ρ] 데이터 없음, 건너뜀")
+        return
+
+    df_plot = pd.DataFrame(records)
+
+    fig, ax = plt.subplots(figsize=(11, 8), constrained_layout=True)
+    ds_lbl = f"[{dataset_name}] " if dataset_name else ""
+    ax.set_title(
+        f"{ds_lbl}MI vs |ρ|  산점도\n"
+        "각 점 = HI concept × 세그먼트  |  상단 좌측 = 비단조 관계(⚠ 후보)",
+        fontsize=12, fontweight="bold",
+    )
+
+    # Gaussian 이론 곡선
+    rho_th = np.linspace(0.001, 0.999, 400)
+    mi_th  = -0.5 * np.log(1.0 - rho_th ** 2)
+    ax.plot(rho_th, mi_th, "--", color="gray", lw=1.3, alpha=0.55, zorder=1,
+            label="Gaussian 이론: MI = −½ln(1−ρ²)")
+
+    for cat in ["Stat", "Diff", "LFP", "Morph"]:
+        sub = df_plot[df_plot["cat"] == cat]
+        if sub.empty:
+            continue
+        ax.scatter(sub["abs_rho"], sub["mi"],
+                   color=CAT_COLORS[cat], s=32, alpha=0.72,
+                   edgecolors="white", linewidths=0.4,
+                   label=cat, zorder=3)
+
+    # 고MI/저|ρ| 영역 주석 (상위 30% MI & |ρ| < 0.3)
+    rho_thr = 0.3
+    mi_thr  = float(df_plot["mi"].quantile(0.70))
+    interesting = df_plot[
+        (df_plot["abs_rho"] < rho_thr) & (df_plot["mi"] > mi_thr)
+    ].sort_values("mi", ascending=False)
+    for _, row in interesting.head(8).iterrows():
+        ax.annotate(
+            f"{row['base']} ({row['seg']})",
+            (row["abs_rho"], row["mi"]),
+            textcoords="offset points", xytext=(8, 4),
+            fontsize=6.5, alpha=0.9,
+            arrowprops=dict(arrowstyle="-", lw=0.5, color="#888888"),
+        )
+
+    ax.axvspan(0, rho_thr, alpha=0.06, color="orange", zorder=0)
+    ax.axhline(mi_thr, color="#bbbbbb", lw=0.8, ls=":", zorder=0)
+    ax.text(0.01, mi_thr + 0.003, f"MI 70th pctile ({mi_thr:.3f})",
+            fontsize=7, color="#999999")
+
+    ax.set_xlabel("|Spearman ρ|  (셀 평균)", fontsize=10)
+    ax.set_ylabel("Mutual Information  (nats,  셀 평균)", fontsize=10)
+    ax.legend(fontsize=9, loc="upper left", framealpha=0.9)
+    ax.grid(alpha=0.25, lw=0.7)
+
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot 9: 시나리오별 |ρ| 3D 산점도
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_corr_3d(all_summaries: dict, out_path: Path, dataset_name: str = "") -> None:
+    """방전/충전 시나리오(hi/mid/lo)별 |ρ| 3D 산점도.
+
+    방전: X=dis_hi, Y=dis_mid, Z=dis_lo
+    충전: X=chg_hi, Y=chg_mid, Z=chg_lo
+    각 점 = HI 하나, 색상 = 카테고리(Stat/Diff/LFP/Morph)
+    """
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    _MODE_CFG = [
+        ("discharge", "방전", "dis_hi",  "dis_mid",  "dis_lo"),
+        ("charge",    "충전", "chg_hi",  "chg_mid",  "chg_lo"),
+    ]
+
+    _CAT_PREFIX = {"Stat": "stat", "Diff": "diff", "LFP": "lfp", "Morph": "morph"}
+    _CAT_KEYS   = {"Stat": STAT_KEYS, "Diff": DIFF_KEYS, "LFP": LFP_KEYS, "Morph": MORPH_KEYS}
+
+    rows = []
+    for mode_name, mode_label, seg_hi, seg_mid, seg_lo in _MODE_CFG:
+        for cat, *_ in CATEGORIES:
+            s_hi  = all_summaries.get(cat, {}).get(seg_hi)
+            s_mid = all_summaries.get(cat, {}).get(seg_mid)
+            s_lo  = all_summaries.get(cat, {}).get(seg_lo)
+            if s_hi is None or s_mid is None or s_lo is None:
+                continue
+            df_hi,  _ = s_hi
+            df_mid, _ = s_mid
+            df_lo,  _ = s_lo
+            prefix    = _CAT_PREFIX[cat]
+            for base in _CAT_KEYS[cat]:
+                k_hi  = f"{prefix}_{base}_{seg_hi}"
+                k_mid = f"{prefix}_{base}_{seg_mid}"
+                k_lo  = f"{prefix}_{base}_{seg_lo}"
+                if k_hi not in df_hi.index or k_mid not in df_mid.index or k_lo not in df_lo.index:
+                    continue
+                x = df_hi.at[k_hi,  "mean"]
+                y = df_mid.at[k_mid, "mean"]
+                z = df_lo.at[k_lo,  "mean"]
+                if pd.isna(x) or pd.isna(y) or pd.isna(z):
+                    continue
+                rows.append({
+                    "mode": mode_name, "mode_label": mode_label,
+                    "cat": cat, "hi_key": base,
+                    "label": HI_LABELS.get(k_hi, base),
+                    "x": abs(float(x)), "y": abs(float(y)), "z": abs(float(z)),
+                })
+
+    if not rows:
+        print("[plot_corr_3d] 데이터 없음, 건너뜀"); return
+
+    data = pd.DataFrame(rows)
+
+    cats    = ["Stat", "Diff", "LFP", "Morph"]
+    markers = {"Stat": "o", "Diff": "s", "LFP": "^", "Morph": "D"}
+    sizes   = {"Stat": 38, "Diff": 38, "LFP": 44, "Morph": 44}
+
+    fig = plt.figure(figsize=(18, 8.5))
+    fig.patch.set_facecolor("#f5f6fa")
+
+    for col_idx, (mode_name, mode_label, seg_hi, seg_mid, seg_lo) in enumerate(_MODE_CFG):
+        ax = fig.add_subplot(1, 2, col_idx + 1, projection="3d")
+        ax.set_facecolor("#f5f6fa")
+        sub = data[data["mode"] == mode_name]
+
+        for cat in cats:
+            s = sub[sub["cat"] == cat]
+            if s.empty:
+                continue
+            ax.scatter(
+                s["x"], s["y"], s["z"],
+                c=CAT_COLORS.get(cat, "#888888"),
+                marker=markers[cat],
+                s=sizes[cat], alpha=0.78,
+                edgecolors="white", linewidths=0.35,
+                label=cat, depthshade=True,
+            )
+
+        # x=y=z 대각선
+        diag = np.linspace(0, 1, 60)
+        ax.plot(diag, diag, diag, color="#555555", lw=0.9, alpha=0.45,
+                linestyle="--", zorder=0)
+
+        # 등방선 (xy, xz, yz 투영 참조선)
+        ax.plot(diag, diag, np.zeros(60), color="#aaaaaa", lw=0.5, alpha=0.3)
+        ax.plot(diag, np.zeros(60), diag, color="#aaaaaa", lw=0.5, alpha=0.3)
+        ax.plot(np.zeros(60), diag, diag, color="#aaaaaa", lw=0.5, alpha=0.3)
+
+        ax.set_xlabel(f"{seg_hi}  |ρ|", fontsize=9, labelpad=7)
+        ax.set_ylabel(f"{seg_mid}  |ρ|", fontsize=9, labelpad=7)
+        ax.set_zlabel(f"{seg_lo}  |ρ|", fontsize=9, labelpad=7)
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_zlim(0, 1)
+        ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
+        ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+        ax.set_zticks([0, 0.25, 0.5, 0.75, 1.0])
+        ax.tick_params(labelsize=7)
+        ax.view_init(elev=22, azim=45)
+        ax.set_title(
+            f"{mode_label}  (X={seg_hi} / Y={seg_mid} / Z={seg_lo})",
+            fontsize=10.5, fontweight="bold", pad=10,
+        )
+        ax.grid(True, lw=0.4, alpha=0.3)
+
+    # 공통 범례
+    leg_handles = [
+        Patch(facecolor=CAT_COLORS.get(c, "#888"), label=c) for c in cats
+    ]
+    fig.legend(handles=leg_handles, loc="lower center", ncol=4,
+               fontsize=9.5, framealpha=0.85, bbox_to_anchor=(0.5, 0.01))
+
+    ds_label = f" — {dataset_name}" if dataset_name else ""
+    fig.suptitle(f"시나리오(high / mid / low)별 |ρ| 3D 산점도{ds_label}",
+                 fontsize=13, fontweight="bold", y=0.99)
+    plt.tight_layout(rect=[0, 0.06, 1, 0.97])
+    plt.savefig(out_path, dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"  [Plot] 3D 산점도 → {out_path.name}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -790,10 +1147,12 @@ def main():
               f"{df_ds.groupby('cell_id').ngroups}셀)")
         print(f"{'='*60}")
 
-        # all_summaries[cat][seg] = (summary_df, hi_keys)
-        # all_matrices[cat][seg]  = (corr_df, hi_keys)
-        all_summaries: dict = {cat: {} for cat, *_ in CATEGORIES}
-        all_matrices:  dict = {cat: {} for cat, *_ in CATEGORIES}
+        # all_summaries[cat][seg]    = (summary_df, hi_keys)
+        # all_matrices[cat][seg]     = (corr_df, hi_keys)
+        # all_mi_summaries[cat][seg] = (mi_summary_df, hi_keys)
+        all_summaries:    dict = {cat: {} for cat, *_ in CATEGORIES}
+        all_matrices:     dict = {cat: {} for cat, *_ in CATEGORIES}
+        all_mi_summaries: dict = {cat: {} for cat, *_ in CATEGORIES}
 
         for cat, cat_title, rank_stem, matrix_stem, _base_keys in CATEGORIES:
             print(f"\n─── {cat_title} ───")
@@ -815,6 +1174,16 @@ def main():
                 top_lbl = HI_LABELS.get(summ.index[0], summ.index[0])
                 print(f"  [{seg}] 유효셀={n_valid}  "
                       f"top ρ={summ['mean'].iloc[0]:+.3f} ({top_lbl})")
+
+                # Mutual Information
+                if _HAS_SKLEARN:
+                    cell_mi_df = compute_mi(df_ds, avail,
+                                            min_cycles=args.min_cycles,
+                                            workers=args.workers)
+                    mi_summ = summarise_mi(cell_mi_df)
+                    all_mi_summaries[cat][seg] = (mi_summ, avail)
+                    top_mi_lbl = HI_LABELS.get(mi_summ.index[0], mi_summ.index[0])
+                    print(f"  [{seg}] top MI={mi_summ['mean'].iloc[0]:.4f} ({top_mi_lbl})")
 
                 # feature 상관행렬
                 corr_mat = feature_corr_matrix(df_ds, avail)
@@ -852,6 +1221,24 @@ def main():
         eps2_df   = compute_scenario_eps2(df_ds)
         eps2_path = OUT_BASE / f"scenario_eps2_{ds_name.lower()}.png"
         plot_scenario_eps2(eps2_df, eps2_path, dataset_name=ds_name)
+
+        # ── Plot 7: MI 카테고리별 랭킹 ────────────────────────────────────────
+        if _HAS_SKLEARN and any(all_mi_summaries[c] for c, *_ in CATEGORIES):
+            mi_rank_path = OUT_BASE / f"mi_rank_category_{ds_name.lower()}.png"
+            print(f"\n  [Plot] MI Rank (category) → {mi_rank_path.name}")
+            plot_mi_rank_category(all_mi_summaries, mi_rank_path,
+                                  dataset_name=ds_name)
+
+            # ── Plot 8: MI vs |ρ| ─────────────────────────────────────────────
+            mi_rho_path = OUT_BASE / f"mi_vs_rho_{ds_name.lower()}.png"
+            print(f"  [Plot] MI vs |ρ|  → {mi_rho_path.name}")
+            plot_mi_vs_rho(all_summaries, all_mi_summaries,
+                           mi_rho_path, dataset_name=ds_name)
+
+        # ── Plot 9: 시나리오별 |ρ| 3D 산점도 ────────────────────────────────
+        corr3d_path = OUT_BASE / f"corr_3d_{ds_name.lower()}.png"
+        print(f"\n  [Plot] 3D 산점도 → {corr3d_path.name}")
+        plot_corr_3d(all_summaries, corr3d_path, dataset_name=ds_name)
 
         # ε² Top-10 텍스트 요약
         print(f"\n  {'─'*60}")

@@ -86,7 +86,7 @@
   │                            corr_matrix_<ds>.png          │
   │                            top7_cross_<ds>.png           │
   │                                                          │
-  │  HI 321종  (Global 15 + Segment 6구간×51)                │
+  │  HI 411종  (Global 15 + Segment 6구간×66)                │
   │  설계 상세: docs/NEW_HIS.md 참조                          │
   │                                                          │
   │  Global (15):                                            │
@@ -95,22 +95,28 @@
   │    dva_valley_q/depth, ce, cv_q_frac, cv_time_frac,      │
   │    chg_ica_peak1_h                                       │
   │                                                          │
-  │  Segment (6구간 × 51):                                   │
+  │  Segment (6구간 × 66):                                   │
   │    세그먼트: dis_hi / dis_mid / dis_lo                   │
   │             chg_lo / chg_mid / chg_hi  (q_frac 기준)    │
-  │    카테고리 A — 통계(15): stat_{k}_{seg}                 │
+  │    카테고리 A — 통계(20): stat_{k}_{seg}                 │
   │      v_mean, v_std, v_skew, v_kurt, v_ent,              │
   │      i_mean, i_std, v_med, corr_qi, corr_vi,            │
-  │      q_abs, energy_seg, v_iqr, v_range, v_p10           │
-  │    카테고리 B — 미분(15): diff_{k}_{seg}                 │
+  │      q_abs, energy_seg, v_iqr, v_range, v_p10,          │
+  │      v_p90, v_samp_ent, corr_vt, i_q_slope,             │
+  │      v_detrended_std                                     │
+  │    카테고리 B — 미분(20): diff_{k}_{seg}                 │
   │      dvdq_mean/std/max_abs/min/area, dqdv_peak_h/v/w,   │
   │      dqdv_area, dvdt_slope, dqdv_peak_asym,             │
-  │      d2vdq2_rms, dvdq_skew/ent, r_dyn_seg               │
-  │    카테고리 C — LFP 특징(15): lfp_{k}_{seg}             │
+  │      d2vdq2_rms, dvdq_skew/ent, r_dyn_seg,              │
+  │      dqdv_valley_h/v, dvdq_peak_q, dvdq_valley_q,       │
+  │      dqdv_area_asym                                      │
+  │    카테고리 C — LFP 특징(20): lfp_{k}_{seg}             │
   │      plateau_frac/v_mean/v_std/q_frac, nonlin_idx,      │
   │      v_sag_mid, v_flatness, delta_v_rms, ocv_slope,     │
   │      knee_v/q_frac, v_concavity, phase_entry_dvdq,      │
-  │      v_q_pearson, ica_peak_cnt                          │
+  │      v_q_pearson, ica_peak_cnt,                         │
+  │      plateau_v_slope, v_gradient_exit, plateau_q_onset, │
+  │      dv_dt_plateau, v_ent_plateau                       │
   │    카테고리 D — 형태학적 거리(6): morph_{k}_{seg}        │
   │      vt_dtw,  vq_dtw,  ve_dtw   (V-t/V-Q/V-E DTW)      │
   │      vt_frec, vq_frec, ve_frec  (V-t/V-Q/V-E Fréchet)  │
@@ -133,8 +139,8 @@
 | `2_preprocess/preprocess.py` | 2 | 7단계 이상 사이클·행 제거 (빈 사이클, time 보정, 0전류 rest, 시간 단절, Rolling Median 2-pass, vend_min, 형상 편차) |
 | `2_preprocess/plot_cleaning_report.py` | 2 | cleaning_report.csv 읽어 필터별 시각화 플롯 생성 |
 | `3_integrity/check_integrity.py` | 3 | unified PKL 무결성 검사 → 이상 목록 CSV 저장 |
-| `4_hi_analysis/hi_correlation.py` | 4 | HI 321종 추출 및 풀링 Spearman 상관 시각화 (Global 15 + Segment 6구간×51, 카테고리 A–D) |
-| `4_hi_analysis/hi_segment_viz.py` | 4 | 세그먼트 분할 확인 + 카테고리 A–D HI 열화 추이 시각화 (321-HI) |
+| `4_hi_analysis/hi_correlation.py` | 4 | HI 411종 추출 및 풀링 Spearman 상관 시각화 (Global 15 + Segment 6구간×66, 카테고리 A–D) |
+| `4_hi_analysis/hi_segment_viz.py` | 4 | 세그먼트 분할 확인 + 카테고리 A–D HI 열화 추이 시각화 (411-HI) |
 | `4_hi_analysis/seg_corr_analysis.py` | 4 | 세그먼트별 within-cell Spearman 상관계수 랭킹·히트맵·Top-5 비교 + 통합 feature 랭킹 (4카테고리) |
 
 **분석 도구** (파이프라인 외부):
@@ -380,6 +386,109 @@ python 4_hi_analysis/seg_corr_analysis.py --top-n 7
 - `feature_rank_battery_<ds>.png` — 전체 카테고리 통합 feature 랭킹 (Σ|ρ| 기준, 배터리별)
 - `feature_rank_seg.png`          — 6구간별 feature 랭킹 (모든 배터리 통합, 공통 y축 순서)
 
+#### 4-D. HI 추출 내부 처리 흐름 — 검증
+
+`hi_correlation.py` 의 `_extract_one_cell` 이 한 사이클을 처리하는 단계별 흐름.
+
+---
+
+**Step A — phase 분리 (충전 / 방전)**
+
+```
+MIT, HUST 모두 pkl에 phase 컬럼 이미 존재
+→ _add_phase() 추론 호출 없음
+
+dis  = grp[grp["phase"] == "discharge"]   ← I 음수 행만
+chg  = grp[grp["phase"] == "charge"]      ← I 양수 행만
+```
+
+`_add_phase()` 가 호출될 경우(phase 컬럼 없을 때): `|I| > 0.01 A` 기준으로 charge/discharge 분류.
+
+---
+
+**Step B — q_cum 계산 (모드별 독립 적산)**
+
+```
+방전: i_mag = |dis["current_A"]|
+      q_d   = cumsum(i_mag × dt) / 3600   →  q_local = q_d[-1]
+
+충전: ic    = |chg["current_A"]|
+      q_c   = cumsum(ic × dtc) / 3600     →  q_tc    = q_c[-1]
+```
+
+방전 q_cum 과 충전 q_cum 은 **서로 독립** — q_frac 정규화가 교차하지 않음.
+
+---
+
+**Step C — q_frac 구간 마스크 → 세그먼트 라벨 부여**
+
+```
+방전 세그먼트 (DIS_SEGS):
+  q_frac [0.0, 0.4)  →  dis_hi   (SoC 60–100%)  ← 방전 초반, 고SoC
+  q_frac [0.4, 0.7)  →  dis_mid  (SoC 30–60%)
+  q_frac [0.7, 1.0)  →  dis_lo   (SoC 0–30%)    ← 방전 말기, 저SoC
+
+충전 세그먼트 (CHG_SEGS):
+  q_frac [0.0, 0.4)  →  chg_lo   (SoC 0–40%)   ← 충전 초반, 저SoC
+  q_frac [0.4, 0.7)  →  chg_mid  (SoC 40–70%)
+  q_frac [0.7, 1.0)  →  chg_hi   (SoC 70–100%) ← 충전 말기, 고SoC
+```
+
+경계 조건은 반열림 구간 `[lo, hi)` — 구간별 경계점 1개가 누락되나 무시 가능 수준.
+
+HUST 1-1 첫 사이클 실측 확인 (q_local=1.179 Ah, q_tc=1.183 Ah):
+
+| 세그먼트 | 절대 Q 경계 | V 범위 | I_mean |
+|----------|------------|--------|--------|
+| dis_hi  | 0–0.472 Ah | 3.11–3.40 V | 3.81 A (5C→1C 전환 포함) |
+| dis_mid | 0.472–0.825 Ah | 3.18–3.24 V | 1.10 A (1C) |
+| dis_lo  | 0.825–1.179 Ah | 2.05–3.18 V | 1.99 A (2C) |
+| chg_lo  | 0–0.473 Ah | 2.77–3.50 V | 5.50 A (fast CC) |
+| chg_mid | 0.473–0.828 Ah | 3.50–3.55 V | 5.50 A (fast CC) |
+| chg_hi  | 0.828–1.183 Ah | 3.38–3.60 V | 0.94 A (1C CC + CV) |
+
+---
+
+**Step D — `_seg_stat` / `_seg_diff` / `_seg_lfp` 호출 → HI 컬럼명 규칙**
+
+```python
+row.update(_seg_stat(vs, ims, dts, qcs, seg="dis_hi"))
+# → {"stat_v_mean_dis_hi": 3.149, "stat_i_q_slope_dis_hi": ..., ...}
+```
+
+- 컬럼명: `{카테고리}_{HI이름}_{세그먼트}` (예: `stat_v_mean_chg_hi`, `diff_dvdq_mean_dis_mid`)
+- **`ims = |current_A|` 사용** → `stat_i_mean` 등 I 관련 HI는 항상 양수(절댓값). 충전/방전 구분은 컬럼명 suffix 또는 scen 부호로만 판단.
+
+---
+
+**Step E — `_to_seg_df` → long-format 변환, scen / segment_id 부여**
+
+```
+suffix 제거: "stat_v_mean_dis_hi" → "stat_v_mean"
+scen / segment_id 부여:
+
+  seg 이름   scen   segment_id
+  chg_lo    +1      0
+  chg_mid   +2      1
+  chg_hi    +3      2
+  dis_hi    -3      3
+  dis_mid   -2      4
+  dis_lo    -1      5
+```
+
+scen 부호: **양수 = 충전, 음수 = 방전**.
+
+---
+
+**주의사항**
+
+| 항목 | 내용 |
+|------|------|
+| `_4_data_hi/seg/*.pkl` 의 `capacity_Ah` | `stat_q_abs_{seg}` (구간 누적 Q) — 전체 방전 용량이 아님. SOH x축으로 직접 사용 불가 |
+| 시각화(`hi_segment_viz.py`) x축 capacity_Ah | flat HI DataFrame 의 전체 방전 용량 사용 → 올바름 |
+| MIT `capacity_Ah` 열 | 원본 .mat 에서 변환된 값으로 실측 방전 적산량과 초기 사이클에서 최대 ~10% 차이 발생 가능 |
+| `hi_segment_trend_*.png` 행 순서 | `ALL_SEGS = DIS_SEGS + CHG_SEGS` 순서(방전 먼저)이나 `SEG_ROW_LABEL` 이 충전 먼저로 정의되어 있어 레이블·배경색 불일치 발생 (수정 완료: `hi_segment_viz.py` L67–75) |
+
 ---
 
 ### 분석 도구 — 셀 전체 사이클 시각화 (`4_hi_analysis/plot_cell_cycles.py`)
@@ -533,7 +642,7 @@ LFP_SOH_prediction/
     HUST/
   docs/
     PIPELINE.md
-    NEW_HIS.md                       321-HI 설계 상세 (카테고리 A–D, LFP 도메인 전문가 관점)
+    NEW_HIS.md                       411-HI 설계 상세 (카테고리 A–D, LFP 도메인 전문가 관점)
     HI_DESCRIPTION.md
     DATASET_ANOMALIES.md           파이프라인 단계별 이상치 처리 정리
     correlation_comparison.md      preprocess.ipynb vs 현재 / 풀링 vs within-cell 비교

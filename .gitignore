@@ -3,3 +3,7 @@
 *.pkl
 *.mat
 *.pyc
+*.json
+*.pdf
+*.txt
+*.html
