@@ -964,7 +964,7 @@ def main():
         random.sample(hust_pkls, min(args.n_cells - n_half, len(hust_pkls)))
     )
     if not selected:
-        print("[ERROR] PKL 파일을 찾을 수 없습니다. _2_data_clean/ 경로를 확인하세요.")
+        print("[ERROR] PKL 파일을 찾을 수 없습니다. _4_data_hi/clean/ 경로를 확인하세요.")
         return
 
     print(f"프로파일링 대상: {len(selected)}개 셀, 셀당 최대 {args.n_cycles}사이클, workers={args.workers}")

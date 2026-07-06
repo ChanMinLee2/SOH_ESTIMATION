@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# MIT_DIR = PROJECT_ROOT / "_2_data_clean" / "MIT"
+# MIT_DIR = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
 MIT_DIR = PROJECT_ROOT / "_1_data_unified" / "MIT"
 PLOT_SCRIPT = Path(__file__).resolve().parent / "plot_cell_cycles.py"
 

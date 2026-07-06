@@ -132,7 +132,7 @@ def _pick_cycles(cyc_series, n=4):
 
 
 def _vq_frac(cycle_df, phase):
-    # _2_data_clean PKL에는 phase 컬럼이 없으므로 전류 부호로 판별
+    # _4_data_hi/clean PKL에는 phase 컬럼이 없으므로 전류 부호로 판별
     if phase == "discharge":
         grp = cycle_df[cycle_df["current_A"] < -0.1]
     else:

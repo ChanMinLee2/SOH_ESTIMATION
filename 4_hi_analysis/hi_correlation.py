@@ -1,10 +1,10 @@
 ﻿"""
 hi_correlation.py
 
-MIT + HUST _2_data_clean 에서 HI 411종을 사이클별로 추출하고
+MIT + HUST _4_data_hi/clean 에서 HI 411종을 사이클별로 추출하고
 방전 용량(capacity_Ah)과의 Spearman 상관계수를 계산·시각화.
 
-입력 : _2_data_clean/MIT/*.pkl, _2_data_clean/HUST/*.pkl
+입력 : _4_data_hi/clean/MIT/*.pkl, _4_data_hi/clean/HUST/*.pkl
 출력 : hi_correlation.png
        _4_data_hi/MIT/{cell_id}.pkl
        _4_data_hi/HUST/{cell_id}.pkl
@@ -43,8 +43,8 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STEP_DIR     = Path(__file__).resolve().parent
-MIT_DIR      = PROJECT_ROOT / "_2_data_clean" / "MIT"
-HUST_DIR     = PROJECT_ROOT / "_2_data_clean" / "HUST"
+MIT_DIR      = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
+HUST_DIR     = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
 CACHE_PATH   = STEP_DIR / "hi_features.pkl"
 HI_ROOT      = PROJECT_ROOT / "_4_data_hi"
 
@@ -1767,7 +1767,7 @@ _PHASE_NEG = -0.01   # A 미만 → discharge
 
 
 def _add_phase(df: pd.DataFrame) -> pd.DataFrame:
-    """_2_data_clean 스키마(phase 컬럼 없음)에 phase 컬럼을 current_A 부호로 재구성."""
+    """_4_data_hi/clean 스키마(phase 컬럼 없음)에 phase 컬럼을 current_A 부호로 재구성."""
     df = df.copy()
     cur = df["current_A"]
     df["phase"] = "rest"

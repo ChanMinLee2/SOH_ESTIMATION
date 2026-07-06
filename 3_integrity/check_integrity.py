@@ -1,7 +1,7 @@
 """
 check_integrity.py
 
-_2_data_clean/MIT/, _2_data_clean/HUST/ 전체 pkl 무결성 검사.
+_4_data_hi/clean/MIT/, _4_data_hi/clean/HUST/ 전체 pkl 무결성 검사.
 
 검사 항목:
   [셀 수준]
@@ -33,8 +33,8 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MIT_DIR  = PROJECT_ROOT / "_2_data_clean" / "MIT"
-HUST_DIR = PROJECT_ROOT / "_2_data_clean" / "HUST"
+MIT_DIR  = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
+HUST_DIR = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
 OUT_DIR  = Path(__file__).resolve().parent / "outputs"
 
 EXPECTED_COLS = {"cell_id", "cycle", "segment_id", "time_s",
@@ -234,7 +234,7 @@ def run_check(pkl_dir: Path, expected: int, label: str,
 
 if __name__ == "__main__":
     import argparse, os
-    parser = argparse.ArgumentParser(description="_2_data_clean PKL 무결성 검사")
+    parser = argparse.ArgumentParser(description="_4_data_hi/clean PKL 무결성 검사")
     parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1),
                         help="병렬 프로세스 수 (기본: 4)")
     args = parser.parse_args()

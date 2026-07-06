@@ -45,8 +45,8 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# MIT_DIR  = PROJECT_ROOT / "_2_data_clean" / "MIT"
-# HUST_DIR = PROJECT_ROOT / "_2_data_clean" / "HUST"
+# MIT_DIR  = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
+# HUST_DIR = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
 MIT_DIR  = PROJECT_ROOT / "_1_data_unified" / "MIT"
 HUST_DIR = PROJECT_ROOT / "_1_data_unified" / "HUST"
 STEP_DIR = Path(__file__).resolve().parent

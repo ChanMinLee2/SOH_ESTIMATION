@@ -22,7 +22,7 @@ MIT / HUST _1_data_unified PKL 에 이상 사이클·행 제거를 적용.
      셀 단위 제외이므로 이 스크립트에서는 다루지 않음.
 
 입력:  _1_data_unified/MIT/*.pkl, _1_data_unified/HUST/*.pkl
-출력:  _2_data_clean/MIT/*.pkl, _2_data_clean/HUST/*.pkl
+출력:  _4_data_hi/clean/MIT/*.pkl, _4_data_hi/clean/HUST/*.pkl
        2_preprocess/outputs/cleaning_report.csv
 
 사용:
@@ -50,7 +50,7 @@ from tqdm.auto import tqdm
 PROJECT_ROOT     = Path(__file__).resolve().parent.parent
 _OUTPUTS_ROOT    = Path(__file__).resolve().parent / "outputs"
 OUTPUT_DIR       = _OUTPUTS_ROOT / date.today().strftime("%m%d")
-POSTPROCESS_ROOT = PROJECT_ROOT / "_2_data_clean"
+POSTPROCESS_ROOT = PROJECT_ROOT / "_4_data_hi" / "clean"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,7 +378,7 @@ def _remove_shape_outlier_cycles(df: pd.DataFrame,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _to_clean_schema(df: pd.DataFrame, cell_id: str) -> pd.DataFrame:
-    """7단계 필터 완료 후 _2_data_clean 출력 스키마로 변환.
+    """7단계 필터 완료 후 _4_data_hi/clean 출력 스키마로 변환.
 
     - phase 제거, chg_gap_seg 보존
     - cell_id, segment_id 추가
@@ -800,7 +800,7 @@ def _write_cleaning_summary(df_report: pd.DataFrame,
 def _cap_series(pkl_path: Path):
     """PKL에서 방전 용량 시리즈 (cycles, caps) 반환.
 
-    _1_data_unified (phase 컬럼 있음)와 _2_data_clean (phase 없음) 모두 지원.
+    _1_data_unified (phase 컬럼 있음)와 _4_data_hi/clean (phase 없음) 모두 지원.
     """
     if not pkl_path.exists():
         return np.array([]), np.array([])
