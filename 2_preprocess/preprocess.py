@@ -190,6 +190,11 @@ def _remove_dt_gap_cycles(df: pd.DataFrame,
     if n_chg_rows > 0:
         df_clean = df_clean[~chg_mask].copy()
 
+    # CC 전환 갭: chg_gap_seg 플래그 컬럼 기록 (hi_correlation 에서 읽음)
+    df_clean["chg_gap_seg"] = False
+    if chg_bad_seg:
+        df_clean.loc[df_clean["cycle"].isin(chg_bad_seg), "chg_gap_seg"] = True
+
     df_clean = df_clean.reset_index(drop=True)
     return (df_clean,
             len(dis_bad), dis_bad,
@@ -375,10 +380,10 @@ def _remove_shape_outlier_cycles(df: pd.DataFrame,
 def _to_clean_schema(df: pd.DataFrame, cell_id: str) -> pd.DataFrame:
     """7단계 필터 완료 후 _2_data_clean 출력 스키마로 변환.
 
-    - phase, chg_gap_seg 제거
+    - phase 제거, chg_gap_seg 보존
     - cell_id, segment_id 추가
     - segment_id: 사이클 내 phase 연속 블록 번호(0-indexed), 사이클마다 초기화
-    - 출력 컬럼: [cell_id, cycle, segment_id, time_s, voltage_V, current_A, capacity_Ah]
+    - 출력 컬럼: [cell_id, cycle, segment_id, time_s, voltage_V, current_A, capacity_Ah, chg_gap_seg]
     """
     df = df.sort_values(["cycle", "time_s"]).reset_index(drop=True)
 
@@ -396,10 +401,12 @@ def _to_clean_schema(df: pd.DataFrame, cell_id: str) -> pd.DataFrame:
 
     df["cell_id"] = cell_id
 
-    drop_cols = [c for c in ["phase", "chg_gap_seg"] if c in df.columns]
-    df = df.drop(columns=drop_cols)
+    df = df.drop(columns=["phase"])
 
-    return df[["cell_id", "cycle", "segment_id", "time_s", "voltage_V", "current_A", "capacity_Ah"]]
+    out_cols = ["cell_id", "cycle", "segment_id", "time_s", "voltage_V", "current_A", "capacity_Ah"]
+    if "chg_gap_seg" in df.columns:
+        out_cols.append("chg_gap_seg")
+    return df[out_cols]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -574,7 +581,7 @@ def main():
     parser.add_argument("--vend-min", type=float, default=1.8,
                         help="[필터6] 방전 종지전압 하한 V (기본: 1.8)")
     # 필터7 파라미터
-    parser.add_argument("--shape-sigma",  type=float, default=5.0,
+    parser.add_argument("--shape-sigma",  type=float, default=30.0,
                         help="[필터7] 형상 편차 robust z 임계값 (기본: 30.0). 낮을수록 더 많이 제거")
     parser.add_argument("--shape-window", type=int,   default=11,
                         help="[필터7] 기준 곡선 rolling median 윈도우 (기본: 11)")

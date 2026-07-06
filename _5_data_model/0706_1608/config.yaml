@@ -1,0 +1,48 @@
+data:
+  data_dir: _4_data_hi
+  datasets:
+  - MIT
+  - HUST
+  io_workers: 8
+  min_cycles_per_cell: 10
+  num_workers: 0
+  output_dir: _5_data_model
+  split_seed: 42
+  test_ratio: 0.1
+  train_ratio: 0.8
+  val_ratio: 0.1
+evaluation:
+  metrics:
+  - rmse
+  - mae
+  - r2
+  - mape
+  save_predictions: true
+  save_routing_stats: true
+model:
+  d_enc: 64
+  d_fus: 128
+  d_grp: 32
+  d_head: 64
+  dropout: 0.1
+  n_layers_enc: 2
+  n_layers_fus: 2
+router:
+  gumbel_temp_end: 0.5
+  gumbel_temp_start: 2.0
+  hard_at_inference: true
+  hidden_dim: 64
+  temp_decay: 0.99
+training:
+  batch_size: 256
+  cost_weighted: true
+  early_stop_patience: 30
+  epochs: 200
+  grad_clip: 1.0
+  lambda_sparse: 0.01
+  log_interval: 10
+  lr: 0.001
+  save_best: true
+  scheduler: cosine
+  warmup_epochs: 5
+  weight_decay: 0.0001

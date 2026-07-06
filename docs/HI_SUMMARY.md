@@ -35,6 +35,117 @@
 > `THETA_FLAT = 0.25 V/Ah` 기준으로 플래토 판별 (`|dV/dQ| < θ_flat`).  
 > dis_mid에서 θ=0.25 시 플래토 비율 ~20-26%, chg_mid에서 ~78% (b1c0, cyc 940 기준).
 
+### A-3. HI별 의미 요약
+
+#### Global HI (15종)
+
+| HI 키 | 요약 |
+|--------|------|
+| `q_dis` | 사이클 전체 방전 용량 |
+| `energy_dis` | 사이클 전체 방전 에너지 |
+| `v_mean_dis` | 방전 전체 전류가중 평균 전압 |
+| `r_dc_est` | 충전 초기 DC 내부저항 추정 |
+| `q_plateau_frac` | 방전 플래토 Q 비율 |
+| `ica_peak1_v` | 방전 ICA 주피크 전압 위치 |
+| `ica_peak1_h` | 방전 ICA 주피크 높이 |
+| `ica_peak1_area` | 방전 ICA 주피크 면적 |
+| `ica_peak1_asym` | 방전 ICA 주피크 좌우 비대칭도 |
+| `dva_valley_q` | DVA 최소 기울기 Q 위치 |
+| `dva_valley_depth` | DVA 최솟값(min dV/dQ) |
+| `ce` | 쿨롱 효율 Q_dis / Q_chg |
+| `cv_q_frac` | CV 구간 충전 Q 비율 |
+| `cv_time_frac` | CV 구간 시간 비율 |
+| `chg_ica_peak1_h` | 충전 ICA 주피크 높이 |
+
+#### 카테고리 A — 통계 기반 (Stat, 20종)
+
+| HI 키 | 요약 |
+|--------|------|
+| `v_mean` | 전류가중 평균 전압 E/Q |
+| `v_std` | 전압 표준편차 |
+| `v_skew` | 전압 분포 비대칭도 |
+| `v_kurt` | 전압 분포 첨도 |
+| `v_ent` | 전압 Shannon 엔트로피 |
+| `i_mean` | 평균 절대 전류 μ(｜I｜) |
+| `i_std` | 절대 전류 표준편차 |
+| `v_med` | 전압 중위수 |
+| `corr_qi` | Q−｜I｜ Pearson 상관계수 |
+| `corr_vi` | V−｜I｜ Pearson 상관계수 |
+| `q_abs` | 구간 누적 충방전 용량 |
+| `energy_seg` | 구간 전기 에너지 ∫V·｜I｜dt |
+| `v_iqr` | 전압 사분위 범위 IQR |
+| `v_range` | 전압 최대−최소 범위 |
+| `v_p10` | 전압 10 백분위수 |
+| `v_p90` | 전압 90 백분위수 |
+| `v_samp_ent` | 전압 시계열 Sample Entropy |
+| `corr_vt` | V−시간 Pearson 상관계수 |
+| `i_q_slope` | ｜I｜−Q 관계 선형 기울기 |
+| `v_detrended_std` | 20차 추세 제거 후 전압 산포 |
+
+#### 카테고리 B — 미분 기반 (Diff, 20종)
+
+| HI 키 | 요약 |
+|--------|------|
+| `dvdq_mean` | dV/dQ 평균값 |
+| `dvdq_std` | dV/dQ 표준편차 |
+| `dvdq_max_abs` | ｜dV/dQ｜ 최댓값 |
+| `dvdq_min` | dV/dQ 최솟값 |
+| `dvdq_area` | V-Q 총 변화량 적분 ∫｜dV/dQ｜dQ |
+| `dqdv_peak_h` | ICA 피크 높이 max(dQ/dV) |
+| `dqdv_peak_v` | ICA 피크 전압 위치 |
+| `dqdv_peak_w` | ICA 피크 반치폭 FWHM |
+| `dqdv_area` | 구간 ICA 양수 면적 ∫(dQ/dV)dV |
+| `dvdt_slope` | 구간 전압 시간 기울기 ΔV/Δt |
+| `dqdv_peak_asym` | ICA 피크 좌우 비대칭도 |
+| `d2vdq2_rms` | d²V/dQ² RMS 곡률 지수 |
+| `dvdq_skew` | dV/dQ 비대칭도 |
+| `dvdq_ent` | dV/dQ Shannon 엔트로피 |
+| `r_dyn_seg` | 동적 내부저항 ｜ΔV/ΔI｜ |
+| `dqdv_valley_h` | ICA 피크 인접 골 높이 |
+| `dqdv_valley_v` | ICA 골 전압 위치 |
+| `dvdq_peak_q` | ｜dV/dQ｜ 최대 지점 Q |
+| `dvdq_valley_q` | ｜dV/dQ｜ 최소 지점 Q |
+| `dqdv_area_asym` | ICA 면적 좌우 비율 |
+
+#### 카테고리 C — LFP 특징 (LFP, 20종)
+
+| HI 키 | 요약 |
+|--------|------|
+| `plateau_frac` | ｜dV/dQ｜<θ 만족 빈 비율 |
+| `plateau_v_mean` | 플래토 구간 스무딩 평균 전압 |
+| `plateau_v_std` | 플래토 구간 전압 표준편차 |
+| `plateau_q_frac` | 플래토 Q / 구간 총 Q |
+| `nonlin_idx` | V-Q 비선형도 RMSE/V범위 |
+| `v_sag_mid` | 중점 V − 선형 보간 V 차이 |
+| `v_flatness` | 1−std(V)/range(V) 평탄도 |
+| `delta_v_rms` | 인접 전압 변화량 RMS |
+| `ocv_slope` | 중점 Q의 dV/dQ 기울기 |
+| `knee_v` | V-Q 변곡점(knee) 전압 |
+| `knee_q_frac` | 변곡점 Q / 구간 총 Q |
+| `v_concavity` | V-Q 곡선 볼록도 지수 |
+| `phase_entry_dvdq` | 구간 진입부 ｜dV/dQ｜ 평균 |
+| `v_q_pearson` | V−Q Pearson 상관계수 |
+| `ica_peak_cnt` | ICA 양수 피크 개수 |
+| `plateau_v_slope` | 플래토 내 V-Q OLS 기울기 |
+| `v_gradient_exit` | 구간 출구부 ｜dV/dQ｜ 평균 |
+| `plateau_q_onset` | 플래토 시작 q_frac 위치 |
+| `dv_dt_plateau` | 플래토 내 ｜dV/dt｜ 평균 [mV/s] |
+| `v_ent_plateau` | 플래토 구간 전압 엔트로피 |
+
+#### 카테고리 D — 형태학적 거리 (Morph, 6종)
+
+| HI 키 | 요약 |
+|--------|------|
+| `vt_dtw` | V-t 곡선 DTW/n 거리 vs BOL |
+| `vq_dtw` | V-Q 곡선 DTW/n 거리 vs BOL |
+| `ve_dtw` | V-E 곡선 DTW/n 거리 vs BOL |
+| `vt_frec` | V-t 곡선 Fréchet/n 거리 vs BOL |
+| `vq_frec` | V-Q 곡선 Fréchet/n 거리 vs BOL |
+| `ve_frec` | V-E 곡선 Fréchet/n 거리 vs BOL |
+
+> `dvdq_area`(D05)·`dqdv_area`(D09): 이상 조건에서는 각각 v_range·q_abs에 근사하나, SG 스무딩 링잉·NaN 마스킹·클리핑 손실로 실측 trend는 다름 — 원 정의 유지.  
+> `morph_*_frec`: raw 값 기준 DTW보다 스케일이 크나, 피처별 정규화(StandardScaler) 적용 시 자동 흡수되므로 별도 `/n` 정규화 불필요.
+
 ---
 
 ## B. 실제 분석 결과

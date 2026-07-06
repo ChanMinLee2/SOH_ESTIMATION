@@ -1,0 +1,55 @@
+# Dynamic Feature Routing for Battery Capacity Estimation
+# Default experiment configuration
+
+data:
+  data_dir: "_4_data_hi"           # root directory with MIT/ and HUST/
+  output_dir: "_5_data_model"      # all model outputs go here
+  datasets: ["MIT", "HUST"]        # which datasets to include
+  split_seed: 42
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  # cross_dataset: null            # set to "MIT" or "HUST" to test on that dataset only
+  min_cycles_per_cell: 10          # drop cells with fewer cycles than this
+  io_workers: 8                    # ThreadPoolExecutor workers for parallel pkl loading
+  num_workers: 0                   # DataLoader workers (0=main process; >0 needs __main__ guard on Windows)
+
+model:
+  d_enc: 64          # InitialEncoder output dimension
+  d_grp: 32          # per-group encoder output dimension (shared within category)
+  d_fus: 128         # FeatureFusion hidden dimension
+  d_head: 64         # CapacityHead hidden dimension
+  n_layers_enc: 2    # InitialEncoder MLP depth
+  n_layers_fus: 2    # FeatureFusion MLP depth
+  dropout: 0.1
+
+router:
+  hidden_dim: 64
+  gumbel_temp_start: 2.0    # initial routing temperature (high = more uniform)
+  gumbel_temp_end: 0.5      # final routing temperature (low = more binary)
+  temp_decay: 0.99          # multiplicative temperature decay per epoch
+  hard_at_inference: true   # use binary gates at test time
+
+training:
+  epochs: 200
+  batch_size: 256
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  scheduler: "cosine"         # cosine | step | none
+  warmup_epochs: 5
+  early_stop_patience: 30
+  grad_clip: 1.0              # gradient clipping max norm
+
+  # Sparsity regularization: penalizes using too many HI groups
+  lambda_sparse: 0.01
+  cost_weighted: true         # weight penalty by group computation cost
+  # Relative costs: stat=1.0, diff=1.5, lfp=2.0, morph=3.0
+
+  # Checkpointing
+  save_best: true
+  log_interval: 10            # print/log every N epochs
+
+evaluation:
+  metrics: ["rmse", "mae", "r2", "mape"]
+  save_predictions: true
+  save_routing_stats: true
