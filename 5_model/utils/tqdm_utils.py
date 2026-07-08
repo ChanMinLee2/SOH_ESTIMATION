@@ -13,9 +13,15 @@ try:
         from tqdm import trange as _trange
         return _trange(*args, **kwargs)
 
+    def write(msg: str) -> None:
+        _tqdm.write(msg)
+
 except ImportError:  # pragma: no cover
     def tqdm(iterable: Iterable = None, **kwargs: Any) -> Any:  # type: ignore[misc]
         return iterable if iterable is not None else iter([])
 
     def trange(*args: Any, **kwargs: Any) -> Any:  # type: ignore[misc]
         return range(*args)
+
+    def write(msg: str) -> None:  # type: ignore[misc]
+        print(msg)

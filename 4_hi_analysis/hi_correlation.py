@@ -427,7 +427,7 @@ def _global_ica(v, i_mag, dt, v_lo=2.8, v_hi=3.65, n_bins=80):
     pk    = int(np.argmax(sub))
     peak_v    = float(subv[pk])
     peak_h    = float(sub[pk])
-    peak_area = float(np.trapezoid(np.maximum(sub, 0), subv))
+    peak_area = float(np.trapz(np.maximum(sub, 0), subv))
     full_pk   = int(np.where(lfp_m)[0][0]) + pk
     _, asym   = _peak_fwhm_asym(dqdv_s, full_pk, vmids)
     return peak_v, peak_h, peak_area, asym
@@ -612,7 +612,7 @@ def _seg_diff(vs, ims, dts, qcs, seg):
             out[f"diff_dvdq_std_{seg}"]     = float(np.std(vd))
             out[f"diff_dvdq_max_abs_{seg}"] = float(np.max(np.abs(vd)))
             out[f"diff_dvdq_min_{seg}"]     = float(np.min(vd))
-            out[f"diff_dvdq_area_{seg}"]    = float(np.trapezoid(np.abs(dvdq_sm[fin]), qm[fin]))
+            out[f"diff_dvdq_area_{seg}"]    = float(np.trapz(np.abs(dvdq_sm[fin]), qm[fin]))
             # D12 d²V/dQ² RMS
             dq_b = float(qm[1] - qm[0]) if len(qm) > 1 else 1.0
             d2   = np.gradient(dvdq_sm, dq_b)
@@ -631,7 +631,7 @@ def _seg_diff(vs, ims, dts, qcs, seg):
     vmids, dqdv_sm = _build_ica_seg(vs, ims, dts)
     if len(vmids) >= 4:
         # D09 dqdv_area
-        out[f"diff_dqdv_area_{seg}"] = float(np.trapezoid(np.maximum(dqdv_sm, 0), vmids))
+        out[f"diff_dqdv_area_{seg}"] = float(np.trapz(np.maximum(dqdv_sm, 0), vmids))
         pk = int(np.argmax(dqdv_sm))
         if dqdv_sm[pk] > 0:
             # D06–D08
@@ -693,8 +693,8 @@ def _seg_diff(vs, ims, dts, qcs, seg):
     if len(vmids) >= 4:
         pk20 = int(np.argmax(dqdv_sm))
         if float(dqdv_sm[pk20]) > 0 and pk20 >= 1 and pk20 <= len(dqdv_sm) - 2:
-            al = float(np.trapezoid(np.maximum(dqdv_sm[:pk20 + 1], 0), vmids[:pk20 + 1]))
-            ar = float(np.trapezoid(np.maximum(dqdv_sm[pk20:],     0), vmids[pk20:]))
+            al = float(np.trapz(np.maximum(dqdv_sm[:pk20 + 1], 0), vmids[:pk20 + 1]))
+            ar = float(np.trapz(np.maximum(dqdv_sm[pk20:],     0), vmids[pk20:]))
             if al > 1e-9 and ar > 1e-9:
                 out[f"diff_dqdv_area_asym_{seg}"] = float(al / ar)
 

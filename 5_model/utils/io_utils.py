@@ -10,13 +10,13 @@ import torch
 
 
 def load_config(config_path: str | pathlib.Path) -> Dict[str, Any]:
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def save_config(config: Dict[str, Any], save_path: pathlib.Path) -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "w") as f:
+    with open(save_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 
 
@@ -56,7 +56,7 @@ def load_checkpoint(
 
 def save_json(data: Dict[str, Any], save_path: pathlib.Path) -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "w") as f:
+    with open(save_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 

@@ -1,1 +1,1 @@
-from evaluation.evaluator import Evaluator
+from evaluation.scr_evaluator import SCREvaluator

@@ -1,2 +1,2 @@
-from training.loss import DFRLoss
-from training.trainer import Trainer
+from training.scr_loss import SCRLoss
+from training.scr_trainer import SCRTrainer

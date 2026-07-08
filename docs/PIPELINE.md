@@ -125,30 +125,26 @@
              │
              ▼
   ┌──────────────────────────────────────────────────────────────────┐
-  │  Step 5: DFR 모델 학습 / 평가                                    │
-  │    train.py       → _5_data_model/<MMDD_HHMM>/                  │
-  │                        checkpoints/best.pth                      │
-  │                        logs/train_log.csv                        │
-  │                        figures/training_curves.png               │
-  │    test.py        → metrics/, predictions/, figures/             │
-  │    predict.py     → predictions/*.csv (새 셀 추론)               │
+  │  Step 5: SCR 모델 학습 / 평가                                    │
+  │    train_scr.py   → _5_data_model_scr/                          │
+  │                        best_scr.pt  (val RMSE 최솟값 체크포인트) │
+  │                        scr_final.pt (model + normalizer 통합)    │
+  │    test_scr.py    → eval/ (scatter + capacity curve)            │
   │                                                                  │
-  │  아키텍처: Dynamic Feature Routing (DFR)                         │
-  │    1. InitialEncoder:    Global 15 HIs → z (항상 계산)           │
-  │    2. FeatureRouter:     z → 24개 gate (Gumbel-Sigmoid)          │
-  │    3. FeatureSelector:   group 선택 (NaN 마스킹 + gate 적용)     │
-  │    4. CategoryEncoder:   카테고리 공유 인코더 (stat/diff/lfp/morph)│
-  │    5. FeatureFusion:     z + h_groups concat → MLP              │
-  │    6. CapacityHead:      d_fus → capacity_Ah (scalar)           │
+  │  아키텍처: Scenario-Conditioned Routing (SCR)                    │
+  │    Stage A: HardConcreteGate(65) → probe_x                      │
+  │             MLP(probe_x) → level_logits (3-way: Low/Mid/High)   │
+  │    Stage B: HardConcreteGate × 6 (시나리오별, 각 65개)           │
+  │             seg_idx로 해당 gate 선택 → scen_x                   │
+  │    Head:    concat(probe_x, scen_x, direction) → capacity_Ah    │
   │                                                                  │
-  │  Loss = MSE(cap) + λ × Σ(gate_k × cost_k)                       │
+  │  Loss = MSE(cap) + λ_scen·CE(level) + λ_l0·Σ cost_i·P(gate_i)  │
   │    cost: stat=1.0, diff=1.5, lfp=2.0, morph=3.0                 │
-  │  학습 전략: Gumbel temperature annealing (2.0→0.5), Cosine LR   │
-  │  데이터 분할: 셀 단위 80/10/10 (데이터셋별 층화)                 │
-  │  입력: _4_data_hi/MIT + HUST (411 HIs, 셀별 pkl)                │
-  │  병렬 로딩: ThreadPoolExecutor (io_workers=8) — pkl I/O 병렬화   │
-  │  진행 표시: tqdm — 셀 로딩 / epoch / 배치 단위 progress bar     │
-  │  GPU: CUDA 가용 시 자동 선택 (cuda:0), 없으면 cpu              │
+  │  학습 전략: Cosine LR (warmup 포함), Hard-Concrete L0 gate       │
+  │  데이터 분할: 셀 단위 80/10/10                                   │
+  │  입력: _4_data_hi/MIT + HUST (65 HIs/세그먼트, 셀별 pkl)        │
+  │  JSON 캐시: 선택된 HI 목록 저장 → 재학습 없이 즉시 추론 가능    │
+  │  GPU: CUDA 가용 시 자동 선택 (cuda:0), 없으면 cpu               │
   │  설계 상세: docs/MODEL_BLUEPRINT.md 참조                         │
   └──────────────────────────────────────────────────────────────────┘
 ```
@@ -166,12 +162,11 @@
 | `4_hi_analysis/hi_correlation.py` | 4 | HI 411종 추출 및 풀링 Spearman 상관 시각화 (Global 15 + Segment 6구간×66, 카테고리 A–D) |
 | `4_hi_analysis/hi_segment_viz.py` | 4 | 세그먼트 분할 확인 + 카테고리 A–D HI 열화 추이 시각화 (411-HI) |
 | `4_hi_analysis/seg_corr_analysis.py` | 4 | 세그먼트별 within-cell Spearman 상관계수 랭킹·히트맵·Top-5 비교 + 통합 feature 랭킹 (4카테고리) |
-| `5_model/train.py` | 5 | DFRModel 학습 진입점 — 데이터 로드→분할→정규화→학습→테스트 전체 실행 |
-| `5_model/test.py` | 5 | 저장된 체크포인트를 로드해 지정 split 평가 (metrics/predictions/routing 출력) |
-| `5_model/predict.py` | 5 | 새 pkl 파일에 대한 추론 (capacity_Ah 예측 + 선택 게이트 CSV 저장) |
-| `5_model/models/dfr_model.py` | 5 | DFRModel 전체 아키텍처 — 6개 서브모듈 조합 |
-| `5_model/datasets/battery_dataset.py` | 5 | _4_data_hi 로드·셀분할·정규화·DataLoader 생성 |
-| `5_model/config/default.yaml` | 5 | 하이퍼파라미터 기본 설정 (모델/라우터/학습/평가) |
+| `5_model/train_scr.py` | 5 | SCRModel 학습 진입점 — 데이터 로드→분할→정규화→학습→JSON 저장 |
+| `5_model/test_scr.py` | 5 | 체크포인트 로드 후 3-split 평가 + scatter + capacity curve 저장 |
+| `5_model/models/scr_model.py` | 5 | SCRModel 전체 아키텍처 — Stage A/B + Capacity Head |
+| `5_model/datasets/segment_dataset.py` | 5 | _4_data_hi 세그먼트 로드·셀분할·정규화·DataLoader 생성 |
+| `5_model/config/scr.yaml` | 5 | SCR 하이퍼파라미터 설정 |
 
 **분석 도구** (파이프라인 외부):
 
@@ -606,96 +601,79 @@ python 3_integrity/check_integrity.py --workers 4
 python 4_hi_analysis/hi_correlation.py             # HI 추출 + hi_features.pkl 캐시 생성
 python 4_hi_analysis/hi_segment_viz.py             # 캐시에서 로드
 python 4_hi_analysis/seg_corr_analysis.py          # 캐시에서 로드
-python 5_model/train.py                            # Step 5: DFR 모델 학습 (LFP_SOH_ESTIMATION env)
+python 5_model/train_scr.py                        # Step 5: SCR 모델 학습 (LFP_SOH_ESTIMATION env)
 ```
 
 ---
 
-### Step 5 — DFR 모델 학습 (`5_model/train.py`)
+### Step 5 — SCR 모델 학습 (`5_model/train_scr.py`)
 
-> **실행 환경**: `LFP_SOH_ESTIMATION` conda 환경 (PyTorch 1.12.1+cu116 필요)
+> **실행 환경**: `LFP_SOH_ESTIMATION` conda 환경 (PyTorch 필요)
 
 **CLI 파라미터**
 
 | 파라미터 | 기본값 | 설명 |
 |----------|--------|------|
-| `--config` | `5_model/config/default.yaml` | YAML 설정 파일 경로 |
-| `--gpu` | `None` (자동) | GPU 인덱스. None이면 CUDA 가용 시 `cuda:0` 자동 선택, 없으면 cpu. 멀티-GPU일 때 `--gpu 1` 등으로 지정 |
-| `--epochs` | `200` | 학습 epoch 수 |
-| `--batch-size` | `256` | 배치 크기 |
-| `--lr` | `1e-3` | 초기 학습률 |
-| `--lambda-sparse` | `0.01` | 희소성 정규화 강도 (높을수록 더 적은 HI 그룹 선택) |
-| `--seed` | `42` | 셀 분할 랜덤 시드 |
-| `--run-name` | 날짜_시간 | 출력 서브디렉토리 이름 |
+| `--config` | `5_model/config/scr.yaml` | YAML 설정 파일 경로 |
+| `--probe-m INT` | config 값 | probe HI 수 강제 (학습 후 top-k 절삭) |
+| `--scen-k INT` | config 값 | 시나리오별 HI 수 강제 |
+| `--device` | `auto` | `auto` / `cpu` / `cuda:0` |
 
-**주요 config 파라미터** (`5_model/config/default.yaml`)
+**주요 config 파라미터** (`5_model/config/scr.yaml`)
 
 | 항목 | 기본값 | 설명 |
 |------|--------|------|
-| `data.io_workers` | `8` | pkl 병렬 로딩 스레드 수 (ThreadPoolExecutor) |
-| `data.num_workers` | `0` | DataLoader worker 수 (0=메인 프로세스, Windows 안전) |
-| `router.gumbel_temp_start` | `2.0` | Gumbel temperature 초기값 |
-| `router.gumbel_temp_end` | `0.5` | Gumbel temperature 최종값 |
-| `training.lambda_sparse` | `0.01` | 희소성 정규화 강도 |
+| `data.is_real_input` | `false` | false=사전계산 HI / true=raw V·I·t |
+| `classifier.probe_m_fixed` | `false` | false=L0 자동 / true=probe_m_count 강제 |
+| `regression.scen_k_fixed` | `false` | false=L0 자동 / true=scen_k_count 강제 |
+| `loss.lambda_scen` | `0.5` | 시나리오 분류 CE 손실 가중치 |
+| `loss.lambda_l0` | `0.01` | L0 비용 가중치 (HI 수 최소화) |
+| `training.early_stop_patience` | `30` | 조기 종료 patience |
 
 ```powershell
-# 권장 — CUDA 있으면 자동으로 GPU 사용
+# 권장 — L0 자동 HI 선택
 conda activate LFP_SOH_ESTIMATION
-python 5_model/train.py
+python 5_model/train_scr.py
 
-# 멀티-GPU 환경에서 특정 GPU 지정
-python 5_model/train.py --gpu 1
+# probe HI 5개, 시나리오별 10개로 고정
+python 5_model/train_scr.py --probe-m 5 --scen-k 10
 
-# 희소성 강도 조정 (더 적은 HI 그룹 선택)
-python 5_model/train.py --lambda-sparse 0.05
+# GPU 지정
+python 5_model/train_scr.py --device cuda:0
 
-# 빠른 테스트 실행
-python 5_model/train.py --epochs 10 --run-name debug
-
-# 설정 파일 직접 수정 후 실행
-python 5_model/train.py --config 5_model/config/default.yaml
+# 캐시 초기화 후 재학습
+# (Windows PowerShell)
+Remove-Item 5_model/scenario_classification_HIs.json -ErrorAction SilentlyContinue
+Remove-Item 5_model/scenario_regression_HIs.json -ErrorAction SilentlyContinue
+python 5_model/train_scr.py
 ```
 
-출력 (`_5_data_model/<run_name>/`):
-- `checkpoints/best.pth` — 최적 validation loss 체크포인트
-- `checkpoints/epoch_XXXX.pth` — 10 epoch마다 저장
-- `logs/train_log.csv` — epoch별 loss/RMSE/routing 통계
-- `logs/history.json` — 학습 이력 요약
-- `figures/training_curves.png` — loss·RMSE 학습 곡선
-- `figures/temperature_schedule.png` — Gumbel temperature 감쇠 곡선
-- `metrics/test_metrics.json` — 테스트 RMSE/MAE/R²/MAPE
-- `predictions/test_predictions.csv` — 사이클별 예측값 + 게이트 값
-- `routing/test_routing_stats.csv` — 그룹별 gate 활성화율
-- `figures/test_scatter.png` — 예측 vs 실측 산점도
-- `figures/test_routing_heatmap.png` — 세그먼트 × 카테고리 gate 히트맵
-- `normalizer.pkl` — 학습 데이터로 피팅된 정규화 파라미터
-- `config.yaml` — 실험 설정 스냅샷
+출력:
+- `_5_data_model_scr/best_scr.pt` — val RMSE 최솟값 체크포인트
+- `_5_data_model_scr/scr_final.pt` — 최종 체크포인트 (model + normalizer 통합)
+- `5_model/scenario_classification_HIs.json` — 선택된 probe HI 캐시
+- `5_model/scenario_regression_HIs.json` — 시나리오별 선택 HI 캐시
 
-#### 5-B. 평가 (`5_model/test.py`)
+#### 5-B. 평가 (`5_model/test_scr.py`)
 
 ```powershell
-# 특정 run의 best checkpoint 평가
-python 5_model/test.py --run _5_data_model/0706_1430
+# 기본 평가 (scr_final.pt 자동 사용)
+python 5_model/test_scr.py
 
-# val split 평가
-python 5_model/test.py --run _5_data_model/0706_1430 --split val
+# 체크포인트 명시
+python 5_model/test_scr.py --checkpoint _5_data_model_scr/scr_final.pt
 
-# 다른 체크포인트 지정
-python 5_model/test.py --run _5_data_model/0706_1430 --checkpoint epoch_0100.pth
+# 대표 셀 지정
+python 5_model/test_scr.py --rep-cells b1c0 1-1
+
+# GPU 지정
+python 5_model/test_scr.py --device cuda:0
 ```
 
-#### 5-C. 추론 (`5_model/predict.py`)
-
-```powershell
-# 단일 셀 pkl 추론
-python 5_model/predict.py --run _5_data_model/0706_1430 --input _4_data_hi/MIT/b1c0.pkl
-
-# 디렉토리 전체 추론
-python 5_model/predict.py --run _5_data_model/0706_1430 --input _4_data_hi/HUST/
-
-# 라우팅 게이트 저장 포함
-python 5_model/predict.py --run _5_data_model/0706_1430 --input _4_data_hi/MIT/b1c5.pkl --save-routing
-```
+출력 (`_5_data_model_scr/eval/`):
+- `scatter_test.png` — 예측 vs 실측 산점도
+- `capacity_curve_b1c0.png` — 대표 셀 열화 곡선 (실측+예측+오차)
+- `capacity_curve_1-1.png`
 
 ---
 
