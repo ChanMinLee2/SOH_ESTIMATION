@@ -2,13 +2,16 @@
 SCR (Scenario-Conditioned Routing) model.
 
 Stage A — probe selection + scenario classifier
-  1. HardConcreteGate (size=N_HI) selects m probe HIs
-  2. MLP: probe_x → level logits (3-way classification)
+  1. Direction-aware HardConcreteGate:
+       charge_probe_gate  (N_HI)  — charging segments (chg_lo/mid/hi)
+       discharge_probe_gate (N_HI) — discharging segments (dis_hi/mid/lo)
+     Each gate independently learns its optimal HI subset.
+  2. Shared MLP: probe_x → level logits (3-way classification)
 
 Stage B — scenario-conditioned regression
   3. Per-scenario HardConcreteGate (6 x N_HI) selects k additional HIs
-     conditioned on the classified level
-  4. Capacity head: [probe_x || B_x || direction] → capacity_Ah (normalised)
+  4. Capacity head: [probe_x || scen_x || direction] → capacity_Ah (normalised)
+     Input = m (probe, already computed) + k (scen) + 1 (direction)
 
 At inference JSON masks may replace the L0 gates (fixed binary vectors).
 """
@@ -23,15 +26,20 @@ import torch.nn.functional as F
 
 from utils.hi_schema import N_HI, N_SEGS, N_LEVELS
 
+# Segment indices by direction (based on SCEN_MAP ordering)
+_CHARGE_SEGS    = frozenset({0, 1, 2})   # chg_lo, chg_mid, chg_hi
+_DISCHARGE_SEGS = frozenset({3, 4, 5})   # dis_hi, dis_mid, dis_lo
+
 
 class SCRModel(nn.Module):
     """
     Args:
-        d_probe   : hidden dim for Stage A MLP
-        d_head    : hidden dim for capacity head
-        dropout   : dropout rate
-        probe_mask: fixed boolean tensor (N_HI,) if probe HIs are loaded from JSON
-        scen_masks: fixed boolean tensor (N_SEGS, N_HI) if scenario HIs are loaded from JSON
+        d_probe          : hidden dim for Stage A MLP
+        d_head           : hidden dim for capacity head
+        dropout          : dropout rate
+        charge_probe_mask   : fixed bool (N_HI,) for charging probe (Phase 2 / test)
+        discharge_probe_mask: fixed bool (N_HI,) for discharging probe (Phase 2 / test)
+        scen_masks       : fixed bool (N_SEGS, N_HI) for scenario gates (Phase 2 / test)
     """
 
     def __init__(
@@ -39,28 +47,33 @@ class SCRModel(nn.Module):
         d_probe: int = 64,
         d_head: int = 128,
         dropout: float = 0.1,
-        probe_mask: Optional[torch.Tensor] = None,   # (N_HI,) bool
-        scen_masks: Optional[torch.Tensor] = None,   # (N_SEGS, N_HI) bool
+        charge_probe_mask: Optional[torch.Tensor] = None,    # (N_HI,) bool
+        discharge_probe_mask: Optional[torch.Tensor] = None, # (N_HI,) bool
+        scen_masks: Optional[torch.Tensor] = None,           # (N_SEGS, N_HI) bool
     ):
         super().__init__()
         self.d_probe = d_probe
         self.d_head = d_head
 
-        # ----------------------------------------------------------------
-        # Stage A
-        # ----------------------------------------------------------------
         from models.hard_concrete import HardConcreteGate
 
-        if probe_mask is None:
-            self.probe_gate: nn.Module = HardConcreteGate(N_HI)
-            self._fixed_probe = False
-        else:
-            # Register as buffer (not optimised, always active)
-            self.register_buffer("_probe_mask_buf", probe_mask.float())
-            self.probe_gate = None
-            self._fixed_probe = True
+        # ----------------------------------------------------------------
+        # Stage A — direction-aware probe gates
+        # ----------------------------------------------------------------
+        fixed_probe = (charge_probe_mask is not None and
+                       discharge_probe_mask is not None)
+        self._fixed_probe = fixed_probe
 
-        # MLP: probe → level logits
+        if not fixed_probe:
+            self.charge_probe_gate    = HardConcreteGate(N_HI)
+            self.discharge_probe_gate = HardConcreteGate(N_HI)
+        else:
+            self.charge_probe_gate    = None
+            self.discharge_probe_gate = None
+            self.register_buffer("_charge_probe_mask_buf",    charge_probe_mask.float())
+            self.register_buffer("_discharge_probe_mask_buf", discharge_probe_mask.float())
+
+        # Shared MLP: probe_x (N_HI, direction-masked) → level logits
         self.probe_mlp = nn.Sequential(
             nn.Linear(N_HI, d_probe),
             nn.ReLU(),
@@ -71,7 +84,7 @@ class SCRModel(nn.Module):
         )
 
         # ----------------------------------------------------------------
-        # Stage B — one gate per scenario (6 scenarios × N_HI)
+        # Stage B — per-scenario gates (6 scenarios × N_HI)
         # ----------------------------------------------------------------
         if scen_masks is None:
             self.scen_gates = nn.ModuleList(
@@ -85,8 +98,9 @@ class SCRModel(nn.Module):
 
         # ----------------------------------------------------------------
         # Capacity head
-        # ----------------------------------------------------------------
         # input: probe_x (N_HI) || scen_x (N_HI) || direction (1)
+        # = m active probe HIs (already computed) + k active scen HIs + 1
+        # ----------------------------------------------------------------
         head_in = N_HI + N_HI + 1
         self.cap_head = nn.Sequential(
             nn.Linear(head_in, d_head),
@@ -100,14 +114,49 @@ class SCRModel(nn.Module):
     # ------------------------------------------------------------------
     # Gate helpers
     # ------------------------------------------------------------------
-    def _apply_probe_gate(self, x: torch.Tensor):
-        """Returns (masked_x, z). x: (B, N_HI)."""
-        if self._fixed_probe:
-            mask = self._probe_mask_buf  # (N_HI,)
-            return x * mask, mask.unsqueeze(0).expand_as(x)
-        return self.probe_gate(x)
+    def _apply_probe_gate(
+        self, x: torch.Tensor, direction: torch.Tensor, seg_idx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Routes each sample to its direction-specific probe gate.
+        x         : (B, N_HI)
+        direction : (B,)  +1.0=charge, -1.0=discharge
+        seg_idx   : (B,)  0-5
+        Returns (probe_x, probe_z): both (B, N_HI)
+        """
+        B = x.size(0)
+        probe_x = torch.zeros_like(x)
+        probe_z = torch.zeros_like(x)
 
-    def _apply_scen_gate(self, x: torch.Tensor, seg_idx: torch.Tensor):
+        ch_sel  = (direction > 0)   # charging samples
+        dis_sel = (direction <= 0)  # discharging samples
+
+        if self._fixed_probe:
+            if ch_sel.any():
+                m = self._charge_probe_mask_buf          # (N_HI,)
+                n = int(ch_sel.sum().item())
+                probe_x[ch_sel] = x[ch_sel] * m
+                probe_z[ch_sel] = m.unsqueeze(0).expand(n, -1)
+            if dis_sel.any():
+                m = self._discharge_probe_mask_buf
+                n = int(dis_sel.sum().item())
+                probe_x[dis_sel] = x[dis_sel] * m
+                probe_z[dis_sel] = m.unsqueeze(0).expand(n, -1)
+        else:
+            if ch_sel.any():
+                mx, zz = self.charge_probe_gate(x[ch_sel])
+                probe_x[ch_sel] = mx
+                probe_z[ch_sel] = zz
+            if dis_sel.any():
+                mx, zz = self.discharge_probe_gate(x[dis_sel])
+                probe_x[dis_sel] = mx
+                probe_z[dis_sel] = zz
+
+        return probe_x, probe_z
+
+    def _apply_scen_gate(
+        self, x: torch.Tensor, seg_idx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         For each sample, apply its scenario-specific gate.
         x: (B, N_HI), seg_idx: (B,) int in [0, N_SEGS)
@@ -115,23 +164,23 @@ class SCRModel(nn.Module):
         """
         B = x.size(0)
         masked = torch.zeros_like(x)
-        z_out = torch.zeros_like(x)
+        z_out  = torch.zeros_like(x)
 
         if self._fixed_scen:
             for s in range(N_SEGS):
                 sel = (seg_idx == s)
                 if sel.any():
-                    m = self._scen_masks_buf[s]  # (N_HI,)
+                    m = self._scen_masks_buf[s]
                     n_sel = int(sel.sum().item())
                     masked[sel] = x[sel] * m
-                    z_out[sel] = m.unsqueeze(0).expand(n_sel, -1)
+                    z_out[sel]  = m.unsqueeze(0).expand(n_sel, -1)
         else:
             for s, gate in enumerate(self.scen_gates):
                 sel = (seg_idx == s)
                 if sel.any():
                     mx, zz = gate(x[sel])
                     masked[sel] = mx
-                    z_out[sel] = zz
+                    z_out[sel]  = zz
 
         return masked, z_out
 
@@ -143,30 +192,31 @@ class SCRModel(nn.Module):
         batch keys: x_hi (B,N_HI), nan_mask (B,N_HI), direction (B,),
                     seg_idx (B,), level (B,)
 
-        Returns dict with:
-          cap_pred    : (B,)   normalised capacity prediction
-          level_logits: (B,3)  scenario classification logits
-          probe_z     : (B,N_HI)
-          scen_z      : (B,N_HI)
+        Returns:
+          cap_pred     : (B,)    normalised capacity prediction
+          level_logits : (B,3)   scenario classification logits
+          probe_z      : (B,N_HI)
+          scen_z       : (B,N_HI)
         """
-        x = batch["x_hi"]                        # (B, N_HI)
-        nan_mask = batch["nan_mask"]              # (B, N_HI)
-        direction = batch["direction"].unsqueeze(1)  # (B, 1)
-        seg_idx = batch["seg_idx"]                # (B,)
+        x         = batch["x_hi"]                           # (B, N_HI)
+        nan_mask  = batch["nan_mask"]                       # (B, N_HI)
+        direction = batch["direction"]                      # (B,)
+        seg_idx   = batch["seg_idx"]                        # (B,)
 
-        # NaN positions must not contribute — zero them before gating
-        x = x * nan_mask
+        x = x * nan_mask  # NaN positions → 0
 
-        # Stage A
-        probe_x, probe_z = self._apply_probe_gate(x)             # (B, N_HI)
-        level_logits = self.probe_mlp(probe_x)                    # (B, 3)
+        # Stage A: direction-aware probe gate
+        probe_x, probe_z = self._apply_probe_gate(x, direction, seg_idx)
+        level_logits = self.probe_mlp(probe_x)              # (B, 3)
 
-        # Stage B
-        scen_x, scen_z = self._apply_scen_gate(x, seg_idx)       # (B, N_HI)
+        # Stage B: scenario-conditioned gate
+        scen_x, scen_z = self._apply_scen_gate(x, seg_idx) # (B, N_HI)
 
-        # Capacity head
-        feat = torch.cat([probe_x, scen_x, direction], dim=1)    # (B, 2*N_HI+1)
-        cap_pred = self.cap_head(feat).squeeze(1)                 # (B,)
+        # Capacity head: reuse probe_x (already computed) + scen_x + direction
+        feat = torch.cat(
+            [probe_x, scen_x, direction.unsqueeze(1)], dim=1
+        )                                                   # (B, 2*N_HI+1)
+        cap_pred = self.cap_head(feat).squeeze(1)           # (B,)
 
         return {
             "cap_pred":     cap_pred,
@@ -180,22 +230,28 @@ class SCRModel(nn.Module):
     # ------------------------------------------------------------------
     @torch.no_grad()
     def predict(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Eval mode forward — hard binary gates."""
         self.eval()
         return self.forward(batch)
 
     @torch.no_grad()
-    def get_selected_probe_his(self) -> list[int]:
+    def get_selected_probe_his(self) -> dict[str, list[int]]:
+        """Returns {"charge": [active_hi_indices], "discharge": [...]}."""
         if self._fixed_probe:
-            return self._probe_mask_buf.nonzero(as_tuple=False).squeeze(1).tolist()
-        return self.probe_gate.active_indices()
+            return {
+                "charge":    self._charge_probe_mask_buf.nonzero(as_tuple=False).squeeze(1).tolist(),
+                "discharge": self._discharge_probe_mask_buf.nonzero(as_tuple=False).squeeze(1).tolist(),
+            }
+        return {
+            "charge":    self.charge_probe_gate.active_indices(),
+            "discharge": self.discharge_probe_gate.active_indices(),
+        }
 
     @torch.no_grad()
     def get_selected_scen_his(self) -> dict[int, list[int]]:
         """Returns {seg_idx: [active_hi_indices]}."""
         if self._fixed_scen:
-            result = {}
-            for s in range(N_SEGS):
-                result[s] = self._scen_masks_buf[s].nonzero(as_tuple=False).squeeze(1).tolist()
-            return result
+            return {
+                s: self._scen_masks_buf[s].nonzero(as_tuple=False).squeeze(1).tolist()
+                for s in range(N_SEGS)
+            }
         return {s: gate.active_indices() for s, gate in enumerate(self.scen_gates)}

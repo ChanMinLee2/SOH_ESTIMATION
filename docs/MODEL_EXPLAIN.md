@@ -6,98 +6,124 @@ LFP 배터리 SOH(State of Health) 예측을 위한 **SCR(Scenario-Conditioned R
 
 ## 전체 흐름 요약
 
-배터리 1**세그먼트**(사이클 내 구간 단위) 데이터 → 65개 HI(Health Indicator) → **Stage A: 시나리오(Low/Mid/High × 충방전) 분류** → **Stage B: 시나리오 조건부 HI 선택 + 용량 예측**
+배터리 1**세그먼트**(사이클 내 구간 단위) 데이터 → **64개 HI**(Health Indicator) → **Stage A: 방향별 독립 probe gate로 시나리오(Low/Mid/High) 분류** → **Stage B: 시나리오 조건부 HI 선택 + 용량 예측**
 
-SCR의 핵심 아이디어: "먼저 배터리가 어떤 상황에 있는지 파악하고(Stage A), 그 상황에 필요한 HI만 골라 용량을 추정한다(Stage B)". Hard-Concrete L0 게이트가 개별 HI 단위로 on/off를 결정해 계산 비용을 최소화한다.
+SCR의 핵심 아이디어: "충전과 방전은 서로 다른 HI가 중요하다(클러스터링 결과). 따라서 분류용 probe gate를 방향별로 분리해 각자 최적 HI를 독립적으로 학습한다(Stage A). 그 위에 시나리오별로도 독립적인 회귀용 gate를 둬 용량 예측에 필요한 HI를 추가 선정한다(Stage B)."
 
 ---
 
 ## 운용 워크플로우 (핵심)
 
-**게이트 선정(HI 선택)은 1회만 수행하고, 이후 모든 추론은 저장된 JSON의 고정 HI 조합만 사용한다.**
-
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Phase 1 — 게이트 학습 (1회)          python train_scr.py --no-gates
-│                                                                 │
-│  L0 페널티로 최적 HI 탐색:                                        │
-│    · Stage A: 65개 중 m개 probe HI 선정 (시나리오 분류용)           │
-│    · Stage B: 시나리오별 65개 중 k개 scen HI 선정 (용량 예측용)     │
-│                                                                 │
-│  결과 저장:                                                       │
-│    gates/classification_HIs.json  ← probe m개 인덱스              │
-│    gates/regression_HIs.json      ← 시나리오 6개 × k개 인덱스     │
-│    checkpoints/best.pt, final.pt  ← 학습된 MLP/Head 가중치        │
-└────────────────────────────┬────────────────────────────────────┘
-                             │  JSON 저장 후 이 이후는 gate 학습 없음
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Phase 2 — 고정 게이트 추론         python test_scr.py
-│                                                                 │
-│  JSON 로드 → 고정 마스크 모델 재구성:                               │
-│    · _probe_mask_buf (N_HI,)        — L0 파라미터 없음             │
-│    · _scen_masks_buf (N_SEGS, N_HI) — L0 파라미터 없음             │
-│                                                                 │
-│  추론 흐름:                                                       │
-│    입력 세그먼트                                                   │
-│    → m개 probe HI로 시나리오(Low/Mid/High) 분류                    │
-│    → 분류된 시나리오의 k개 scen HI로 용량(Ah) 예측                  │
-│    (게이트 학습 없음, L0 손실 없음, 순수 forward pass)              │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 1 — HI 서브셋 선정     python train_scr.py --phase 1      │
+│                                                                  │
+│  L0 페널티로 최적 HI 탐색 (방향 적응):                              │
+│    · charge_probe_gate  : 충전용 probe m1개 (chg_lo/mid/hi 공통) │
+│    · discharge_probe_gate: 방전용 probe m2개 (dis_hi/mid/lo 공통) │
+│    · scen_gates[0..5]  : 시나리오별 k개 독립 선정 (회귀용)         │
+│                                                                  │
+│  lambda_l0 스케줄 (delayed_warmup):                               │
+│    epoch 0~49    : λ_l0 = 0  (표현 학습 우선, 프루닝 없음)         │
+│    epoch 50~149  : λ_l0 = 0 → target 선형 증가 (점진적 압축)      │
+│    epoch 150+    : λ_l0 = target 고정 (수렴 안정화)               │
+│                                                                  │
+│  결과 저장:                                                        │
+│    gates/classification_HIs.json  ← charge/discharge 랭킹 분리    │
+│    gates/regression_HIs.json      ← 시나리오 6개 × 64개 랭킹      │
+│    gates/gate_probs.png           ← gate_prob 시각화 (8 서브플롯) │
+└──────────────────────────────────┬───────────────────────────────┘
+                                   │  JSON 완성 → gate 학습 종료
+                                   ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 2 — 분류·회귀 정밀 학습  python train_scr.py --phase 2     │
+│                                                                  │
+│  JSON 로드 → 고정 마스크 모델 재구성:                                │
+│    · _charge_probe_mask_buf    (N_HI,) bool  — 충전용 고정         │
+│    · _discharge_probe_mask_buf (N_HI,) bool  — 방전용 고정         │
+│    · _scen_masks_buf (N_SEGS, N_HI) bool     — 시나리오별 고정     │
+│                                                                  │
+│  학습 목표: MSE + λ_scen·CE만 (L0=0 자동)                        │
+│    probe_mlp + cap_head 가중치만 업데이트                           │
+│    결과: checkpoints/ + figures/ + metrics/ + routing/           │
+└──────────────────────────────────┬───────────────────────────────┘
+                                   ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  추론 — test_scr.py                                              │
+│    입력 세그먼트 → 방향 판별                                        │
+│    → 충전이면 charge probe m1개 HI로 Lo/Mid/Hi 분류                │
+│    → 방전이면 discharge probe m2개 HI로 Lo/Mid/Hi 분류             │
+│    → 해당 시나리오의 scen k개 HI로 용량(Ah) 예측                   │
+│    (m + k HIs 재사용, gate 학습 없음, 순수 forward pass)           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Phase 1b — 게이트 고정 재학습 (선택)
-
-Phase 1에서 선정한 HI를 고정한 채 MLP/Head만 재학습하고 싶을 때:
+### 실행 명령 요약
 
 ```bash
-python 5_model/train_scr.py --gates-from _5_data_model_scr/0707_1131
-# gates/*.json 자동 탐색 → 고정 마스크 모델 → probe_mlp + cap_head만 학습
-# L0 파라미터 없음 → L0 손실 항 자동 0
-```
+# Phase 1: 방향별 최적 HI 탐색 (L0 학습)
+python 5_model/train_scr.py --phase 1
+python 5_model/train_scr.py --phase 1 --charge-m 3 --discharge-m 1 --scen-k 5
 
-yaml에 `gates_from` 경로를 기본값으로 설정하면 매번 옵션 없이 Phase 1b로 실행된다.  
-`gates_ignore: true` 또는 `--no-gates`로 Phase 1로 되돌릴 수 있다.
+# Phase 2: 고정 게이트로 MLP/Head 정밀 학습
+python 5_model/train_scr.py --phase 2
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0709_0221
+
+# 평가 (Phase 2 결과 체크포인트 기준)
+python 5_model/test_scr.py
+python 5_model/test_scr.py --checkpoint _5_data_model_scr/0709_0221/checkpoints/best.pt
+
+# [legacy] --no-gates는 --phase 1, yaml gates_from 설정은 --phase 2와 동일하게 동작
+```
 
 ---
 
 ## 학습 목표 및 최적화 과정
 
-SCR 학습은 단일 optimizer(AdamW)가 아래 5가지 목표를 **동시에** 추구한다.  
+SCR 학습은 단일 optimizer(AdamW)가 아래 목표를 **동시에** 추구한다.  
 모든 파라미터(gate log_alpha, probe_mlp, scen_gates, cap_head)가 매 step마다 함께 업데이트된다.
 
 ---
 
-### 1. 분류에 사용할 HI 선정 (Stage A gate 학습)
+### 1. 분류에 사용할 HI 선정 — 방향별 독립 probe gate (Stage A)
 
-**관련 파라미터**: `probe_gate.log_alpha` — 65차원 실수 벡터 (HI당 1개)
+**관련 파라미터**:
+- `charge_probe_gate.log_alpha` — 64차원, 충전 세그먼트 전용
+- `discharge_probe_gate.log_alpha` — 64차원, 방전 세그먼트 전용
 
 **동작 원리**:
-- 각 HI마다 gate 파라미터 `log_alpha_i`가 있고, 학습 중 Hard-Concrete 분포에서 `z_i ∈ [0,1]`을 샘플링해 HI를 확률적으로 on/off
-- `gate_prob_i = σ(log_alpha_i − β·log(−γ/ζ))` = 해당 HI가 선택될 확률
-- L0 손실(`lambda_l0 × Σ cost_i × P(gate_i active)`)이 probe gate를 **스파스하게** 당기고, CE 손실이 분류에 유용한 HI를 **살려두도록** 당겨서 균형이 맞는 지점에서 수렴
-- 추론 시 `_hard_infer()` → `z_i = (σ(log_alpha_i) > 0.5)` 이진화 → gate > 0인 HI만 활성화
+- 충전 샘플은 `charge_probe_gate`, 방전 샘플은 `discharge_probe_gate`로 분기 (direction > 0 조건)
+- 각 gate는 독립적으로 `log_alpha_i`를 학습하며 서로 다른 HI 조합에 수렴 가능
+- `gate_prob_i = σ(log_alpha_i − β·log(−γ/ζ))` = 이 방향에서 HI_i가 선택될 확률
+- L0 손실이 각 방향별 gate를 스파스하게 당기고, CE 손실이 Lo/Mid/Hi 분류에 유용한 HI를 살려두는 방향으로 당겨 균형이 맞는 지점에서 수렴
+- 추론 시 hard binary gate: `(σ(log_alpha_i) > 0.5)`
 
-**Phase 1 종료 후**: `probe_m_fixed=true`이면 gate_prob 상위 m개만 JSON에 저장 (top-k 절삭)
+**Phase 1 종료 후**: gate_prob 내림차순으로 전체 64개 랭킹을 charge/discharge 분리해 JSON 저장.  
+Phase 2 로드 시 yaml의 `charge_probe_m`개 / `discharge_probe_m`개만 고정 마스크로 절삭.
 
 ---
 
 ### 2. 회귀에 사용할 HI 선정 (Stage B gate 학습)
 
-**관련 파라미터**: `scen_gates[0..5].log_alpha` — 시나리오 6개 × 65차원, 총 390개
+**관련 파라미터**: `scen_gates[0..5].log_alpha` — 시나리오 6개 × 64차원, 총 384개
 
 **동작 원리**:
-- 시나리오(충방전 × SOH 레벨)별로 별도의 `HardConcreteGate(65)`가 있어 각자 최적 HI 조합을 학습
-- L0 페널티에서 HI i의 "실제 사용 확률"은 probe와 scen gate를 합산: `P(active_i) = 1 − (1−p_probe_i)(1−p_scen_i)` — probe가 이미 HI를 쓴다면 scen gate는 추가 비용 없이 활용 가능
-- MSE 손실이 시나리오별 scen HI 선택을 유도하고, L0 패널티가 각 시나리오의 HI 개수를 압축
+- 시나리오(충방전 × SOH 레벨)별로 별도의 `HardConcreteGate(64)`가 있어 각자 최적 HI 조합을 학습
+- L0 페널티에서 HI i의 "실제 사용 확률"은 probe와 scen gate를 합산:
+  ```
+  P(active_i) = 1 − (1−p_probe_i)(1−p_scen_i)
+  ```
+  probe가 이미 HI를 쓴다면 scen gate는 추가 비용 없이 활용 가능
+- 충전 시나리오(seg 0-2)는 `p_probe_ch`, 방전 시나리오(seg 3-5)는 `p_probe_dis` 사용
+- MSE 손실이 시나리오별 scen HI 선택을 유도하고, L0 페널티가 각 시나리오의 HI 개수를 압축
 
-**Phase 1 종료 후**: `scen_k_fixed=true`이면 각 시나리오당 gate_prob 상위 k개만 JSON에 저장
+**Phase 1 종료 후**: `scen_k_count`개 per 시나리오 랭킹이 `regression_HIs.json`에 저장됨.
 
 ---
 
 ### 3. 분류기 가중치 갱신 (Stage A MLP 학습)
 
-**관련 파라미터**: `probe_mlp` — Linear(65→d_probe→d_probe/2→3), 기본 약 6.3K 파라미터
+**관련 파라미터**: `probe_mlp` — Linear(64→d_probe→d_probe/2→3), 기본 약 6.2K 파라미터
 
 **학습 신호**:
 ```
@@ -107,7 +133,7 @@ probe_x = x_hi * z_probe   (게이트로 필터된 HI 입력)
 
 - `lambda_scen × L_ce`의 gradient가 probe_mlp를 업데이트
 - 동일한 gradient가 `probe_gate.log_alpha`까지 전파 → gate 학습과 MLP 학습이 **하나의 backward pass에서 동시에** 수행
-- Phase 1b(고정 마스크)에서는 게이트 파라미터가 없으므로 MLP 가중치만 업데이트됨
+- Phase 2(고정 마스크)에서는 게이트 파라미터가 없으므로 MLP 가중치만 업데이트됨
 
 **수렴 방향**: probe_x가 Low/Mid/High를 잘 구분하는 방향으로 MLP 가중치 조정
 
@@ -115,19 +141,20 @@ probe_x = x_hi * z_probe   (게이트로 필터된 HI 입력)
 
 ### 4. 회귀기 가중치 갱신 (Capacity Head 학습)
 
-**관련 파라미터**: `cap_head` — Linear(131→d_head→d_head/2→1), 기본 약 25K 파라미터
+**관련 파라미터**: `cap_head` — Linear(129→d_head→d_head/2→1), 기본 약 24.7K 파라미터
 
 **학습 신호**:
 ```
-L_mse = MSE(cap_head([probe_x || scen_x || direction]), target_norm)
+L_mse = MSE(cap_head([probe_x ∥ scen_x ∥ direction]), target_norm)
 ```
 
 - MSE gradient가 cap_head → scen_gate → probe_gate 순으로 전파
-- 입력 `131 = 65(probe) + 65(scen) + 1(direction)`:
-  - `probe_x`: Stage A gate로 필터된 HI (분류용 HI가 용량 예측에도 기여)
+- 입력 `129 = 64(probe) + 64(scen) + 1(direction)`:
+  - `probe_x`: Stage A gate로 필터된 HI (분류용 HI가 용량 예측에도 기여 — m+k 재사용)
   - `scen_x`: 해당 시나리오 gate로 필터된 HI
   - `direction`: 충전(+1) / 방전(−1) 스칼라
 - `target_norm`은 z-score 정규화된 capacity_Ah (추론 후 역변환으로 실제 Ah 복원)
+- probe_x는 m개 비-zero, scen_x는 k개 비-zero → 수학적으로 m+k+1개 HI로 예측하는 것과 동일
 
 **수렴 방향**: 선택된 HI들로 SOH(용량) 예측 오차를 최소화
 
@@ -138,60 +165,106 @@ L_mse = MSE(cap_head([probe_x || scen_x || direction]), target_norm)
 #### 복합 손실 구조
 
 ```
-L_total = L_mse + λ_scen × L_ce + λ_l0 × L_l0
+L_total = L_mse + λ_scen × L_ce + λ_l0(epoch) × L_l0
 ```
 
 | 항목 | 기본값 | 영향 |
 |------|--------|------|
 | `L_mse` | — | 용량 예측 정확도 |
 | `λ_scen = 0.5` | `loss.lambda_scen` | 시나리오 분류 정확도 |
-| `λ_l0` | **동적 계산** (아래 참고) | HI 개수 최소화 (계산 비용 절감) |
+| `λ_l0(epoch)` | **스케줄러로 동적 변화** | HI 개수 최소화 (계산 비용 절감) |
 
 세 항목이 하나의 `total.backward()`로 모든 파라미터를 동시에 업데이트한다.
 
-#### 동적 lambda_l0 (`lambda_l0_auto: true`, Phase 1 전용)
+---
 
-`scr.yaml`의 `lambda_l0_auto: true`이면 `probe_m_count(m)` / `scen_k_count(k)` 기반으로 자동 계산한다.  
-목표 HI 수가 적을수록 L0 페널티를 강하게 줘야 게이트가 자연스럽게 그 근방에서 수렴한다.
+#### lambda_l0 스케줄러 (Phase 1 전용)
+
+**문제**: λ_l0를 처음부터 크게 주면 gate가 수렴하기 전에 무작위로 닫혀버려 의미 있는 HI를 놓칠 수 있다.
+
+**해결**: `lambda_l0_schedule: "delayed_warmup"` — 먼저 표현을 자유롭게 학습시킨 뒤 점진적으로 압축
 
 ```
-λ_l0 = 0.01 × √(10/m × 10/k)
+epoch 0 → warmup_epochs (기본 50):
+    λ_l0 = 0
+    → gate 없이 MSE + CE 학습. 모든 HI가 probe_mlp / cap_head 학습에 기여.
+    → log_alpha_i가 정보량에 따라 어느 정도 방향성을 잡음
+
+epoch warmup_epochs → warmup_epochs + ramp_epochs (기본 50~150):
+    λ_l0 = target × (epoch − warmup_epochs) / ramp_epochs  (선형 증가)
+    → L0 압력이 서서히 올라오면서 불필요한 HI의 log_alpha가 음수로 이동
+    → 유용한 HI는 CE/MSE gradient가 지탱해 살아남음
+
+epoch warmup_epochs + ramp_epochs 이후:
+    λ_l0 = target  (고정)
+    → gate_prob 수렴 안정화 (cliff 형태로 bimodal 분포)
+```
+
+4가지 `lambda_l0_schedule` 옵션:
+
+| 옵션 | 동작 | 용도 |
+|------|------|------|
+| `none` | 매 에폭 target 고정 (기존 동작) | 빠른 실험 |
+| `delayed_warmup` | 0 유지 후 선형 증가 (**권장**) | Phase 1 기본 전략 |
+| `exp_ramp` | epoch²에 비례 증가 (느린 초반) | 더 긴 warmup이 필요할 때 |
+| `cyclic` | 0 ↔ target 코사인 사이클 | HI 수를 주기적으로 재탐색할 때 |
+
+**Phase 2에서는 L0 페널티 항 자체가 0이므로 스케줄러 설정 무관.**
+
+---
+
+#### 동적 lambda_l0 기준값 (`lambda_l0_auto: true`, Phase 1 전용)
+
+스케줄러의 "target" 값을 yaml의 `lambda_l0`로 고정하거나, `lambda_l0_auto: true`로 자동 계산한다.
+
+자동 계산 시 목표 HI 수가 적을수록 L0 페널티를 강하게 줘서 gate가 그 근방에서 수렴하도록 유도:
+
+```
+λ_target = 0.01 × √(10/m × 10/k)
   기준: λ=0.01 → 경험적으로 ~10 probe HI, ~10 scen HI 선택
 ```
 
-| m / k | λ_l0 |
-|-------|------|
+| m / k | λ_target |
+|-------|---------|
 | m=1,  k=5  | 0.04472 |
+| m=3,  k=5  | 0.02582 |
 | m=5,  k=5  | 0.02000 |
 | m=5,  k=10 | 0.01414 |
 | m=10, k=10 | 0.01000 (기준) |
-| m=10, k=20 | 0.00707 |
 
-Phase 1b(고정 마스크)에서는 SCRLoss가 L0=0으로 자동 처리하므로 이 설정 무관.
+이 값이 `delayed_warmup` 스케줄러의 `target`이 된다.
+
+---
 
 #### 학습률 스케줄
 
 - **Warmup**: 처음 10 epoch은 lr을 0 → `lr_max`(5e-4)로 선형 증가 (초기 불안정 방지)
 - **Cosine Annealing**: warmup 이후 `lr_max → 1e-6`으로 서서히 감소
 
+---
+
 #### 조기 종료 (Early Stopping)
 
 - **기준**: val RMSE가 개선될 때마다 `checkpoints/best.pt` 갱신
-- **patience=60**: 60 epoch 연속 비개선 시 학습 중단 (총 epoch 상한 500)
+- **patience=20**: 20 epoch 연속 비개선 시 학습 중단 (총 epoch 상한 500)
 - **복원**: 학습 종료 후 best 체크포인트를 자동 복원
 
-#### Phase 1b에서의 변화
+---
 
-| 항목 | Phase 1 (L0) | Phase 1b (고정 마스크) |
+#### Phase 2에서의 변화
+
+| 항목 | Phase 1 (L0) | Phase 2 (고정 마스크) |
 |------|-------------|----------------------|
-| probe_gate.log_alpha | 학습됨 | **없음** |
+| charge_probe_gate.log_alpha | 학습됨 | **없음** |
+| discharge_probe_gate.log_alpha | 학습됨 | **없음** |
 | scen_gates[*].log_alpha | 학습됨 | **없음** |
-| L0 손실 항 | 활성 | **0 (자동 비활성)** |
+| L0 손실 항 | 활성 (스케줄러로 제어) | **0 (자동 비활성)** |
+| lambda_l0 스케줄러 | 동작 | **무관** |
 | probe_mlp | 학습됨 | 학습됨 |
 | cap_head | 학습됨 | 학습됨 |
 | 선택된 HI | L0가 결정 | JSON 고정 |
 
-Phase 1b는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해서 성능을 끌어올리는 용도다.
+Phase 2는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해서 성능을 끌어올리는 용도다.
 
 ---
 
@@ -204,7 +277,7 @@ Phase 1b는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해�
   utils/
     compat.py               numpy 버전 호환성 패치 (pkl 로드 전 필수)
     tqdm_utils.py           tqdm 안전 래퍼 (미설치 환경 fallback)
-    hi_schema.py            65-HI 스키마·비용·SCEN_MAP·누수 배제
+    hi_schema.py            64-HI 스키마·비용·SCEN_MAP·누수 배제
     metrics.py              회귀 평가 지표 (RMSE, MAE, R², MAPE)
     io_utils.py             체크포인트·설정·JSON 저장/로드
   datasets/
@@ -213,11 +286,11 @@ Phase 1b는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해�
     hard_concrete.py        Hard-Concrete L0 게이트 (Louizos 2018)
     scr_model.py            SCRModel (Stage A/B + Capacity Head)
   training/
-    scr_loss.py             SCRLoss (MSE + CE + L0 비용가중 페널티)
-    scr_trainer.py          SCRTrainer (학습 루프·스케줄러·early stopping)
+    scr_loss.py             SCRLoss (MSE + CE + L0 방향별 비용가중 페널티)
+    scr_trainer.py          SCRTrainer (학습 루프·L0 스케줄러·LR 스케줄러·early stopping)
   evaluation/
     scr_evaluator.py        SCREvaluator (메트릭·scatter·capacity curve)
-  train_scr.py              학습 진입점
+  train_scr.py              학습 진입점 (--phase 1 / --phase 2)
   test_scr.py               평가 진입점
 ```
 
@@ -237,20 +310,25 @@ Phase 1b는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해�
 | `data` | `output_dir` | run 결과 저장 루트 (`_5_data_model_scr`) |
 | `data` | `gates_from` | 이전 run 폴더 경로 — 해당 run의 gates JSON 재사용 (`null`이면 L0 학습) |
 | `data` | `gates_ignore` | `true`=`gates_from` 무시하고 L0부터 재학습 |
-| `classifier` | `probe_m_fixed` | `false`=L0 자동 / `true`=probe_m_count 강제 |
-| `classifier` | `probe_m_count` | 강제 시 probe HI 수 (1~10) |
-| `regression` | `scen_k_fixed` | `false`=L0 자동 / `true`=scen_k_count 강제 |
-| `regression` | `scen_k_count` | 강제 시 시나리오별 HI 수 (5/10/15/20) |
+| `classifier` | `charge_probe_m` | 충전용 probe HI 수 (Phase 2 고정 마스크 절삭 기준) |
+| `classifier` | `discharge_probe_m` | 방전용 probe HI 수 |
+| `classifier` | `probe_m_count` | legacy fallback (charge/discharge_probe_m 미설정 시) |
+| `regression` | `scen_k_count` | Phase 2/test 시 시나리오별 HI 수 |
 | `model` | `d_probe` | Stage A MLP hidden dim |
 | `model` | `d_head` | Capacity Head hidden dim |
 | `loss` | `lambda_scen` | CE 손실 가중치 |
-| `loss` | `lambda_l0_auto` | `true` = m/k 기반 동적 계산 (권장), `false` = `lambda_l0` 직접 사용 |
-| `loss` | `lambda_l0` | `lambda_l0_auto=false` 시 직접 지정값 |
+| `loss` | `lambda_l0_auto` | `true` = m/k 기반 자동 계산 (권장), `false` = `lambda_l0` 직접 사용 |
+| `loss` | `lambda_l0` | `lambda_l0_auto=false` 시 직접 지정값 (스케줄러 target) |
+| `loss` | `lambda_l0_schedule` | `none` / `delayed_warmup` / `exp_ramp` / `cyclic` |
+| `loss` | `lambda_l0_warmup_epochs` | delayed_warmup: λ=0 유지 에폭 수 (기본 50) |
+| `loss` | `lambda_l0_ramp_epochs` | delayed_warmup: target까지 선형 증가 에폭 수 (기본 100) |
+| `loss` | `lambda_l0_cycle_epochs` | cyclic: 사이클 주기 (기본 100) |
 | `training` | `lr` | 초기 학습률 (기본 5e-4) |
-| `training` | `warmup_epochs` | warmup 구간 epoch 수 (기본 10) |
+| `training` | `warmup_epochs` | LR warmup 구간 epoch 수 (기본 10) |
 | `training` | `scheduler` | `cosine` / `step` |
-| `training` | `early_stop_patience` | 조기 종료 patience (기본 60) |
-| `evaluation` | `rep_cells` | capacity curve 플롯 대표 셀 (auto-pick 실패 시 fallback) |
+| `training` | `early_stop_patience` | 조기 종료 patience (기본 20) |
+| `evaluation` | `rep_cells_per_dataset` | 각 데이터셋에서 자동 선택할 대표 셀 수 (기본 3) |
+| `evaluation` | `rep_cells` | 대표 셀 직접 지정 (auto-pick 대신 사용) |
 
 ---
 
@@ -289,19 +367,19 @@ except ImportError:
 
 ---
 
-## 4. utils/hi_schema.py — 65-HI 스키마
+## 4. utils/hi_schema.py — 64-HI 스키마
 
 SCR 전체에서 HI 컬럼명, 카테고리 비용, 세그먼트 메타데이터를 단일 진실 소스로 제공한다.
 
 ### 핵심 상수
 
 ```python
-STAT_KEYS  = [...]  # 20개
+STAT_KEYS  = [...]  # 20개 정의, 2개 제외 → 18개 사용
 DIFF_KEYS  = [...]  # 20개
 LFP_KEYS   = [...]  # 20개
 MORPH_KEYS = [...]  #  6개
 
-LEAK_COLS = {"stat_q_abs"}  # == capacity_Ah → 입력 제외
+LEAK_COLS = {"stat_q_abs", "stat_energy_seg"}  # capacity_Ah 누수 HI → 입력 제외
 
 SEGMENTS = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
 
@@ -311,28 +389,30 @@ SCEN_MAP = {
 }  # seg_name → (scen_code, seg_idx)
 
 CATEGORY_COSTS = {"stat": 1.0, "diff": 1.5, "lfp": 2.0, "morph": 3.0}
-N_HI   = 65   # stat 19 + diff 20 + lfp 20 + morph 6
+N_HI   = 64   # stat 18 + diff 20 + lfp 20 + morph 6
 N_SEGS = 6
 ```
 
-### N_HI = 65 계산
+### N_HI = 64 계산
 
 ```
-STAT  20개 − stat_q_abs 1개 = 19개
-DIFF  20개                  = 20개
-LFP   20개                  = 20개
-MORPH  6개                  =  6개
-합계                        = 65개
+STAT  20개 − stat_q_abs 1개 − stat_energy_seg 1개 = 18개
+DIFF  20개                                         = 20개
+LFP   20개                                         = 20개
+MORPH  6개                                         =  6개
+합계                                               = 64개
 ```
+
+`stat_q_abs`와 `stat_energy_seg`는 모두 capacity_Ah와 강한 선형 상관관계를 가져 입력으로 사용하면 누수(label leakage)가 발생하므로 제외한다.
 
 ### 주요 함수
 
 ```python
 get_hi_cols_for_seg("dis_hi")
-# → ["stat_v_mean_dis_hi", ..., "morph_ve_frec_dis_hi"]  (65개)
+# → ["stat_v_mean_dis_hi", ..., "morph_ve_frec_dis_hi"]  (64개)
 
 get_hi_cost_vector("dis_hi")
-# → [1.0, 1.0, ..., 1.5, ..., 2.0, ..., 3.0, 3.0]  (65개)
+# → [1.0, 1.0, ..., 1.5, ..., 2.0, ..., 3.0, 3.0]  (64개)
 ```
 
 ---
@@ -377,13 +457,13 @@ get_hi_cost_vector("dis_hi")
 ```
 wide pkl 1행 (사이클 1개, ~415 컬럼)
   ↓  세그먼트 6개 × 반복
-  각 행: hi_00..hi_64 (65개 HI), direction, level, scen, capacity_Ah
+  각 행: hi_00..hi_63 (64개 HI), direction, level, scen, capacity_Ah
   capacity_Ah = 사이클 레벨 전체 용량 (SOH 타깃)
 ```
 
 ### SegmentNormalizer
 
-- HI 65개 개별 z-score (훈련셋으로만 fit)
+- HI 64개 개별 z-score (훈련셋으로만 fit)
 - NaN → z-score 0.0 (평균으로 대체). nan\_mask로 위치 별도 보존
 - `capacity_Ah` 별도 z-score (역변환 `inverse_target` 제공)
 
@@ -440,6 +520,14 @@ P(z > 0) ≈ sigmoid(log_α − β·log(−γ/ζ))
 # 학습 중 이 확률에 category cost를 곱해 L0 페널티 계산
 ```
 
+### gate_prob의 Bimodal 수렴 (cliff 현상)
+
+Phase 1 학습이 진행되면서 `gate_prob` 분포는 자연스럽게 **bimodal**(이중봉)로 수렴한다:
+- 유용한 HI: MSE/CE gradient가 log_alpha를 밀어올려 gate_prob → 1
+- 불필요한 HI: L0 페널티가 log_alpha를 끌어내려 gate_prob → 0
+
+이것이 regression_HIs.json에서 상위 2~3개만 gate_prob ≈ 0.999이고 나머지는 ≈ 0.00004인 "cliff" 패턴의 원인이다. `delayed_warmup` 스케줄러는 λ_l0가 0인 동안 log_alpha가 의미 있는 방향으로 배치된 후에야 L0 압력을 가해, cliff 발생 전 충분한 표현 학습을 보장한다.
+
 ---
 
 ## 9. models/scr_model.py — SCRModel
@@ -447,72 +535,71 @@ P(z > 0) ≈ sigmoid(log_α − β·log(−γ/ζ))
 ### 아키텍처
 
 ```
-입력: x_hi (B,65), nan_mask (B,65), direction (B,), seg_idx (B,)
+입력: x_hi (B,64), nan_mask (B,64), direction (B,), seg_idx (B,)
 
-[Stage A — 시나리오 분류기]
-  HardConcreteGate(65) → probe_x (B,65)       ← m개 HI만 살아남음
-  MLP(65 → d_probe → N_LEVELS) → level_logits (B,3)
+[Stage A — 방향별 probe gate + 시나리오 분류기]
+  direction > 0  → charge_probe_gate(64)    → probe_x (B,64) ← 충전 m1개 활성
+  direction <= 0 → discharge_probe_gate(64) → probe_x (B,64) ← 방전 m2개 활성
+  공유 MLP(64 → d_probe → N_LEVELS) → level_logits (B,3)
 
 [Stage B — 시나리오 조건부 게이트]
-  HardConcreteGate × 6 (시나리오별, 각 65개)
-  seg_idx로 해당 gate 선택 → scen_x (B,65)
+  HardConcreteGate × 6 (시나리오별 독립, 각 64개)
+  seg_idx로 해당 gate 선택 → scen_x (B,64)
 
-[Capacity Head]
-  concat(probe_x, scen_x, direction) → (B, 65+65+1=131)
-  MLP(131 → d_head → d_head//2 → 1) → cap_pred (B,)
+[Capacity Head — m+k HI 재사용]
+  concat(probe_x, scen_x, direction) → (B, 64+64+1=129)
+  MLP(129 → d_head → d_head//2 → 1) → cap_pred (B,)
+  ← probe_x (m개 비-zero) + scen_x (k개 비-zero) = 유효 m+k+1 입력
 ```
+
+**`_CHARGE_SEGS = frozenset({0, 1, 2})`** (chg_lo, chg_mid, chg_hi)  
+**`_DISCHARGE_SEGS = frozenset({3, 4, 5})`** (dis_hi, dis_mid, dis_lo)
 
 ### 두 가지 동작 모드
 
-SCRModel은 생성자 인자에 따라 내부 구조가 달라진다.
-
-#### Phase 1 모드 — L0 게이트 학습 (probe_mask=None)
+#### Phase 1 모드 — L0 게이트 학습
 
 ```python
-model = SCRModel()          # probe_mask=None, scen_masks=None
-# probe_gate = HardConcreteGate(65)   ← log_alpha 65개 학습 파라미터
-# scen_gates = ModuleList([HardConcreteGate(65)] × 6)  ← log_alpha 6×65개
-# state_dict 키: "probe_gate.log_alpha", "scen_gates.N.log_alpha"
+model = SCRModel()  # 마스크 없음 → HardConcreteGate 활성화
+# charge_probe_gate    = HardConcreteGate(64)   ← log_alpha 64개 학습
+# discharge_probe_gate = HardConcreteGate(64)   ← log_alpha 64개 학습
+# scen_gates = ModuleList([HardConcreteGate(64)] × 6)
+# state_dict 키: "charge_probe_gate.log_alpha", "discharge_probe_gate.log_alpha",
+#                "scen_gates.N.log_alpha"
 ```
 
-학습 중 L0 손실이 log_alpha를 조정해 불필요한 HI의 gate_prob를 0으로 수렴시킨다.
-eval 모드에서 `sigmoid(log_alpha) > 0.5`를 하드 이진 게이트로 사용.
-
-#### Phase 2 모드 — 고정 마스크 추론 (probe_mask 제공)
+#### Phase 2 모드 — 고정 마스크 재학습 / 추론
 
 ```python
-model = SCRModel(probe_mask=mask, scen_masks=masks)
-# probe_gate = None                    ← L0 파라미터 없음
-# _probe_mask_buf (버퍼, 학습 안 됨)  ← JSON에서 로드한 bool 마스크
-# _scen_masks_buf (버퍼, 학습 안 됨)  ← JSON에서 로드한 6×65 마스크
-# state_dict 키: "_probe_mask_buf", "_scen_masks_buf"
+model = SCRModel(
+    charge_probe_mask=ch_mask,      # (N_HI,) bool
+    discharge_probe_mask=dis_mask,  # (N_HI,) bool
+    scen_masks=masks,               # (N_SEGS, N_HI) bool
+)
+# charge_probe_gate/discharge_probe_gate = None
+# _charge_probe_mask_buf / _discharge_probe_mask_buf (버퍼, 학습 안 됨)
+# _scen_masks_buf (버퍼, 학습 안 됨)
+# L0 손실 항 자동 0, probe_mlp + cap_head만 학습
 ```
-
-게이트가 이미 확정되어 있으므로 L0 손실 항이 자동으로 0.  
-`probe_mlp`와 `cap_head`만 학습 파라미터로 존재.
 
 #### test_scr.py의 자동 판별
 
-체크포인트를 로드한 뒤 state_dict 키로 모드를 감지해 올바른 모델을 재구성한다:
-
 ```python
-ckpt_has_l0 = "probe_gate.log_alpha" in state_keys
-if ckpt_has_l0:
-    model = SCRModel()                           # Phase 1 체크포인트
-else:
-    # Phase 2 체크포인트 → JSON 탐색 후 마스크 로드
-    model = SCRModel(probe_mask=..., scen_masks=...)
-model.load_state_dict(ckpt["model_state"])
+ckpt_has_l0 = ("charge_probe_gate.log_alpha" in state_keys or
+               "probe_gate.log_alpha" in state_keys)  # legacy compat
+# Phase 1 ckpt → JSON 로드 후 고정 마스크로 모델 재구성 (strict=False)
+# Phase 2 ckpt → 이미 마스크 모드이므로 JSON으로 일치
 ```
 
 ### 파라미터 수 (기본 설정 d_probe=64, d_head=128)
 
 ```
-HardConcreteGate(probe) : 65개 log_alpha     ≈   0.07K
-Stage A MLP             : 65×64+64×32+32×3  ≈   6.3K
-Stage B gates (6×65)    : 6×65 log_alpha     ≈   0.4K
-Capacity Head           : 131×128+128×64+64  ≈  25K
-합계                                          ≈  32K
+charge_probe_gate   : 64개 log_alpha     ≈   0.06K
+discharge_probe_gate: 64개 log_alpha     ≈   0.06K
+Stage A MLP (공유)  : 64×64+64×32+32×3  ≈   6.2K
+Stage B gates (6×64): 6×64 log_alpha    ≈   0.4K
+Capacity Head       : 129×128+128×64+64 ≈  24.7K
+합계                                     ≈  31.5K
 ```
 
 ---
@@ -524,32 +611,62 @@ Capacity Head           : 131×128+128×64+64  ≈  25K
 ```
 L = MSE(cap_pred, cap_target)
   + λ_scen × CE(level_logits, level)
-  + λ_l0   × Σ_i  cost_i × P(gate_i active)
+  + λ_l0(epoch) × Σ_i  cost_i × P(gate_i active)
 
 P(gate_i active) = 1 − (1−p_probe_i)(1−p_scen_i)
 ```
 
 `cost_i` 는 HI 카테고리별 계산 비용 (stat=1.0 / diff=1.5 / lfp=2.0 / morph=3.0).
 
-**Phase 2(고정 마스크) 에서는 `_fixed_probe=True, _fixed_scen=True`이므로 `_l0_penalty()`가 즉시 0을 반환한다. 손실 = MSE + λ_scen·CE 만 남는다.**
+**L0 페널티의 방향별 분기**:
+- 충전 시나리오(seg 0,1,2): `p_probe = charge_probe_gate.gate_prob()`
+- 방전 시나리오(seg 3,4,5): `p_probe = discharge_probe_gate.gate_prob()`
+
+**Phase 2(고정 마스크)에서는 `_fixed_probe=True, _fixed_scen=True`이므로 `_l0_penalty()`가 즉시 0을 반환한다. 손실 = MSE + λ_scen·CE 만 남는다.**
 
 ### λ 튜닝 가이드
 
 | 항목 | 기본값 | 크게 하면 | 작게 하면 |
 |------|--------|-----------|-----------|
 | `lambda_scen` | 0.5 | 시나리오 분류 우선 | 용량 예측 우선 |
-| `lambda_l0` | **자동 계산** | HI 수 최소화 (희소) | 많은 HI 허용 (정확) |
-| `lambda_l0_auto` | `true` | m/k 기반 자동 계산 (권장) | `false` = `lambda_l0` 직접 지정 |
-
-`lambda_l0_auto=true`일 때 `lambda_l0` 직접 설정값은 무시된다. Phase 1b에서는 어차피 L0=0이므로 두 옵션 모두 무관하다.
+| `lambda_l0` (target) | **자동 계산** | HI 수 최소화 (희소) | 많은 HI 허용 (정확) |
+| `lambda_l0_warmup_epochs` | 50 | 표현 학습 기회 증가 | 초기부터 압축 |
+| `lambda_l0_ramp_epochs` | 100 | 점진적 수렴 | 급격한 pruning |
 
 ---
 
 ## 11. training/scr_trainer.py — SCRTrainer
 
+### L0LambdaScheduler
+
+```python
+class L0LambdaScheduler:
+    def get(self, epoch: int) -> float:
+        if schedule == "none":
+            return target
+        if schedule == "delayed_warmup":
+            if epoch < warmup_ep: return 0.0
+            progress = (epoch - warmup_ep) / ramp_ep
+            return target * min(progress, 1.0)
+        if schedule == "exp_ramp":
+            return target * (epoch / total_epochs) ** 2
+        if schedule == "cyclic":
+            phase = (epoch % cycle_ep) / cycle_ep
+            return target * 0.5 * (1 - cos(π * phase))
+```
+
+`SCRTrainer.__init__`에서 `L0LambdaScheduler` 인스턴스를 생성하고, `fit()` 루프 매 에폭 시작 시:
+
+```python
+eff_l0 = self.l0_scheduler.get(epoch)
+self.loss_fn.lambda_l0 = eff_l0  # loss_fn에 직접 주입
+```
+
+Phase 2에서는 loss_fn이 내부적으로 L0=0을 반환하므로 `eff_l0` 값 자체는 무관.
+
 ### 학습 스케줄
 
-#### Cosine LR (Warmup 포함)
+#### LR Cosine (Warmup 포함)
 
 ```
 워밍업 (epoch 0~10):
@@ -579,11 +696,8 @@ else:
     no_improve += 1
 if no_improve >= patience:
     break
-# 완료 후 best.pt를 reload해 최적 가중치 복원
-_load_model(model, ckpt_path)
+_load_model(model, ckpt_path)  # 완료 후 best 가중치 복원
 ```
-
-`_save_model` / `_load_model` 은 모듈 수준 공개 함수로 `train_scr.py`에서도 `final.pt` 저장에 재사용한다.
 
 ### 체크포인트 포맷
 
@@ -608,6 +722,7 @@ normalizer 통계가 `.pt` 안에 포함되므로 별도 `normalizer.pkl` 없이
 |------|------|
 | `epoch` | 에폭 번호 |
 | `tr_loss` / `tr_mse` / `tr_ce` / `tr_l0` | 훈련 손실 분해 |
+| `lambda_l0` | **해당 에폭의 effective λ_l0** (스케줄러 출력, Phase 1에서 모니터링용) |
 | `val_loss` / `val_mse` / `val_rmse` / `val_mae` / `val_r2` | 검증 지표 |
 | `lr` | 현재 학습률 |
 | `elapsed_s` | 에폭 소요 시간(초) |
@@ -615,10 +730,11 @@ normalizer 통계가 `.pt` 안에 포함되므로 별도 `normalizer.pkl` 없이
 ### 에폭 콘솔 출력 형식
 
 ```
-epoch   10 | tr_loss=1.2345 mse=0.9876 ce=0.3456 l0=102.34 | val_loss=0.5123 rmse=0.0234 r2=0.9812 | lr=9.80e-04 t=51.0s *
+epoch   10 | tr_loss=1.2345 mse=0.9876 ce=0.3456 l0=102.34 λ_l0=0.0000 | val_loss=0.5123 rmse=0.0234 r2=0.9812 | lr=9.80e-04 t=51.0s
+epoch   51 | tr_loss=1.1234 mse=0.9123 ce=0.3200 l0=98.12  λ_l0=0.0003 | val_loss=0.4987 rmse=0.0221 r2=0.9834 | lr=9.60e-04 t=51.5s *
 ```
 
-`*` 표시는 val RMSE 갱신(best) 에폭. `tqdm_write()`로 출력해 progress bar와 겹치지 않는다.
+`*` 표시는 val RMSE 갱신(best) 에폭. `λ_l0`가 0이면 warmup 중, 증가하면 ramp 중임을 바로 확인 가능하다.
 
 ---
 
@@ -644,7 +760,7 @@ SCREvaluator(
 | `evaluate(train_ds, val_ds, test_ds)` | 전체 split 메트릭 계산 + 그래프 저장 |
 | `save_metrics(results, metrics_dir)` | `metrics_dir/metrics.json` 저장 (중첩 구조) |
 | `save_predictions(pred_dict, predictions_dir)` | `predictions_dir/test_predictions.csv` 저장 |
-| `plot_routing_heatmap(routing_dir, probe_sel, scen_sel)` | 7×65 활성화 히트맵 + CSV 저장 |
+| `plot_routing_heatmap(routing_dir, probe_sel, scen_sel)` | 7×64 활성화 히트맵 + CSV 저장 |
 | `_plot_scatter(pred_dict, tag)` | `figures_dir/scatter_{tag}.png` 저장 |
 | `_plot_capacity_curves(pred_dict)` | 대표 셀별 3-패널 `figures_dir/capacity_curve_{cell}.png` |
 | `_plot_confusion_matrix(pred_dict, tag)` | `figures_dir/confusion_matrix_{tag}.png` 저장 |
@@ -661,18 +777,14 @@ SCREvaluator(
     "level_true":    (N,) int     # 정답 시나리오 레벨
     "seg_idx":       (N,) int     # 세그먼트 인덱스 (0~5)
     "direction":     (N,) float   # +1.0(충전) / -1.0(방전)
-    "probe_z":       (N, 65)      # probe gate 활성화값 (0 또는 1)
-    "scen_z":        (N, 65)      # scen gate 활성화값
+    "probe_z":       (N, 64)      # probe gate 활성화값 (0 또는 1)
+    "scen_z":        (N, 64)      # scen gate 활성화값
     "cell_ids":      list[str]
     "cycles":        list[int]
     "seg_names":     list[str]
     "cap_raw":       (N,) Ah      # 원본 capacity (정규화 전)
 }
 ```
-
-### Scatter Plot
-
-x = 실측 capacity\_Ah, y = 예측 capacity\_Ah (세그먼트 단위, `scatter_test.png`)
 
 ### Capacity Curve (대표 셀)
 
@@ -693,10 +805,9 @@ true_per_cyc = [cap_true[cycles == cy].mean() for cy in unique_cycles]
 {
   "train": {
     "capacity":   {"rmse": 0.0165, "mae": 0.0079, "r2": 0.9560, "mape": 0.77},
-    "breakdown":  {"charge": {...}, "discharge": {...}, "level_low": {...}, "level_mid": {...}, "level_high": {...}},
-    "scenario":   {"accuracy": 0.92, "per_class_accuracy": {"Low": 0.90, ...}, "confusion_matrix": [[...]]},
-    "efficiency": {"avg_probe_his": 1.0, "avg_scen_his": 5.0, "avg_computed_his": 5.6,
-                   "avg_cost": 7.2, "max_cost": 120.5, "cost_reduction_pct": 94.0}
+    "breakdown":  {"charge": {...}, "discharge": {...}, "level_low": {...}, ...},
+    "scenario":   {"accuracy": 0.92, "confusion_matrix": [[...]]},
+    "efficiency": {"avg_probe_his": 2.0, "avg_scen_his": 5.0}
   },
   "val":  { ... },
   "test": { ... }
@@ -713,50 +824,60 @@ true_per_cyc = [cap_true[cycles == cy].mean() for cy in unique_cycles]
 
 ### 역할
 
-1. config 로드 + CLI 오버라이드
+1. CLI `--phase` 옵션 또는 yaml 설정으로 Phase 1 / Phase 2 자동 판별
 2. 타임스탬프 run 폴더 생성 (`_5_data_model_scr/MMDD_HHMM/`)
 3. `gates_from` / `--gates-from` 경로에서 gate JSON 탐색
 4. 데이터 빌드 (native seg/ 우선 → wide reshape fallback)
-5. JSON 있으면 고정 마스크 모드 / 없으면 L0 포함 학습
-6. **`lambda_l0_auto=true`이면 m/k 기반 `lambda_l0` 동적 계산** (Phase 1 전용)
-7. `probe_m_fixed` / `scen_k_fixed=true` 이면 top-k hard 절삭
-8. gate JSON 저장 (캐시에서 불러온 경우 복사, L0 학습 시 새로 저장)
-9. `checkpoints/final.pt` 저장
+5. JSON 없으면(Phase 1): L0 게이트 포함 학습 → JSON + gate_probs.png 저장
+6. JSON 있으면(Phase 2): 고정 마스크 모델 재구성 → MLP/Head만 학습
+7. **`lambda_l0_auto=true`이면 m/k 기반 `lambda_l0` 동적 계산** (Phase 1 스케줄러 target)
+8. `checkpoints/final.pt` 저장
+
+### Phase 판별 로직
+
+```python
+def _resolve_phase(args, cfg) -> int:
+    if args.phase is not None:                    return args.phase  # CLI 최우선
+    if args.no_gates:                             return 1           # legacy
+    if cfg.get("data", {}).get("gates_from"):     return 2           # legacy
+    return 1                                                         # 기본값
+```
 
 ### 옵션 전체
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
 | `--config PATH` | `5_model/config/scr.yaml` | YAML 설정 파일 경로 |
-| `--probe-m INT` | config 값 | probe HI 수 강제 (`probe_m_fixed=true` 자동 적용) |
-| `--scen-k INT` | config 값 | 시나리오별 HI 수 강제 |
-| `--gates-from PATH` | config의 `gates_from` | 이전 run 폴더 경로 — gates JSON 재사용 (CLI > yaml 우선순위) |
-| `--no-gates` | `false` | gates_from 무시, L0부터 재학습 (yaml `gates_ignore=true`와 동일) |
+| `--phase {1,2}` | auto | 1=L0 학습, 2=고정 마스크 재학습 |
+| `--charge-m INT` | config 값 | 충전용 probe HI 수 |
+| `--discharge-m INT` | config 값 | 방전용 probe HI 수 |
+| `--scen-k INT` | config 값 | 시나리오별 HI 수 |
+| `--gates-from PATH` | config의 `gates_from` | 이전 run 폴더 경로 (CLI > yaml) |
+| `--no-gates` | `false` | gates_from 무시, L0 재학습 (legacy) |
 | `--device STR` | `auto` | `auto` / `cpu` / `cuda` / `cuda:0` |
 
 ### 실행 예시
 
 ```bash
 # ── Phase 1: L0 게이트 학습 (최초 1회) ─────────────────────────────
-python 5_model/train_scr.py --no-gates
-# → L0로 최적 HI 선정 → gates/*.json + checkpoints/ 저장
+python 5_model/train_scr.py --phase 1
+# → L0로 최적 HI 선정 → gates/*.json + gate_probs.png 저장
 
-# ── Phase 1b: 게이트 고정 재학습 (선택) ────────────────────────────
-# yaml의 gates_from에 이전 run 경로가 설정되어 있으면 그냥 실행
-python 5_model/train_scr.py
-# → JSON 자동 탐색 → _probe_mask_buf 고정 → MLP/Head만 학습
+# m/k 수동 지정
+python 5_model/train_scr.py --phase 1 --charge-m 3 --discharge-m 1 --scen-k 5
+
+# ── Phase 2: 게이트 고정, MLP/Head 정밀 학습 ───────────────────────
+# yaml의 gates_from에 이전 run 경로 설정 후 실행
+python 5_model/train_scr.py --phase 2
 
 # 다른 run의 gates 명시
-python 5_model/train_scr.py --gates-from _5_data_model_scr/0707_1131
-
-# probe HI 5개 강제 절삭 후 재학습 (Phase 1 완료 후 hard truncation)
-python 5_model/train_scr.py --no-gates --probe-m 5 --scen-k 10
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0709_0221
 
 # GPU 지정
-python 5_model/train_scr.py --device cuda:0
+python 5_model/train_scr.py --phase 1 --device cuda:0
 
 # conda run (환경 미활성화 상태에서)
-conda run -n LFP_SOH_ESTIMATION python 5_model/train_scr.py --no-gates
+conda run -n LFP_SOH_ESTIMATION python 5_model/train_scr.py --phase 1
 ```
 
 ### Gate JSON 탐색·저장 동작
@@ -776,38 +897,191 @@ conda run -n LFP_SOH_ESTIMATION python 5_model/train_scr.py --no-gates
   (항상 새 run 폴더에 gates JSON 있음 → test_scr.py가 신뢰성 있게 탐색 가능)
 ```
 
-### 출력 구조
+### Phase 1 추가 출력
+
+```
+_5_data_model_scr/MMDD_HHMM/
+  gates/
+    classification_HIs.json    ← charge/discharge 분리 랭킹
+    regression_HIs.json        ← 시나리오 6개 × 64개 랭킹
+    gate_probs.png             ← 8 서브플롯 bar chart (charge probe, discharge probe, seg0-5)
+                                  각 subplot: gate_prob 내림차순, 빨간 점선=top-m/k 임계선, 상위 5개 이름 표기
+```
+
+### 출력 구조 (전체)
 
 ```
 _5_data_model_scr/
-  MMDD_HHMM/                         실행마다 생성 (예: 0707_1204)
+  MMDD_HHMM/
     checkpoints/
-      best.pt                        val RMSE 최솟값 시점 full checkpoint
-      final.pt                       학습 완료 후 best 가중치 복원 full checkpoint
+      best.pt                  val RMSE 최솟값 시점 full checkpoint
+      final.pt                 학습 완료 후 best 가중치 복원 full checkpoint
     gates/
-      classification_HIs.json        probe gate 선택 HI 목록
-        {"selected_indices": [5,6,9,...], "selected_names": [...], "count": 5}
-      regression_HIs.json            시나리오별 gate 선택 HI 목록
-        {"seg_0": [2,5,11], "seg_0_names": [...], "seg_0_seg_name": "chg_lo", ...}
+      classification_HIs.json
+      regression_HIs.json
+      gate_probs.png           (Phase 1만)
     logs/
-      train_log.csv                  epoch별 손실·지표·LR·시간
-    config.yaml                      이 run에 사용한 scr.yaml 스냅샷
+      train_log.csv            epoch별 손실·lambda_l0·지표·LR·시간
+    config.yaml                이 run에 사용한 scr.yaml 스냅샷
 ```
 
 ---
 
-## 14. 진입점 — test_scr.py
+## 14. HI 랭킹 생성 메커니즘 — classification_HIs.json / regression_HIs.json
 
-**Phase 2 — 고정 게이트 추론 진입점.** 게이트 학습 없음, 선정된 HI 조합으로 순수 forward pass.
+### 두 파일이 하는 일
+
+| 파일 | 용도 | 내용 |
+|------|------|------|
+| `classification_HIs.json` | Stage A (시나리오 분류기) 입력 HI 선정 | charge/discharge probe gate의 gate_prob 내림차순으로 **방향별 분리** 64개 전체 랭킹 |
+| `regression_HIs.json` | Stage B (용량 예측기) 입력 HI 선정 | 6개 시나리오 각각의 scen gate gate_prob로 독립 랭킹 |
+
+Phase 1 학습이 끝나면 이 두 파일에 **전체 64개 HI의 중요도 순위**가 저장된다. Phase 2·추론에서는 yaml의 `charge_probe_m`/`discharge_probe_m`개 / `scen_k_count`개만 잘라 사용한다.
+
+---
+
+### gate_prob란 무엇인가
+
+Hard-Concrete 게이트는 HI마다 학습 파라미터 `log_alpha_i` 하나를 갖는다.
+
+```
+gate_prob_i = σ(log_alpha_i − β·log(−γ/ζ))
+            ≈ P(z_i > 0)  (이 HI가 켜질 확률)
+
+β=2/3, γ=−0.1, ζ=1.1 (하이퍼파라미터 고정)
+```
+
+Phase 1 학습 동안 `log_alpha_i`는 **두 힘의 줄다리기**로 수렴한다.
+
+| 방향 | 힘 | 원인 |
+|------|-----|------|
+| log_alpha_i ↑ (HI 켜기) | CE / MSE 손실 | 이 HI가 있으면 분류·예측 오차 감소 |
+| log_alpha_i ↓ (HI 끄기) | L0 페널티 | 켜진 HI 수(× 비용) 만큼 손실 증가 |
+
+`delayed_warmup` 스케줄러로 warmup 기간(epoch 0~49) 동안 L0 페널티 = 0으로 유지하면, 모든 log_alpha가 먼저 **실제 정보량에 따라 자유롭게 배치**된 뒤 ramp 기간(epoch 50~149)부터 L0 압력이 서서히 가해진다. 결과적으로 bimodal 수렴이 더 안정적으로 이루어진다.
+
+---
+
+### classification_HIs.json 생성 흐름
+
+charge_probe_gate와 discharge_probe_gate 각각의 랭킹이 **분리 저장**된다.
+
+```
+Phase 1 학습 완료
+    │
+    ▼
+_ranked_indices(model.charge_probe_gate)    → ch_ranked, ch_probs
+_ranked_indices(model.discharge_probe_gate) → dis_ranked, dis_probs
+    │
+    ▼
+JSON 저장
+{
+  "charge_ranked":    [idx, ...]  ← 충전 gate_prob 내림차순
+  "charge_names":     [...]
+  "charge_probs":     [0.9999, 0.9998, 0.9990, ...]
+  "discharge_ranked": [idx, ...]  ← 방전 gate_prob 내림차순
+  "discharge_names":  [...]
+  "discharge_probs":  [...]
+}
+```
+
+신구 구조에서는 충전/방전 gate가 독립 수렴하므로, 클러스터링 결과처럼 충전은 더 많은 HI(charge_probe_m=3), 방전은 더 적은 HI(discharge_probe_m=1)에 자연스럽게 수렴할 수 있다.
+
+---
+
+### regression_HIs.json 생성 흐름
+
+```
+Phase 1 학습 완료
+    │
+    ▼
+시나리오 6개(chg_lo, chg_mid, chg_hi, dis_hi, dis_mid, dis_lo)마다 독립 처리
+    │
+    ├─ _ranked_indices(model.scen_gates[0])  → seg_0_ranked, seg_0_probs
+    ├─ _ranked_indices(model.scen_gates[1])  → seg_1_ranked, seg_1_probs
+    │  ...
+    └─ _ranked_indices(model.scen_gates[5])  → seg_5_ranked, seg_5_probs
+    │
+    ▼
+JSON 저장
+{
+  "seg_0_ranked":   [23, 26, 14, ...]   ← chg_lo gate의 gate_prob 내림차순
+  "seg_0_names":    [...]
+  "seg_0_probs":    [0.9999, 0.9999, 0.9999, 0.00004, ...]
+  "seg_0_seg_name": "chg_lo",
+  "seg_1_ranked":   [...],
+  ...
+}
+```
+
+각 시나리오 gate는 **완전히 독립적으로 학습**된다. L0 페널티에서 probe gate와 scen gate의 합산 확률이 사용되기 때문에 probe가 이미 켠 HI라면 scen gate에는 추가 페널티가 줄어든다.
+
+```
+P(active_i) = 1 − (1−p_probe_i)(1−p_scen_i)
+```
+
+즉 probe가 이미 HI i를 켜고 있으면(`p_probe_i ≈ 1`), scen gate가 같은 HI를 켜도 L0 비용이 거의 늘지 않는다. 반대로 probe가 끈 HI를 scen gate가 켜면 비용이 온전히 부과된다.
+
+`scen_k_count=5` (yaml 설정)이므로 추론에서는 **시나리오별 상위 5개 HI**만 사용한다.
+
+---
+
+### Phase 2·추론에서의 사용
+
+```python
+# classification_HIs.json → charge/discharge probe_mask (N_HI,) bool
+ch_ranked  = data["charge_ranked"]          # 64개 전체 랭킹
+dis_ranked = data["discharge_ranked"]
+ch_mask[ch_ranked[:charge_probe_m]]   = True   # 상위 m1개 충전 마스크
+dis_mask[dis_ranked[:discharge_probe_m]] = True # 상위 m2개 방전 마스크
+
+# regression_HIs.json → scen_masks (N_SEGS, N_HI) bool
+for seg in range(6):
+    ranked = data[f"seg_{seg}_ranked"]   # 세그먼트별 64개 랭킹
+    scen_masks[seg, ranked[:scen_k_count]] = True
+```
+
+L0 게이트(파라미터 없음)가 고정 bool 마스크로 교체되면:
+- `charge_probe_gate / discharge_probe_gate = None` → `_charge_probe_mask_buf / _discharge_probe_mask_buf` (버퍼)
+- `scen_gates = None` → `_scen_masks_buf` (6 × 64 bool 버퍼)
+- L0 손실 항 자동 0
+- probe_mlp + cap_head만 학습 (Phase 2) 또는 추론만 (test)
+
+---
+
+### 요약
+
+```
+Phase 1 (L0 학습, delayed_warmup 스케줄)
+  epoch 0~49:   λ_l0=0  →  자유로운 표현 학습
+  epoch 50~149: λ_l0 선형 증가  →  bimodal 수렴 시작
+  epoch 150+:   λ_l0=target  →  gate_prob ≈1 or ≈0 수렴
+               ↓ gate_prob 내림차순 정렬
+  classification_HIs.json  [charge_ranked / discharge_ranked 분리, 64개씩]
+  regression_HIs.json      [시나리오 6개 × 64개 scen 랭킹]
+  gate_probs.png           [8 서브플롯 시각화]
+
+Phase 2 / 추론
+  charge_ranked[:charge_probe_m]  → 충전 probe 고정 마스크
+  discharge_ranked[:discharge_probe_m] → 방전 probe 고정 마스크
+  seg_N_ranked[:scen_k_count]     → 시나리오별 scen 고정 마스크
+  probe_mlp + cap_head 재학습 (Phase 2) 또는 forward-only (추론)
+```
+
+---
+
+## 15. 진입점 — test_scr.py
+
+**Phase 2 추론 진입점.** 게이트 학습 없음, 선정된 HI 조합으로 순수 forward pass.
 
 ### 역할
 
 1. 체크포인트 자동 탐색 또는 `--checkpoint` 명시
 2. 저장된 config·normalizer 복원
 3. 동일 split seed로 데이터 재구성 (train/val/test 동일 셀 보장)
-4. **gates JSON 우선 로드** → 체크포인트 타입과 무관하게 항상 JSON 기준으로 HI 고정
-   - JSON 있음 → 고정 마스크 모델 재구성. Phase 1 체크포인트(L0 파라미터 키)라도 `strict=False`로 MLP/Head만 로드하고 gate 파라미터는 무시
-   - JSON 없음 → `probe_gate.log_alpha` 있으면 L0 모델 그대로 재구성 (fallback)
+4. **gates JSON 우선 로드** → 항상 JSON 기준으로 HI 고정
+   - JSON 있음 → 고정 마스크 모델 재구성. Phase 1 체크포인트라도 `strict=False`로 MLP/Head만 로드
+   - JSON 없음 → L0 모델 그대로 재구성 (fallback)
 5. 전체 split 메트릭 계산 + 그래프·CSV·routing 저장
 6. 활성 HI 통계 출력
 
@@ -816,61 +1090,32 @@ _5_data_model_scr/
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
 | `--config PATH` | `5_model/config/scr.yaml` | YAML 설정 파일 경로 |
-| `--checkpoint PATH` | 자동 탐색 | 체크포인트 경로. 미지정 시 `output_dir` 아래 최신 `checkpoints/final.pt` |
-| `--rep-cells STR [...]` | auto-pick | capacity curve 대표 셀. 미지정 시 test split에서 데이터셋별 1개 자동 선택 |
+| `--checkpoint PATH` | 자동 탐색 | 체크포인트 경로 |
+| `--rep-cells STR [...]` | auto-pick | capacity curve 대표 셀 직접 지정 |
 | `--device STR` | `auto` | `auto` / `cpu` / `cuda` / `cuda:0` |
-
-### 체크포인트 자동 탐색 (`_find_latest_checkpoint`)
-
-```
-output_dir 아래 MMDD_HHMM 폴더 스캔
-  → checkpoints/final.pt 있는 폴더 중 mtime 최신 선택  (신버전)
-  → 없으면 scr_final.pt 있는 폴더 중 mtime 최신 선택  (구버전 fallback)
-```
-
-### Gate JSON 2단계 탐색 (`_resolve_gate_json`)
-
-체크포인트 state dict 키에 `probe_gate.log_alpha`가 없으면 고정 마스크 모드 → JSON 필요.
-
-```
-1단계: run_dir/gates/classification_HIs.json  (자기 run에서 직접 학습/복사)
-2단계: run_dir/config.yaml 읽기
-       → gates_ignore=true  → 탐색 중단 (None 반환)
-       → gates_from 경로에서 탐색
-           {gates_from}/gates/classification_HIs.json  (신버전)
-           {gates_from}/classification_HIs.json        (없으면)
-           {gates_from}/scenario_classification_HIs.json  (구버전 폴백)
-```
 
 ### 대표 셀 자동 선택 (`_pick_rep_cells`)
 
-`seg_data_dir/{dataset}/*.pkl` 파일 목록으로 dataset 소속을 판별하고, test split에서 각 dataset 1개씩 선택한다 (MIT 1개 + HUST 1개).
+`eval_cfg.get("rep_cells_per_dataset", 1)` 값으로 각 데이터셋에서 셀을 자동 선택한다.  
+yaml `evaluation.rep_cells_per_dataset: 3`이면 MIT 3개 + HUST 3개 = 총 6개 자동 선택.
 
-### 실행 예시
-
-```bash
-# 기본 평가 (최신 run 자동 선택)
-python 5_model/test_scr.py
-
-# 특정 체크포인트 명시
-python 5_model/test_scr.py --checkpoint _5_data_model_scr/0707_1204/checkpoints/best.pt
-
-# 대표 셀 직접 지정
-python 5_model/test_scr.py --rep-cells b1c31 10-7
-
-# CPU 강제
-python 5_model/test_scr.py --device cpu
+```python
+def _pick_rep_cells(test_ds, cfg, n_per_dataset: int = 1) -> list[str]:
+    for ds_name in datasets:
+        candidates = sorted cells in test split belonging to ds_name
+        picked.extend(candidates[:n_per_dataset])
 ```
+
+평가 config는 **현재 yaml**(cfg)에서 읽어온다 — 체크포인트 저장 당시의 cfg_saved가 아니라, 실행 시점 yaml의 evaluation 섹션 기준이다.
 
 ### 콘솔 출력 예시
 
 ```
-[test] probe gate JSON: .../_5_data_model_scr/0707_0410/scenario_classification_HIs.json
-[test] scen  gate JSON: .../_5_data_model_scr/0707_0410/scenario_regression_HIs.json
-[test] rep_cells: ['b1c31', '10-7']
-[eval] train: rmse=0.0165 mae=0.0079 r2=0.9560 mape=0.7725
-[eval] val:   rmse=0.0102 mae=0.0063 r2=0.9845 mape=0.5977
-[eval] test:  rmse=0.0158 mae=0.0080 r2=0.9548 mape=0.7807
+[test] device=cuda
+[test] checkpoint: _5_data_model_scr/0709_0221/checkpoints/best.pt
+[test] probe gate JSON: .../gates/classification_HIs.json
+[test] scen  gate JSON: .../gates/regression_HIs.json
+[test] rep_cells: ['b1c0', 'b1c1', 'b1c2', '10-7', '10-8', '10-9']
 
 === SCR Evaluation Summary ===
 split         RMSE       MAE        R2      MAPE
@@ -879,27 +1124,32 @@ train       0.0165    0.0079    0.9560      0.77
 val         0.0102    0.0063    0.9845      0.60
 test        0.0158    0.0080    0.9548      0.78
 
-Active probe HIs : 5/65
-Avg scen HIs/seg : 5.0/65
+Active charge probe HIs    : 3/64
+Active discharge probe HIs : 1/64
+Avg scen HIs/seg           : 5.0/64
   chg_lo    : 5 HIs selected
-  ...
+  chg_mid   : 5 HIs selected
+  chg_hi    : 5 HIs selected
+  dis_hi    : 5 HIs selected
+  dis_mid   : 5 HIs selected
+  dis_lo    : 5 HIs selected
 ```
 
-### 출력 파일 (체크포인트와 동일 run 폴더)
+### 출력 파일
 
 ```
 _5_data_model_scr/MMDD_HHMM/
   figures/
-    scatter_test.png               예측 vs 실측 산점도 (세그먼트 단위)
-    capacity_curve_{cell}.png      대표 셀 열화 곡선 (3패널: 용량곡선 + 절대오차 + 상대오차)
-    confusion_matrix_test.png      레벨 분류 혼동 행렬
+    scatter_test.png
+    capacity_curve_{cell}.png      (rep_cells 수만큼 생성)
+    confusion_matrix_test.png
   metrics/
-    metrics.json                   train/val/test (capacity/breakdown/scenario/efficiency 중첩 구조)
+    metrics.json
   predictions/
-    test_predictions.csv           세그먼트별 예측값 + 레벨 + gate 활성 HI 수
+    test_predictions.csv
   routing/
-    routing_heatmap.png            7×65 활성화 히트맵 (probe + 6 시나리오)
-    routing_table.csv              게이트별 선택 HI 목록
+    routing_heatmap.png            7×64 히트맵 (charge probe ∪ discharge probe + 6 시나리오)
+    routing_table.csv
 ```
 
 ---
@@ -910,11 +1160,12 @@ _5_data_model_scr/MMDD_HHMM/
 
 | 서브모듈 | 파라미터 수 |
 |---------|------------|
-| HardConcreteGate (probe) | 65 ≈ 0.07K |
-| Stage A MLP | 65×64+64×32+32×3 ≈ 6.3K |
-| HardConcreteGate (6×scen) | 6×65 ≈ 0.4K |
-| Capacity Head | 131×128+128×64+64×1 ≈ 25K |
-| **합계** | **≈ 32K** |
+| charge_probe_gate (HardConcreteGate) | 64 ≈ 0.06K |
+| discharge_probe_gate (HardConcreteGate) | 64 ≈ 0.06K |
+| Stage A MLP (공유) | 64×64+64×32+32×3 ≈ 6.2K |
+| HardConcreteGate (6×scen) | 6×64 ≈ 0.4K |
+| Capacity Head | 129×128+128×64+64×1 ≈ 24.7K |
+| **합계** | **≈ 31.5K** |
 
 배터리 데이터 특성상 셀 수(~200개)와 전체 세그먼트 수(~60만)로 과적합 방지가 중요하기 때문에 소형 모델로 설계했다.
 
@@ -928,16 +1179,16 @@ _4_data_hi/{MIT,HUST}/*.pkl      (wide 포맷, fallback → reshape)
         │
         ▼
 segment_dataset.py
-  load_dataset_native_seg()    native: HI 컬럼 hi_00..hi_64 매핑 + wide pkl로 capacity_Ah 조인
+  load_dataset_native_seg()    native: HI 컬럼 hi_00..hi_63 매핑
   (또는 load_dataset_wide())   wide: 사이클당 6행 reshape
-  split_cells()                셀 단위 80/10/10 분할 (seed 고정)
-  SegmentNormalizer.fit()      훈련셋으로만 z-score 피팅 (HI 65개 + target)
+  split_cells()                셀 단위 60/20/20 분할 (seed 고정)
+  SegmentNormalizer.fit()      훈련셋으로만 z-score 피팅 (HI 64개 + target)
   SegmentDataset()             텐서 사전 빌드
   DataLoader                   배치 생성
         │
         ▼  (한 배치)
-  x_hi      (B, 65)            정규화된 HI (stat_q_abs 제외)
-  nan_mask  (B, 65)            NaN 유효 마스크
+  x_hi      (B, 64)            정규화된 HI (stat_q_abs, stat_energy_seg 제외)
+  nan_mask  (B, 64)            NaN 유효 마스크
   direction (B,)               +1.0(충전) / -1.0(방전)
   seg_idx   (B,)               0~5 세그먼트 인덱스
   level     (B,)               0/1/2 정답 레벨
@@ -947,42 +1198,51 @@ segment_dataset.py
 SCRModel.forward()
   x = x_hi * nan_mask                                  NaN 위치 제거
   Stage A:
-    probe_x, probe_z = probe_gate(x)                   (B, 65)
-    level_logits     = probe_mlp(probe_x)              (B, 3)
+    direction > 0  → charge_probe_gate(x)    → probe_x (B,64)  [m1개 비-zero]
+    direction <= 0 → discharge_probe_gate(x) → probe_x (B,64)  [m2개 비-zero]
+    level_logits   = probe_mlp(probe_x)                (B, 3)
   Stage B:
-    scen_x, scen_z   = scen_gates[seg_idx](x)          (B, 65)
+    scen_x = scen_gates[seg_idx](x)                    (B,64)  [k개 비-zero]
   Head:
-    feat     = concat(probe_x, scen_x, direction)      (B, 131)
+    feat     = concat(probe_x, scen_x, direction)      (B, 129)
     cap_pred = cap_head(feat)                          (B,)
         │
         ▼
 SCRLoss(outputs, batch, model)
   MSE(cap_pred, target)
   + λ_scen × CE(level_logits, level)
-  + λ_l0   × Σ cost_i × P(gate_i active)
+  + λ_l0(epoch) × Σ cost_i × P(gate_i active)   ← delayed_warmup으로 epoch 제어
+    P(active_i) = 1 − (1 − p_probe_i)(1 − p_scen_i)
+    충전 시나리오: p_probe = charge_probe_gate.gate_prob()
+    방전 시나리오: p_probe = discharge_probe_gate.gate_prob()
         │
         ▼
 optimizer.step()               파라미터 업데이트
-        │  학습 완료 후
+        │  Phase 1 학습 완료 후
         ▼
 gates/ 저장:
-  probe_m_fixed=true → top-k 절삭 → gates/classification_HIs.json
-  scen_k_fixed=true  → top-k 절삭 → gates/regression_HIs.json
-  (캐시에서 로드한 경우 → 원본 JSON 복사)
-checkpoints/best.pt   (학습 중 최적 시점)
-checkpoints/final.pt  (best 가중치 복원 후 저장, model_state + cfg + normalizer 통합)
-logs/train_log.csv
+  classification_HIs.json  {charge_ranked, discharge_ranked} ← 방향별 분리
+  regression_HIs.json      {seg_0_ranked, ..., seg_5_ranked} ← 시나리오별
+  gate_probs.png           8 서브플롯 bar chart
+checkpoints/best.pt
+checkpoints/final.pt
+logs/train_log.csv         (lambda_l0 컬럼 포함)
 config.yaml
 
-        │  test_scr.py 실행
+        │  Phase 2 / test_scr.py 실행
         ▼
-checkpoint["model_state"] 키 검사
-  "probe_gate.log_alpha" 있음 → L0 게이트 모델 재구성
-  "_probe_mask_buf" 있음      → gates/ JSON 탐색 → 고정 마스크 모델 재구성
-        │
+classification_HIs.json 탐색
+  charge_ranked[:charge_probe_m]    → _charge_probe_mask_buf
+  discharge_ranked[:discharge_probe_m] → _discharge_probe_mask_buf
+regression_HIs.json 탐색
+  seg_N_ranked[:scen_k_count]       → _scen_masks_buf
+SCRModel(masks) 재구성 → Phase 2 재학습 or 추론만
+
+        │  test 완료
         ▼
 figures/scatter_test.png
-figures/capacity_curve_*.png
+figures/capacity_curve_*.png        (rep_cells_per_dataset × n_datasets 개)
 metrics/metrics.json
 predictions/test_predictions.csv
+routing/routing_heatmap.png         7×64 (charge∪discharge probe + 6 scen)
 ```

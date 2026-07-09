@@ -1,19 +1,28 @@
 """
 train_scr.py  —  SCR training entry point.
 
-Workflow:
-  1. Load config (config/scr.yaml or --config arg)
-  2. Build datasets (wide pkl reshape or native seg format)
-  3. Check for cached JSON masks → load fixed probe/scen masks if present
-  4. Build SCRModel and SCRTrainer
-  5. Train
-  6. After training: extract selected HI indices → save JSON if not in cache-mode
-  7. Save final checkpoint
+Two-phase training:
+
+  --phase 1 (Gate learning)
+    L0 penalty로 최적 HI 서브셋을 탐색한다.
+    charge_probe_gate / discharge_probe_gate 가 각 방향에서 m개를 선정하고,
+    6개 scen_gate 가 시나리오별 k개를 선정한다.
+    결과: gates/classification_HIs.json + gates/regression_HIs.json + gates/gate_probs.png
+
+  --phase 2 (Classification + Regression 정밀 학습)
+    Phase 1 JSON을 로드해 gate를 고정하고, probe_mlp + cap_head만 학습한다.
+    L0 페널티 없음 (순수 MSE + CE 최소화).
+    결과: checkpoints/ + figures/ + metrics/ + predictions/ + routing/
 
 Usage:
-  python 5_model/train_scr.py
-  python 5_model/train_scr.py --config 5_model/config/scr.yaml
-  python 5_model/train_scr.py --probe-m 5 --scen-k 10   # override fixed counts
+  python 5_model/train_scr.py --phase 1
+  python 5_model/train_scr.py --phase 2
+  python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0708_1533
+  python 5_model/train_scr.py --phase 1 --charge-m 3 --discharge-m 1 --scen-k 5
+
+Legacy aliases (backward compat):
+  --no-gates  → equivalent to --phase 1
+  gates_from in yaml  → equivalent to --phase 2
 """
 
 from __future__ import annotations
@@ -21,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -44,17 +54,28 @@ from training.scr_trainer import SCRTrainer
 from utils.hi_schema import N_HI, N_SEGS, SEGMENTS
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train SCR model")
-    p.add_argument("--config",     default="5_model/config/scr.yaml")
-    p.add_argument("--probe-m",    type=int, default=None, help="Override probe_m_count")
-    p.add_argument("--scen-k",     type=int, default=None, help="Override scen_k_count")
-    p.add_argument("--gates-from", default=None,
-                   help="이전 run 폴더 경로 (gates/*.json 또는 scenario_*.json 자동 탐색). "
-                        "미지정 시 scr.yaml의 gates_from 사용")
-    p.add_argument("--no-gates", action="store_true",
-                   help="gates_from 무시하고 L0부터 재학습 (yaml의 gates_ignore와 동일)")
-    p.add_argument("--device",     default="auto")
+    p.add_argument("--config",      default="5_model/config/scr.yaml")
+    p.add_argument("--phase",       type=int, choices=[1, 2], default=None,
+                   help="1=Gate 학습(HI 서브셋 선정), 2=분류·회귀 정밀 학습")
+    p.add_argument("--charge-m",    type=int, default=None,
+                   help="Phase 2에서 충전 probe 상위 m개 사용 (yaml charge_probe_m 오버라이드)")
+    p.add_argument("--discharge-m", type=int, default=None,
+                   help="Phase 2에서 방전 probe 상위 m개 사용 (yaml discharge_probe_m 오버라이드)")
+    p.add_argument("--scen-k",      type=int, default=None,
+                   help="시나리오별 scen HI 수 오버라이드")
+    p.add_argument("--gates-from",  default=None,
+                   help="Phase 2 시 이전 run 폴더 경로 (gates JSON 자동 탐색). "
+                        "미지정 시 yaml의 gates_from 사용")
+    # legacy aliases
+    p.add_argument("--no-gates",    action="store_true",
+                   help="[legacy] --phase 1과 동일")
+    p.add_argument("--device",      default="auto")
     return p.parse_args()
 
 
@@ -65,24 +86,41 @@ def _resolve_device(device_str: str) -> torch.device:
 
 
 # ---------------------------------------------------------------------------
-# Gates directory resolver
+# Phase 결정 헬퍼
+# ---------------------------------------------------------------------------
+
+def _resolve_phase(args: argparse.Namespace, cfg: dict) -> int:
+    """
+    --phase > --no-gates(legacy) > yaml gates_from 유무 순서로 phase를 결정한다.
+    """
+    if args.phase is not None:
+        return args.phase
+    if args.no_gates:
+        print("[train] --no-gates detected → Phase 1 (legacy alias)")
+        return 1
+    # gates_from이 설정되어 있으면 Phase 2로
+    if cfg.get("data", {}).get("gates_from"):
+        print("[train] yaml gates_from 설정 감지 → Phase 2 (legacy behavior)")
+        return 2
+    # 기본: Phase 1
+    print("[train] phase 미지정 → Phase 1 (기본)")
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# Gates directory / JSON resolver
 # ---------------------------------------------------------------------------
 
 def _resolve_gates_dir(cli_arg: str | None, cfg: dict) -> Path | None:
-    """
-    CLI --gates-from > yaml gates_from > None 순서로 gates 폴더를 결정한다.
-    run 폴더 안에 gates/ 서브폴더가 있으면 그쪽 반환, 없으면 run 폴더 자체 반환.
-    """
     raw = cli_arg or cfg.get("data", {}).get("gates_from")
     if not raw:
         return None
     run_dir = PROJECT_ROOT / raw
-    gates_subdir = run_dir / "gates"
-    return gates_subdir if gates_subdir.exists() else run_dir
+    gates_sub = run_dir / "gates"
+    return gates_sub if gates_sub.exists() else run_dir
 
 
 def _find_json(gates_dir: Path, new_name: str, old_name: str) -> Path | None:
-    """신버전 파일명 우선, 없으면 구버전(scenario_ 접두사) 탐색."""
     for name in (new_name, old_name):
         p = gates_dir / name
         if p.exists():
@@ -91,35 +129,42 @@ def _find_json(gates_dir: Path, new_name: str, old_name: str) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# JSON mask helpers
+# JSON mask loaders — dual probe (charge + discharge)
 # ---------------------------------------------------------------------------
 
-def _load_probe_mask_from_json(json_path: Path, m: int) -> torch.Tensor | None:
+def _load_probe_masks_from_json(
+    json_path: Path, charge_m: int, discharge_m: int
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
     """
-    (N_HI,) bool tensor 반환.
-    새 형식: {"ranked_indices": [...65개 정렬]}  → 상위 m개만 True
-    구 형식: {"selected_indices": [...이미 절삭]}  → 그대로 사용 (backward compat)
+    신형식: {"charge_ranked": [...], "discharge_ranked": [...]}
+    구형식: {"ranked_indices": [...]}  → 충/방전 모두 동일하게 적용 (backward compat)
+    Returns (charge_mask, discharge_mask) each (N_HI,) bool
     """
     if not json_path.exists():
-        return None
+        return None, None
     data = json.loads(json_path.read_text())
-    if "ranked_indices" in data:
-        indices = data["ranked_indices"][:m]
+
+    def _to_mask(indices: list[int]) -> torch.Tensor:
+        mask = torch.zeros(N_HI, dtype=torch.bool)
+        for i in indices:
+            mask[i] = True
+        return mask
+
+    if "charge_ranked" in data:
+        ch_mask  = _to_mask(data["charge_ranked"][:charge_m])
+        dis_mask = _to_mask(data["discharge_ranked"][:discharge_m])
+        print(f"[train] probe masks (new format): charge top-{charge_m}, discharge top-{discharge_m}")
     else:
-        indices = data.get("selected_indices", [])
-    mask = torch.zeros(N_HI, dtype=torch.bool)
-    for i in indices:
-        mask[i] = True
-    print(f"[train] probe mask: top-{m} from ranking → {sorted(indices)}")
-    return mask
+        # backward compat: single ranking → apply to both
+        indices  = data.get("ranked_indices", [])
+        ch_mask  = _to_mask(indices[:charge_m])
+        dis_mask = _to_mask(indices[:discharge_m])
+        print(f"[train] probe masks (legacy format): charge top-{charge_m}, discharge top-{discharge_m}")
+
+    return ch_mask, dis_mask
 
 
 def _load_scen_masks_from_json(json_path: Path, k: int) -> torch.Tensor | None:
-    """
-    (N_SEGS, N_HI) bool tensor 반환.
-    새 형식: {"seg_0_ranked": [...65개 정렬], ...}  → 시나리오별 상위 k개만 True
-    구 형식: {"seg_0": [...이미 절삭], ...}          → 그대로 사용 (backward compat)
-    """
     if not json_path.exists():
         return None
     data = json.loads(json_path.read_text())
@@ -135,29 +180,36 @@ def _load_scen_masks_from_json(json_path: Path, k: int) -> torch.Tensor | None:
     return masks
 
 
+# ---------------------------------------------------------------------------
+# JSON savers — dual probe
+# ---------------------------------------------------------------------------
+
 def _ranked_indices(gate) -> tuple[list[int], list[float]]:
-    """gate_prob 내림차순으로 전체 HI 인덱스와 확률 반환."""
-    prob = gate.gate_prob().detach().cpu()
+    prob       = gate.gate_prob().detach().cpu()
     sorted_idx = prob.argsort(descending=True).tolist()
     sorted_prob = [round(float(prob[i]), 6) for i in sorted_idx]
     return sorted_idx, sorted_prob
 
 
-def _save_probe_mask_to_json(
+def _save_probe_masks_to_json(
     model: SCRModel,
     json_path: Path,
     hi_cols_ref: list[str],
 ) -> None:
-    """Phase 1: gate_prob 기준 전체 랭킹을 저장. m은 Phase 1b/test 시점에 yaml로 결정."""
-    ranked, probs = _ranked_indices(model.probe_gate)
+    """Phase 1: charge/discharge probe gate_prob 전체 랭킹을 저장."""
+    ch_ranked,  ch_probs  = _ranked_indices(model.charge_probe_gate)
+    dis_ranked, dis_probs = _ranked_indices(model.discharge_probe_gate)
     out = {
-        "ranked_indices": ranked,
-        "ranked_names":   [hi_cols_ref[i] for i in ranked],
-        "gate_probs":     probs,
+        "charge_ranked":    ch_ranked,
+        "charge_names":     [hi_cols_ref[i] for i in ch_ranked],
+        "charge_probs":     ch_probs,
+        "discharge_ranked": dis_ranked,
+        "discharge_names":  [hi_cols_ref[i] for i in dis_ranked],
+        "discharge_probs":  dis_probs,
     }
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
-    print(f"[train] Saved probe HI ranking -> {json_path}  (전체 {len(ranked)}개 랭킹)")
+    print(f"[train] Saved probe HI ranking → {json_path}  (charge/discharge 각 {len(ch_ranked)}개 랭킹)")
 
 
 def _save_scen_masks_to_json(
@@ -165,7 +217,7 @@ def _save_scen_masks_to_json(
     json_path: Path,
     hi_cols_by_seg: dict[int, list[str]],
 ) -> None:
-    """Phase 1: 시나리오별 gate_prob 기준 전체 랭킹을 저장. k는 Phase 1b/test 시점에 yaml로 결정."""
+    """Phase 1: 시나리오별 gate_prob 전체 랭킹을 저장."""
     out = {}
     for s in range(N_SEGS):
         ranked, probs = _ranked_indices(model.scen_gates[s])
@@ -175,32 +227,87 @@ def _save_scen_masks_to_json(
         out[f"seg_{s}_seg_name"] = SEGMENTS[s]
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
-    print(f"[train] Saved scen HI ranking -> {json_path}  (시나리오별 전체 {N_HI}개 랭킹)")
+    print(f"[train] Saved scen HI ranking → {json_path}  (시나리오별 {N_HI}개 랭킹)")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 시각화 — gate_prob bar chart
+# ---------------------------------------------------------------------------
+
+def _plot_gate_probs(
+    model: SCRModel,
+    output_path: Path,
+    hi_cols_ref: list[str],
+    charge_m: int,
+    discharge_m: int,
+    scen_k: int,
+) -> None:
+    """
+    8개 서브플롯: charge probe / discharge probe / 6 scen gates
+    x축: HI 인덱스, y축: gate_prob. threshold(m/k) 기준선 표시.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("[train] matplotlib 미설치 — gate_probs.png 생략")
+        return
+
+    gates_info = [
+        ("Charge Probe",    model.charge_probe_gate,    charge_m,    "steelblue"),
+        ("Discharge Probe", model.discharge_probe_gate, discharge_m, "darkorange"),
+    ]
+    for s in range(N_SEGS):
+        gates_info.append((f"Scen: {SEGMENTS[s]}", model.scen_gates[s], scen_k, "seagreen"))
+
+    n_plots = len(gates_info)   # 8
+    fig, axes = plt.subplots(2, 4, figsize=(22, 8))
+    axes = axes.flatten()
+
+    for ax, (title, gate, threshold, color) in zip(axes, gates_info):
+        prob = gate.gate_prob().detach().cpu().numpy()
+        idx  = np.arange(len(prob))
+        sorted_idx = np.argsort(prob)[::-1]
+        sorted_prob = prob[sorted_idx]
+
+        ax.bar(range(len(sorted_prob)), sorted_prob, color=color, alpha=0.7)
+        if threshold <= len(sorted_prob):
+            cutoff = float(sorted_prob[threshold - 1]) if threshold > 0 else 1.0
+            ax.axvline(x=threshold - 0.5, color="red", linestyle="--", linewidth=1.2,
+                       label=f"top-{threshold} cutoff")
+            ax.axhline(y=cutoff, color="red", linestyle=":", linewidth=0.8, alpha=0.6)
+        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.set_xlabel("HI rank", fontsize=8)
+        ax.set_ylabel("gate_prob", fontsize=8)
+        ax.set_ylim(0, 1.05)
+        ax.legend(fontsize=7)
+        # 상위 5개 이름 표시
+        for rank in range(min(5, len(sorted_idx))):
+            hi_name = hi_cols_ref[sorted_idx[rank]]
+            short   = hi_name.split("_dis_hi")[0].split("_chg_lo")[0]
+            ax.text(rank, sorted_prob[rank] + 0.01, short,
+                    rotation=90, fontsize=5, ha="center", va="bottom")
+
+    fig.suptitle("Phase 1 — Gate Probability by HI (sorted desc)", fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[train] Saved gate_prob plot → {output_path}")
 
 
 # ---------------------------------------------------------------------------
 # Dynamic lambda_l0
 # ---------------------------------------------------------------------------
 
-_REF_LAMBDA = 0.01  # 기준값: ~10 probe HI, ~10 scen HI 선택에 대응
-_REF_M      = 10    # 위 lambda 기준 probe HI 수 (경험값)
-_REF_K      = 10    # 위 lambda 기준 scen  HI 수 (경험값)
+_REF_LAMBDA = 0.01
+_REF_M      = 10
+_REF_K      = 10
 
 
 def _compute_lambda_l0(m: int, k: int) -> float:
-    """
-    목표 m/k에 비례해 lambda_l0을 동적으로 계산한다.
-
-    원리: m/k가 작을수록(더 적은 HI 원함) L0 페널티를 강하게 줘야
-    L0 게이트가 자연스럽게 그 근방에서 수렴한다.
-    기준(_REF_M=10, _REF_K=10)에서 벗어나는 비율의 기하평균으로 스케일링.
-
-    예시 (REF_LAMBDA=0.01 기준):
-      m=1,  k=5  → scale=√(10×2)≈4.5  → lambda≈0.045
-      m=5,  k=5  → scale=√(2×2)=2.0   → lambda≈0.020
-      m=5,  k=10 → scale=√(2×1)≈1.4   → lambda≈0.014
-      m=10, k=20 → scale=√(1×0.5)≈0.7 → lambda≈0.007
-    """
     probe_scale = _REF_M / max(m, 1)
     scen_scale  = _REF_K / max(k, 1)
     scale = math.sqrt(probe_scale * scen_scale)
@@ -212,51 +319,43 @@ def _compute_lambda_l0(m: int, k: int) -> float:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    args = _parse_args()
+    args   = _parse_args()
     device = _resolve_device(args.device)
     print(f"[train] device={device}")
 
-    cfg = load_config(str(PROJECT_ROOT / args.config))
+    cfg   = load_config(str(PROJECT_ROOT / args.config))
+    phase = _resolve_phase(args, cfg)
+    print(f"[train] ═══ Phase {phase} ═══")
 
-    # Override from CLI
-    if args.probe_m is not None:
-        cfg["classifier"]["probe_m_count"] = args.probe_m
-    if args.scen_k is not None:
-        cfg["regression"]["scen_k_count"] = args.scen_k
+    # CLI 오버라이드
+    cls_cfg = cfg.setdefault("classifier", {})
+    reg_cfg = cfg.setdefault("regression", {})
+    if args.charge_m    is not None: cls_cfg["charge_probe_m"]    = args.charge_m
+    if args.discharge_m is not None: cls_cfg["discharge_probe_m"] = args.discharge_m
+    if args.scen_k      is not None: reg_cfg["scen_k_count"]      = args.scen_k
 
-    timestamp = datetime.now().strftime("%m%d_%H%M")
+    charge_m    = cls_cfg.get("charge_probe_m",    cls_cfg.get("probe_m_count", 1))
+    discharge_m = cls_cfg.get("discharge_probe_m", cls_cfg.get("probe_m_count", 1))
+    scen_k      = reg_cfg.get("scen_k_count", 5)
+
+    timestamp  = datetime.now().strftime("%m%d_%H%M")
     output_dir = PROJECT_ROOT / cfg["data"]["output_dir"] / timestamp
     (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (output_dir / "gates").mkdir(parents=True, exist_ok=True)
     print(f"[train] run dir: {output_dir}")
 
-    # config.yaml 복사본 저장
-    import shutil
     shutil.copy(str(PROJECT_ROOT / args.config), str(output_dir / "config.yaml"))
 
-    # 이번 run의 저장 경로 (항상 새 폴더의 gates/)
     probe_json_out = output_dir / "gates" / "classification_HIs.json"
     scen_json_out  = output_dir / "gates" / "regression_HIs.json"
 
-    # 이전 run에서 로드할 gates 디렉토리 (CLI > yaml > None)
-    # --no-gates 또는 yaml gates_ignore=true 이면 강제 무시
-    gates_ignore = args.no_gates or cfg["data"].get("gates_ignore", False)
-    gates_dir = None if gates_ignore else _resolve_gates_dir(args.gates_from, cfg)
-    probe_json_in = scen_json_in = None
-    if gates_ignore:
-        print("[train] gates_ignore=true: L0부터 재학습")
-    elif gates_dir:
-        probe_json_in = _find_json(gates_dir, "classification_HIs.json", "scenario_classification_HIs.json")
-        scen_json_in  = _find_json(gates_dir, "regression_HIs.json",     "scenario_regression_HIs.json")
-        print(f"[train] gates_from: {gates_dir}")
-
     # ------------------------------------------------------------------
-    # Data
+    # 데이터
     # ------------------------------------------------------------------
     train_ds, val_ds, test_ds, norm = build_datasets(cfg)
 
     tr_cfg = cfg["training"]
-    pin = (device.type == "cuda")
+    pin    = (device.type == "cuda")
     train_loader = DataLoader(
         train_ds, batch_size=tr_cfg["batch_size"], shuffle=True,
         collate_fn=collate_fn, num_workers=0, pin_memory=pin,
@@ -267,83 +366,111 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # JSON cache → fixed masks
+    # Phase 1: L0 gate 학습
     # ------------------------------------------------------------------
+    if phase == 1:
+        print(f"[train] Phase 1: charge_m={charge_m}, discharge_m={discharge_m}, scen_k={scen_k}")
+        print("[train] L0 게이트 학습 — charge/discharge probe + 6 scen gates 독립 탐색")
 
-    m = cfg["classifier"]["probe_m_count"]
-    k = cfg["regression"]["scen_k_count"]
-    probe_mask = _load_probe_mask_from_json(probe_json_in, m) if probe_json_in else None
-    scen_masks = _load_scen_masks_from_json(scen_json_in, k)  if scen_json_in  else None
+        model = SCRModel(
+            d_probe=cfg["model"]["d_probe"],
+            d_head=cfg["model"]["d_head"],
+            dropout=cfg["model"]["dropout"],
+            # 마스크 없음 → HardConcreteGate 활성화
+        )
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[train] SCRModel  trainable params: {n_params:,}")
 
-    if probe_mask is not None:
-        print(f"[train] Using cached probe mask from {probe_json_in} (m={probe_mask.sum()})")
-    if scen_masks is not None:
-        print(f"[train] Using cached scen masks from {scen_json_in}")
+        if cfg["loss"].get("lambda_l0_auto", False):
+            avg_m = (charge_m + discharge_m) / 2
+            auto_lambda = _compute_lambda_l0(int(avg_m), scen_k)
+            cfg["loss"]["lambda_l0"] = auto_lambda
+            print(f"[train] lambda_l0_auto: charge_m={charge_m}, discharge_m={discharge_m}, "
+                  f"scen_k={scen_k} → lambda_l0={auto_lambda:.5f}")
+        else:
+            print(f"[train] lambda_l0={cfg['loss']['lambda_l0']:.5f}")
 
-    # ------------------------------------------------------------------
-    # Model
-    # ------------------------------------------------------------------
-    m_cfg = cfg["model"]
-    model = SCRModel(
-        d_probe=m_cfg["d_probe"],
-        d_head=m_cfg["d_head"],
-        dropout=m_cfg["dropout"],
-        probe_mask=probe_mask,
-        scen_masks=scen_masks,
-    )
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[train] SCRModel  trainable params: {n_params:,}")
+        trainer = SCRTrainer(model, cfg, output_dir, device, normalizer=norm)
+        model   = trainer.fit(train_loader, val_loader)
 
-    # ------------------------------------------------------------------
-    # Dynamic lambda_l0 (Phase 1 전용: L0 게이트가 살아있을 때만)
-    # Phase 1b (probe_mask != None) 는 SCRLoss에서 l0=0으로 자동 처리되므로 불필요
-    # ------------------------------------------------------------------
-    if probe_mask is None and cfg["loss"].get("lambda_l0_auto", False):
-        m = cfg["classifier"]["probe_m_count"]
-        k = cfg["regression"]["scen_k_count"]
-        auto_lambda = _compute_lambda_l0(m, k)
-        cfg["loss"]["lambda_l0"] = auto_lambda
-        print(f"[train] lambda_l0_auto: m={m}, k={k} → lambda_l0={auto_lambda:.5f}")
-    else:
-        print(f"[train] lambda_l0={cfg['loss']['lambda_l0']:.5f}"
-              + (" (Phase 1b: L0=0 자동 적용)" if probe_mask is not None else ""))
+        # JSON 저장
+        from utils.hi_schema import get_hi_cols_for_seg
+        hi_cols_ref    = get_hi_cols_for_seg("dis_hi")
+        hi_cols_by_seg = {s: get_hi_cols_for_seg(SEGMENTS[s]) for s in range(N_SEGS)}
 
-    # ------------------------------------------------------------------
-    # Train
-    # ------------------------------------------------------------------
-    trainer = SCRTrainer(model, cfg, output_dir, device, normalizer=norm)
-    model = trainer.fit(train_loader, val_loader)
+        _save_probe_masks_to_json(model, probe_json_out, hi_cols_ref)
+        _save_scen_masks_to_json(model, scen_json_out, hi_cols_by_seg)
+
+        # gate_prob 시각화
+        _plot_gate_probs(
+            model,
+            output_dir / "gates" / "gate_probs.png",
+            hi_cols_ref,
+            charge_m, discharge_m, scen_k,
+        )
 
     # ------------------------------------------------------------------
-    # Save JSON masks — 항상 새 run 폴더에 저장 (test_scr.py가 gates/ 에서 찾음)
-    # 캐시에서 불러온 경우: 원본 JSON 복사
-    # L0 학습한 경우: 모델에서 추출해 저장
+    # Phase 2: 고정 게이트 재학습 (분류 + 회귀 정밀 학습)
     # ------------------------------------------------------------------
-    from utils.hi_schema import get_hi_cols_for_seg
-    hi_cols_dis_hi = get_hi_cols_for_seg("dis_hi")
+    else:  # phase == 2
+        gates_dir     = _resolve_gates_dir(args.gates_from, cfg)
+        probe_json_in = None
+        scen_json_in  = None
 
-    if probe_mask is not None and probe_json_in is not None:
-        probe_json_out.parent.mkdir(parents=True, exist_ok=True)
+        if gates_dir:
+            probe_json_in = _find_json(gates_dir, "classification_HIs.json",
+                                       "scenario_classification_HIs.json")
+            scen_json_in  = _find_json(gates_dir, "regression_HIs.json",
+                                       "scenario_regression_HIs.json")
+            print(f"[train] gates_from: {gates_dir}")
+        else:
+            raise RuntimeError(
+                "Phase 2는 gates JSON이 필요합니다. "
+                "--gates-from <run_dir> 또는 yaml의 gates_from을 설정하세요."
+            )
+
+        charge_mask, discharge_mask = _load_probe_masks_from_json(
+            probe_json_in, charge_m, discharge_m
+        ) if probe_json_in else (None, None)
+        scen_masks = _load_scen_masks_from_json(scen_json_in, scen_k) if scen_json_in else None
+
+        if charge_mask is None or discharge_mask is None:
+            raise RuntimeError(f"probe JSON 로드 실패: {probe_json_in}")
+        if scen_masks is None:
+            raise RuntimeError(f"scen JSON 로드 실패: {scen_json_in}")
+
+        print(f"[train] Phase 2: charge_m={charge_mask.sum()}, "
+              f"discharge_m={discharge_mask.sum()}, scen_k={scen_k}")
+        print("[train] 고정 마스크 — probe_mlp + cap_head만 학습")
+
+        model = SCRModel(
+            d_probe=cfg["model"]["d_probe"],
+            d_head=cfg["model"]["d_head"],
+            dropout=cfg["model"]["dropout"],
+            charge_probe_mask=charge_mask,
+            discharge_probe_mask=discharge_mask,
+            scen_masks=scen_masks,
+        )
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[train] SCRModel  trainable params: {n_params:,}")
+        print("[train] lambda_l0=0 (Phase 2: L0 페널티 자동 비활성)")
+
+        trainer = SCRTrainer(model, cfg, output_dir, device, normalizer=norm)
+        model   = trainer.fit(train_loader, val_loader)
+
+        # gates JSON 복사 (test_scr.py가 gates/ 에서 탐색)
         shutil.copy(probe_json_in, probe_json_out)
-        print(f"[train] Copied probe gate JSON -> {probe_json_out}")
-    else:
-        _save_probe_mask_to_json(model, probe_json_out, hi_cols_dis_hi)
-
-    if scen_masks is not None and scen_json_in is not None:
-        scen_json_out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(scen_json_in, scen_json_out)
-        print(f"[train] Copied scen gate JSON  -> {scen_json_out}")
-    else:
-        hi_by_seg = {s: get_hi_cols_for_seg(SEGMENTS[s]) for s in range(N_SEGS)}
-        _save_scen_masks_to_json(model, scen_json_out, hi_by_seg)
+        shutil.copy(scen_json_in,  scen_json_out)
+        print(f"[train] Copied gate JSONs → {output_dir / 'gates'}/")
 
     # ------------------------------------------------------------------
-    # Final checkpoint (best 모델 복원 후 저장)
+    # Final checkpoint
     # ------------------------------------------------------------------
     from training.scr_trainer import _save_model as _save_ckpt
     ckpt_path = output_dir / "checkpoints" / "final.pt"
     _save_ckpt(model, ckpt_path, cfg, norm)
-    print(f"[train] Saved final checkpoint -> {ckpt_path}")
+    print(f"[train] Saved final checkpoint → {ckpt_path}")
+    print(f"[train] Phase {phase} 완료. run dir: {output_dir}")
 
 
 if __name__ == "__main__":

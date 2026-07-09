@@ -8,6 +8,7 @@ Saves best checkpoint and returns final selected HI indices.
 from __future__ import annotations
 
 import csv
+import math
 import time
 from pathlib import Path
 from typing import Optional
@@ -19,6 +20,52 @@ from torch.utils.data import DataLoader
 from training.scr_loss import SCRLoss
 from utils.metrics import rmse, mae, r2
 from utils.tqdm_utils import trange, tqdm, write as tqdm_write
+
+
+# ---------------------------------------------------------------------------
+# lambda_l0 스케줄러
+# ---------------------------------------------------------------------------
+
+class L0LambdaScheduler:
+    """
+    Phase 1 전용 lambda_l0 스케줄러.
+
+    schedule 옵션:
+      none           : 매 에폭 target 고정 (기존 동작)
+      delayed_warmup : 처음 warmup_epochs 동안 0, 이후 ramp_epochs에 걸쳐 선형 증가
+      exp_ramp       : 0 → target을 제곱 커브로 증가 (total_epochs 기준)
+      cyclic         : 0 ↔ target 코사인 사이클 반복 (cycle_epochs 주기)
+    """
+
+    def __init__(self, target: float, loss_cfg: dict, total_epochs: int):
+        self.target       = target
+        self.schedule     = loss_cfg.get("lambda_l0_schedule", "none")
+        self.warmup_ep    = loss_cfg.get("lambda_l0_warmup_epochs", 50)
+        self.ramp_ep      = loss_cfg.get("lambda_l0_ramp_epochs",   50)
+        self.cycle_ep     = loss_cfg.get("lambda_l0_cycle_epochs",  100)
+        self.total_epochs = total_epochs
+
+    def get(self, epoch: int) -> float:
+        """현재 에폭에서의 effective lambda_l0 반환."""
+        t = self.target
+        if self.schedule == "none" or t == 0.0:
+            return t
+
+        if self.schedule == "delayed_warmup":
+            if epoch < self.warmup_ep:
+                return 0.0
+            progress = (epoch - self.warmup_ep) / max(self.ramp_ep, 1)
+            return t * min(progress, 1.0)
+
+        if self.schedule == "exp_ramp":
+            progress = epoch / max(self.total_epochs - 1, 1)
+            return t * (progress ** 2)
+
+        if self.schedule == "cyclic":
+            phase = (epoch % self.cycle_ep) / self.cycle_ep
+            return t * 0.5 * (1.0 - math.cos(math.pi * phase))
+
+        return t  # fallback
 
 
 class SCRTrainer:
@@ -37,11 +84,19 @@ class SCRTrainer:
         self.device = device
         self.normalizer = normalizer
 
-        tr_cfg = cfg["training"]
+        tr_cfg   = cfg["training"]
+        loss_cfg = cfg["loss"]
+
         self.loss_fn = SCRLoss(
-            lambda_scen=cfg["loss"]["lambda_scen"],
-            lambda_l0=cfg["loss"]["lambda_l0"],
+            lambda_scen=loss_cfg["lambda_scen"],
+            lambda_l0=loss_cfg["lambda_l0"],
         ).to(device)
+
+        self.l0_scheduler = L0LambdaScheduler(
+            target=loss_cfg["lambda_l0"],
+            loss_cfg=loss_cfg,
+            total_epochs=tr_cfg["epochs"],
+        )
 
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -170,6 +225,10 @@ class SCRTrainer:
         for epoch in trange(self.epochs, desc="SCR training"):
             self._lr_warmup(epoch)
 
+            # lambda_l0 스케줄 업데이트
+            eff_l0 = self.l0_scheduler.get(epoch)
+            self.loss_fn.lambda_l0 = eff_l0
+
             t0 = time.time()
             tr = self._train_epoch(train_loader)
             vl = self._val_epoch(val_loader)
@@ -188,12 +247,13 @@ class SCRTrainer:
 
             lr = self.optimizer.param_groups[0]["lr"]
             elapsed = time.time() - t0
-            _append_log_csv(log_path, epoch + 1, tr, vl, lr, elapsed)
+            _append_log_csv(log_path, epoch + 1, tr, vl, lr, eff_l0, elapsed)
 
             if (epoch + 1) % self.log_interval == 0 or improved:
                 tqdm_write(
                     f"epoch {epoch+1:4d} | "
-                    f"tr_loss={tr['loss']:.4f} mse={tr['mse']:.4f} ce={tr['ce']:.4f} l0={tr['l0']:.4f} | "
+                    f"tr_loss={tr['loss']:.4f} mse={tr['mse']:.4f} ce={tr['ce']:.4f} "
+                    f"l0={tr['l0']:.4f} λ_l0={eff_l0:.4f} | "
                     f"val_loss={vl['loss']:.4f} rmse={vl['rmse']:.4f} r2={vl['r2']:.4f} | "
                     f"lr={lr:.2e} t={elapsed:.1f}s"
                     + (" *" if improved else "")
@@ -228,7 +288,7 @@ def _load_model(model: nn.Module, path: Path) -> None:
         model.load_state_dict(state)
 
 
-_LOG_COLS = ["epoch", "tr_loss", "tr_mse", "tr_ce", "tr_l0",
+_LOG_COLS = ["epoch", "tr_loss", "tr_mse", "tr_ce", "tr_l0", "lambda_l0",
              "val_loss", "val_mse", "val_rmse", "val_mae", "val_r2", "lr", "elapsed_s"]
 
 
@@ -238,10 +298,11 @@ def _init_log_csv(path: Path) -> None:
 
 
 def _append_log_csv(path: Path, epoch: int, tr: dict, vl: dict,
-                    lr: float, elapsed: float) -> None:
+                    lr: float, eff_l0: float, elapsed: float) -> None:
     row = [
         epoch,
         f"{tr['loss']:.6f}", f"{tr['mse']:.6f}", f"{tr['ce']:.6f}", f"{tr['l0']:.6f}",
+        f"{eff_l0:.6f}",
         f"{vl['loss']:.6f}", f"{vl['mse']:.6f}", f"{vl['rmse']:.6f}",
         f"{vl['mae']:.6f}",  f"{vl['r2']:.6f}",
         f"{lr:.6e}", f"{elapsed:.2f}",
