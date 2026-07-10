@@ -373,15 +373,29 @@ class SCREvaluator:
 
     # ------------------------------------------------------------------
     # Capacity curve plots for representative cells
+    # 2-row × 3-col layout: row0=Charge / row1=Discharge
+    # Each row: [capacity curve | abs error | rel error]
+    # Pred lines are split by segment sub-type (Low / Mid / High) rather
+    # than averaged, so misrouted predictions are visible as separate lines.
     # ------------------------------------------------------------------
     def _plot_capacity_curves(self, pred_dict: dict) -> None:
         if not _HAS_MPL:
             return
 
-        cell_ids = np.array(pred_dict["cell_ids"])
-        cycles   = np.array(pred_dict["cycles"])
-        cap_true = pred_dict["cap_true_raw"]
-        cap_pred = pred_dict["cap_pred_raw"]
+        cell_ids   = np.array(pred_dict["cell_ids"])
+        cycles     = np.array(pred_dict["cycles"])
+        cap_true   = pred_dict["cap_true_raw"]
+        cap_pred   = pred_dict["cap_pred_raw"]
+        directions = pred_dict["direction"]
+        seg_idxs   = pred_dict["seg_idx"]
+
+        # (seg_idx, level_idx 0-2, display label)
+        _DIR_SEGS = {
+            "Charge":    [(0, 0, "Low"), (1, 1, "Mid"), (2, 2, "High")],
+            "Discharge": [(3, 2, "High"), (4, 1, "Mid"), (5, 0, "Low")],
+        }
+        _LV_COLOR = {0: "tab:red", 1: "tab:green", 2: "tab:orange"}
+        _LV_LS    = {0: "--", 1: "-.", 2: ":"}
 
         for cell in self.rep_cells:
             sel = cell_ids == cell
@@ -392,27 +406,62 @@ class SCREvaluator:
             c_cyc  = cycles[sel]
             c_true = cap_true[sel]
             c_pred = cap_pred[sel]
+            c_dir  = directions[sel]
+            c_seg  = seg_idxs[sel]
 
-            uniq_cyc     = np.unique(c_cyc)
-            true_per_cyc = np.array([c_true[c_cyc == cy].mean() for cy in uniq_cyc])
-            pred_per_cyc = np.array([c_pred[c_cyc == cy].mean() for cy in uniq_cyc])
+            uniq_cyc = np.unique(c_cyc)
 
-            fig, axes = plt.subplots(1, 3, figsize=(17, 4))
+            fig, axes = plt.subplots(2, 3, figsize=(17, 8))
+            fig.suptitle(cell, fontsize=12, y=1.01)
 
-            axes[0].plot(uniq_cyc, true_per_cyc, "b-",  label="True", linewidth=1.5)
-            axes[0].plot(uniq_cyc, pred_per_cyc, "r--", label="Pred", linewidth=1.5)
-            axes[0].set_xlabel("Cycle"); axes[0].set_ylabel("Capacity (Ah)")
-            axes[0].set_title(f"{cell} — capacity curve"); axes[0].legend()
+            for row, (dir_name, seg_list) in enumerate(_DIR_SEGS.items()):
+                is_charge = (dir_name == "Charge")
+                dir_mask  = (c_dir > 0) if is_charge else (c_dir < 0)
 
-            err_abs = np.abs(pred_per_cyc - true_per_cyc)
-            axes[1].plot(uniq_cyc, err_abs, "g-", linewidth=1.2)
-            axes[1].set_xlabel("Cycle"); axes[1].set_ylabel("|Error| (Ah)")
-            axes[1].set_title(f"{cell} — absolute error")
+                ax_cap, ax_err, ax_rel = axes[row, 0], axes[row, 1], axes[row, 2]
 
-            err_rel = err_abs / np.where(true_per_cyc == 0, 1.0, true_per_cyc) * 100
-            axes[2].plot(uniq_cyc, err_rel, "m-", linewidth=1.2)
-            axes[2].set_xlabel("Cycle"); axes[2].set_ylabel("Relative error (%)")
-            axes[2].set_title(f"{cell} — relative error (%)")
+                # True capacity per cycle for this direction
+                d_cyc  = c_cyc[dir_mask]
+                d_true = c_true[dir_mask]
+                true_line = np.array([
+                    d_true[d_cyc == cy].mean() if (d_cyc == cy).any() else np.nan
+                    for cy in uniq_cyc
+                ])
+
+                ax_cap.plot(uniq_cyc, true_line, "b-", label="True", linewidth=1.5)
+
+                for seg_idx, lv_idx, lv_name in seg_list:
+                    s_mask = dir_mask & (c_seg == seg_idx)
+                    if s_mask.sum() == 0:
+                        continue
+                    s_cyc  = c_cyc[s_mask]
+                    s_pred = c_pred[s_mask]
+                    pred_line = np.array([
+                        s_pred[s_cyc == cy].mean() if (s_cyc == cy).any() else np.nan
+                        for cy in uniq_cyc
+                    ])
+
+                    color = _LV_COLOR[lv_idx]
+                    ls    = _LV_LS[lv_idx]
+                    ax_cap.plot(uniq_cyc, pred_line, ls, color=color,
+                                label=f"Pred-{lv_name}", linewidth=1.2)
+
+                    err_abs = np.abs(pred_line - true_line)
+                    err_rel = err_abs / np.where(true_line == 0, 1.0, np.abs(true_line)) * 100
+                    ax_err.plot(uniq_cyc, err_abs, ls, color=color,
+                                label=lv_name, linewidth=1.0)
+                    ax_rel.plot(uniq_cyc, err_rel, ls, color=color,
+                                label=lv_name, linewidth=1.0)
+
+                ax_cap.set_xlabel("Cycle"); ax_cap.set_ylabel("Capacity (Ah)")
+                ax_cap.set_title(f"{dir_name} — capacity curve")
+                ax_cap.legend(fontsize=8)
+                ax_err.set_xlabel("Cycle"); ax_err.set_ylabel("|Error| (Ah)")
+                ax_err.set_title(f"{dir_name} — absolute error")
+                ax_err.legend(fontsize=8)
+                ax_rel.set_xlabel("Cycle"); ax_rel.set_ylabel("Relative error (%)")
+                ax_rel.set_title(f"{dir_name} — relative error (%)")
+                ax_rel.legend(fontsize=8)
 
             fig.tight_layout()
             safe_name = cell.replace("/", "_")

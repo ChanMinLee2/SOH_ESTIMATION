@@ -6,7 +6,7 @@ LFP 배터리 SOH(State of Health) 예측을 위한 **SCR(Scenario-Conditioned R
 
 ## 전체 흐름 요약
 
-배터리 1**세그먼트**(사이클 내 구간 단위) 데이터 → **64개 HI + 2개 메타 스칼라**(dataset_id, cap_init) → **Stage A: 방향별 독립 probe gate로 시나리오(Low/Mid/High) 분류** → **Stage B: 시나리오 조건부 HI 선택 + 용량 예측**
+배터리 1**세그먼트**(사이클 내 구간 단위) 데이터 → **64개 HI + 1개 메타 스칼라**(cap_init) → **Stage A: 방향별 독립 probe gate로 시나리오(Low/Mid/High) 분류** → **Stage B: 시나리오 조건부 HI 선택 + 용량 예측**
 
 SCR의 핵심 아이디어: "충전과 방전은 서로 다른 HI가 중요하다(클러스터링 결과). 따라서 분류용 probe gate를 방향별로 분리해 각자 최적 HI를 독립적으로 학습한다(Stage A). 그 위에 시나리오별로도 독립적인 회귀용 gate를 둬 용량 예측에 필요한 HI를 추가 선정한다(Stage B)."
 
@@ -141,22 +141,23 @@ probe_x = x_hi * z_probe   (게이트로 필터된 HI 입력)
 
 ### 4. 회귀기 가중치 갱신 (Capacity Head 학습)
 
-**관련 파라미터**: `cap_head` — Linear(129→d_head→d_head/2→1), 기본 약 24.7K 파라미터
+**관련 파라미터**: `cap_head` — Linear(130→d_head→d_head/2→1), 기본 약 24.9K 파라미터
 
 **학습 신호**:
 ```
-L_mse = MSE(cap_head([probe_x ∥ scen_x ∥ direction]), target_norm)
+L_mse = MSE(cap_head([probe_x ∥ scen_x ∥ direction ∥ cap_init]), target_norm)
 ```
 
 - MSE gradient가 cap_head → scen_gate → probe_gate 순으로 전파
-- 입력 `129 = 64(probe) + 64(scen) + 1(direction)`:
+- 입력 `130 = 64(probe) + 64(scen) + 1(direction) + 1(cap_init)`:
   - `probe_x`: Stage A gate로 필터된 HI (분류용 HI가 용량 예측에도 기여 — m+k 재사용)
   - `scen_x`: 해당 시나리오 gate로 필터된 HI
   - `direction`: 충전(+1) / 방전(−1) 스칼라
+  - `cap_init`: z-score 정규화된 초기/정격 용량 스칼라 (`use_initial_capacity` 옵션으로 결정)
 - `target_norm`은 z-score 정규화된 capacity_Ah (추론 후 역변환으로 실제 Ah 복원)
-- probe_x는 m개 비-zero, scen_x는 k개 비-zero → 수학적으로 m+k+1개 HI로 예측하는 것과 동일
+- probe_x는 m개 비-zero, scen_x는 k개 비-zero → 수학적으로 m+k+2개 스칼라로 예측하는 것과 동일
 
-**수렴 방향**: 선택된 HI들로 SOH(용량) 예측 오차를 최소화
+**수렴 방향**: 선택된 HI + 초기 용량 정보로 SOH(용량) 예측 오차를 최소화
 
 ---
 
@@ -284,6 +285,7 @@ Phase 2는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해서
     segment_dataset.py      세그먼트 단위 로드·셀분할·정규화·DataLoader
   models/
     hard_concrete.py        Hard-Concrete L0 게이트 (Louizos 2018)
+    cap_heads.py            Phase 2 Capacity Head 구현 (MLPHead / TransformerHead / ITransformerHead)
     scr_model.py            SCRModel (Stage A/B + Capacity Head)
   training/
     scr_loss.py             SCRLoss (MSE + CE + L0 방향별 비용가중 페널티)
@@ -315,7 +317,12 @@ Phase 2는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해서
 | `classifier` | `probe_m_count` | legacy fallback (charge/discharge_probe_m 미설정 시) |
 | `regression` | `scen_k_count` | Phase 2/test 시 시나리오별 HI 수 |
 | `model` | `d_probe` | Stage A MLP hidden dim |
-| `model` | `d_head` | Capacity Head hidden dim |
+| `model` | `d_head` | Capacity Head hidden dim (Transformer에서는 d_model로 사용) |
+| `model` | `regression_model` | Phase 2 Capacity Head 유형: `"mlp"` / `"transformer"` / `"i_transformer"` (Phase 1은 항상 MLP) |
+| `model` | `tr_n_heads` | Transformer / iTransformer attention head 수 (기본 4, d_head ÷ n_heads = 정수 필수) |
+| `model` | `tr_n_layers` | Transformer / iTransformer TransformerEncoder 레이어 수 (기본 2) |
+| `model` | `tr_d_ff` | Transformer / iTransformer feedforward 내부 dim (미설정 시 d_head×2 자동) |
+| `data` | `is_cross_dataset_evaluate` | `false`(기본)=전체 셀 단위 random split / `true`=datasets[0]로 학습·val, datasets[1] 전체를 test |
 | `loss` | `lambda_scen` | CE 손실 가중치 |
 | `loss` | `lambda_l0_auto` | `true` = m/k 기반 자동 계산 (권장), `false` = `lambda_l0` 직접 사용 |
 | `loss` | `lambda_l0` | `lambda_l0_auto=false` 시 직접 지정값 (스케줄러 target) |
@@ -325,6 +332,7 @@ Phase 2는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해서
 | `loss` | `lambda_l0_cycle_epochs` | cyclic: 사이클 주기 (기본 100) |
 | `data` | `use_initial_capacity` | `true`=첫 사이클 실측 용량 / `false`=정격 용량(`nominal_capacities`) |
 | `data` | `nominal_capacities` | 데이터셋별 정격 용량 (MIT: 1.1 / HUST: 1.2 Ah) |
+| `classifier` | `is_auto_mk_selection` | `false`(기본)=top-m/k 강제 슬라이싱 / `true`=gate_prob≥0.5 threshold 기준 자동 개수 결정 |
 | `training` | `lr` | 초기 학습률 (기본 5e-4) |
 | `training` | `warmup_epochs` | LR warmup 구간 epoch 수 (기본 10) |
 | `training` | `scheduler` | `cosine` / `step` |
@@ -478,12 +486,11 @@ direction  : scalar     +1.0(충전) / -1.0(방전)
 level      : scalar     0/1/2 정답 레벨                      [int64]
 seg_idx    : scalar     0~5 세그먼트 인덱스                  [int64]
 target     : scalar     정규화된 capacity_Ah                 [float32]
-dataset_id : scalar     데이터셋 인덱스 [0.0=MIT, 1.0=HUST] [float32]
 cap_init   : scalar     정규화된 초기/정격 용량              [float32]
 ```
 
-`dataset_id`: `cfg.data.datasets` 리스트 순서 기준으로 `[0, 1]` 범위 정규화.  
-`cap_init`: `use_initial_capacity=true`이면 셀별 첫 사이클 실측 용량, `false`이면 `nominal_capacities` 정격 용량. 둘 다 target과 동일한 z-score 정규화 적용.
+`cap_init`: `use_initial_capacity=true`이면 셀별 첫 사이클 실측 용량, `false`이면 `nominal_capacities` 정격 용량. target과 동일한 z-score 정규화 적용.  
+`dataset_id`는 `self.dataset_id` 속성으로 저장되나 `__getitem__`에서 반환하지 않음 — 평가 분석용 메타데이터.
 
 ### build_datasets()
 
@@ -492,6 +499,33 @@ cap_init   : scalar     정규화된 초기/정격 용량              [float32]
 ```python
 train_ds, val_ds, test_ds, norm = build_datasets(cfg)
 ```
+
+**`is_cross_dataset_evaluate` 옵션에 따라 두 가지 분할 방식을 지원한다.**
+
+#### 모드 1: `is_cross_dataset_evaluate: false` (기본, 셀 단위 random split)
+
+전체 데이터셋(MIT + HUST 혼합)에서 셀 단위로 train/val/test를 무작위 분할한다. normalizer는 train 셀 기준으로만 fit.
+
+```
+전체 셀 → split_cells(train=0.6, val=0.2, test=0.2, seed=42)
+train_ds: 전체의 60% 셀
+val_ds:   전체의 20% 셀
+test_ds:  전체의 20% 셀
+```
+
+#### 모드 2: `is_cross_dataset_evaluate: true` (크로스 데이터셋 평가)
+
+`datasets[0]`으로 학습, `datasets[1]` 전체를 test로 사용한다. train/val 비율은 datasets[0] 내에서 재정규화.
+
+```
+datasets = ["MIT", "HUST"] 기준 예시:
+  MIT 셀 → adj_train = 0.6/(0.6+0.2) = 75%  →  train_ds (MIT 75% 셀)
+          → adj_val   = 0.2/(0.6+0.2) = 25%  →  val_ds   (MIT 25% 셀)
+  HUST 셀 → test_ds (HUST 전체 셀)
+  normalizer는 MIT train 셀 기준으로만 fit → HUST test에 적용
+```
+
+generalisation(도메인 일반화) 실험에 사용한다. MIT로 학습하고 HUST에서 zero-shot 성능을 측정.
 
 ---
 
@@ -542,8 +576,7 @@ Phase 1 학습이 진행되면서 `gate_prob` 분포는 자연스럽게 **bimoda
 ### 아키텍처
 
 ```
-입력: x_hi (B,64), nan_mask (B,64), direction (B,), seg_idx (B,),
-      dataset_id (B,), cap_init (B,)
+입력: x_hi (B,64), nan_mask (B,64), direction (B,), seg_idx (B,), cap_init (B,)
 
 [Stage A — 방향별 probe gate + 시나리오 분류기]
   direction > 0  → charge_probe_gate(64)    → probe_x (B,64) ← 충전 m1개 활성
@@ -555,10 +588,16 @@ Phase 1 학습이 진행되면서 `gate_prob` 분포는 자연스럽게 **bimoda
   seg_idx로 해당 gate 선택 → scen_x (B,64)
 
 [Capacity Head — m+k HI 재사용 + 메타 스칼라]
-  concat(probe_x, scen_x, direction, dataset_id, cap_init)
-    → (B, 64+64+1+1+1 = 131)
-  MLP(131 → d_head → d_head//2 → 1) → cap_pred (B,)
-  ← probe_x (m개 비-zero) + scen_x (k개 비-zero) + 3 스칼라
+  concat(probe_x, scen_x, direction, cap_init)
+    → feat (B, 64+64+1+1 = 130)
+  cap_head(feat) → cap_pred (B,)
+  ← probe_x (m개 비-zero) + scen_x (k개 비-zero) + 2 스칼라
+
+  Head 유형 (regression_model yaml 파라미터로 선택):
+    Phase 1:            항상 MLPHead (model_cfg=None → MLP 자동 사용)
+    Phase 2 "mlp":      MLPHead(130 → d_head → d_head//2 → 1)
+    Phase 2 "transformer":    TransformerHead — probe/scen/meta 3 토큰 → Encoder → mean pool → 1
+    Phase 2 "i_transformer":  ITransformerHead — 130개 피처 각각 토큰 → feature-wise attention → 1
 ```
 
 **`_CHARGE_SEGS = frozenset({0, 1, 2})`** (chg_lo, chg_mid, chg_hi)  
@@ -607,9 +646,79 @@ charge_probe_gate   : 64개 log_alpha     ≈   0.06K
 discharge_probe_gate: 64개 log_alpha     ≈   0.06K
 Stage A MLP (공유)  : 64×64+64×32+32×3  ≈   6.2K
 Stage B gates (6×64): 6×64 log_alpha    ≈   0.4K
-Capacity Head       : 131×128+128×64+64 ≈  25.0K  ← head_in 129→131
-합계                                     ≈  31.8K
+Capacity Head       : head_in=130 기준, 유형에 따라 상이 (아래 표 참조)
 ```
+
+| Head 유형 | 파라미터 수 (d_head=128 기준) | 비고 |
+|-----------|-------------------------------|------|
+| MLPHead | 130×128+128×64+64×1 ≈ 24.9K | Phase 1 고정 사용 |
+| TransformerHead | 3×128(embed) + Encoder(n_layers=2, n_heads=4, d_ff=256) + 128×1 ≈ 76K | 3 의미 토큰(probe/scen/meta) |
+| ITransformerHead | 1×128(value proj) + 130×128(feat emb) + Encoder + 128×1 ≈ 100K | 130개 피처 각각 토큰화 |
+
+MLP 기준 합계 ≈ 31.6K, iTransformer 기준 합계 ≈ 107K.
+
+---
+
+## 9-1. models/cap_heads.py — Phase 2 Capacity Head
+
+Phase 2에서만 활성화되는 용량 예측 헤드 모듈. `regression_model` yaml 파라미터로 유형을 선택한다. Phase 1은 항상 `MLPHead`를 사용한다 (`model_cfg=None` → 자동).
+
+### 세 가지 Head 구조
+
+#### MLPHead (기본)
+
+```python
+MLPHead(d_head=128, dropout=0.1)
+# Linear(130, d_head) → ReLU → Dropout → Linear(d_head, d_head//2) → ReLU → Linear(d_head//2, 1)
+# 입력 130 = 64(probe_x) + 64(scen_x) + 1(direction) + 1(cap_init)
+```
+
+130개 입력을 flat vector로 처리. 모든 피처에 동일한 가중치 구조 적용.
+
+#### TransformerHead
+
+```python
+TransformerHead(d_model=128, n_heads=4, n_layers=2, d_ff=256, dropout=0.1)
+```
+
+probe_x(64), scen_x(64), meta(direction+cap_init, 2) 를 각각 `d_model`차원 임베딩으로 투영해 **3개 의미 토큰**을 구성한 뒤 TransformerEncoder → mean pool → Linear(1).
+
+```
+probe_embed(64 → d_model) ┐
+scen_embed (64 → d_model) ├→ tokens (B, 3, d_model) → TransformerEncoder → mean → Linear(1)
+meta_embed  (2 → d_model) ┘
+```
+
+probe·scen·meta 세 그룹 간의 **cross-attention**을 통해 "분류에 쓰인 HI와 회귀에 쓰인 HI가 어떻게 상호작용하는가"를 학습.
+
+#### ITransformerHead (Inverted Transformer)
+
+```python
+ITransformerHead(d_model=128, n_heads=4, n_layers=2, d_ff=256, dropout=0.1)
+```
+
+130개 피처를 **각각 하나의 토큰**으로 처리한다 (scalar value → d_model 투영 + feature ID embedding):
+
+```
+value_proj(x[i] → d_model) + feat_emb[i] → token_i
+tokens (B, 130, d_model) → TransformerEncoder → mean → Linear(1)
+```
+
+feature-wise self-attention으로 "어떤 피처 조합이 중요한가"를 동적으로 학습. EOL(End of Life) 구간처럼 HI 분포가 이동할 때 유연하게 re-weighting 가능.
+
+### 선택 함수
+
+```python
+def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> nn.Module:
+    rtype = model_cfg.get("regression_model", "mlp").lower()
+    # "mlp"           → MLPHead
+    # "transformer"   → TransformerHead
+    # "i_transformer" / "itransformer" → ITransformerHead
+```
+
+**Phase 1**에서는 `SCRModel(model_cfg=None)`로 생성 → `build_cap_head({})` → `"mlp"` 선택.  
+**Phase 2**에서는 `SCRModel(model_cfg=cfg["model"])` → yaml의 `regression_model` 값으로 헤드 선택.  
+**추론(test_scr.py)**에서는 체크포인트의 `cfg_saved["model"]`에서 `regression_model`을 읽어 동일한 헤드 구조로 재구성한다.
 
 ---
 
@@ -771,7 +880,7 @@ SCREvaluator(
 | `save_predictions(pred_dict, predictions_dir)` | `predictions_dir/test_predictions.csv` 저장 |
 | `plot_routing_heatmap(routing_dir, probe_sel, scen_sel)` | 7×64 활성화 히트맵 + CSV 저장 |
 | `_plot_scatter(pred_dict, tag)` | `figures_dir/scatter_{tag}.png` 저장 |
-| `_plot_capacity_curves(pred_dict)` | 대표 셀별 3-패널 `figures_dir/capacity_curve_{cell}.png` |
+| `_plot_capacity_curves(pred_dict)` | 대표 셀별 2×3-패널 `figures_dir/capacity_curve_{cell}.png` (충전/방전 방향 분리 + 시나리오별 pred 선) |
 | `_plot_confusion_matrix(pred_dict, tag)` | `figures_dir/confusion_matrix_{tag}.png` 저장 |
 
 ### predict_dataset 반환 dict
@@ -797,16 +906,20 @@ SCREvaluator(
 
 ### Capacity Curve (대표 셀)
 
-```python
-# 세그먼트 → 사이클 집계
-pred_per_cyc = [cap_pred[cycles == cy].mean() for cy in unique_cycles]
-true_per_cyc = [cap_true[cycles == cy].mean() for cy in unique_cycles]
-```
+2×3 레이아웃 (figsize 17×8):
 
-3-패널 플롯 (figsize 17×4):
-- **패널 1**: 사이클 vs capacity Ah (실측 실선 + 예측 점선)
-- **패널 2**: 사이클 vs |절대 오차| Ah
-- **패널 3**: 사이클 vs 상대 오차 % (`|err|/true × 100`)
+| | Col 0: 용량 커브 | Col 1: 절대 오차 | Col 2: 상대 오차 |
+|---|---|---|---|
+| **Row 0 (Charge)** | 충전 세그먼트 True + Pred×3 | 충전 |err| | 충전 rel % |
+| **Row 1 (Discharge)** | 방전 세그먼트 True + Pred×3 | 방전 |err| | 방전 rel % |
+
+각 용량 커브 서브플롯:
+- **파란 실선**: True capacity (해당 방향 세그먼트 기준 사이클 평균)
+- **빨간 `--`**: Pred-Low (chg_lo / dis_lo, seg_idx 0/5)
+- **초록 `-.`**: Pred-Mid (chg_mid / dis_mid, seg_idx 1/4)
+- **주황 `:`**: Pred-High (chg_hi / dis_hi, seg_idx 2/3)
+
+각 세그먼트 pred 선은 사이클 단위로 평균 집계하되, **세그먼트 유형(seg_idx)별로 분리**하여 플롯한다 — 시나리오 간 평균을 내지 않으므로 b2cXX처럼 잘못 라우팅된 셀의 시나리오별 예측 편차가 시각적으로 구분된다.
 
 ### metrics.json 포맷
 
@@ -1037,18 +1150,38 @@ P(active_i) = 1 − (1−p_probe_i)(1−p_scen_i)
 
 ### Phase 2·추론에서의 사용
 
+JSON → 고정 마스크 변환 시 **`is_auto_mk_selection`** 옵션으로 두 가지 모드 중 선택한다.
+
+#### 모드 A: `is_auto_mk_selection: false` (기본, top-m/k 강제)
+
 ```python
 # classification_HIs.json → charge/discharge probe_mask (N_HI,) bool
 ch_ranked  = data["charge_ranked"]          # 64개 전체 랭킹
 dis_ranked = data["discharge_ranked"]
-ch_mask[ch_ranked[:charge_probe_m]]   = True   # 상위 m1개 충전 마스크
-dis_mask[dis_ranked[:discharge_probe_m]] = True # 상위 m2개 방전 마스크
+ch_mask[ch_ranked[:charge_probe_m]]        = True   # 정확히 charge_probe_m개
+dis_mask[dis_ranked[:discharge_probe_m]]   = True   # 정확히 discharge_probe_m개
 
 # regression_HIs.json → scen_masks (N_SEGS, N_HI) bool
 for seg in range(6):
-    ranked = data[f"seg_{seg}_ranked"]   # 세그먼트별 64개 랭킹
-    scen_masks[seg, ranked[:scen_k_count]] = True
+    ranked = data[f"seg_{seg}_ranked"]
+    scen_masks[seg, ranked[:scen_k_count]] = True   # 정확히 scen_k_count개
 ```
+
+yaml에 지정한 m/k 수를 항상 보장한다. Phase 1 결과와 무관하게 원하는 개수로 고정할 때 사용한다.
+
+#### 모드 B: `is_auto_mk_selection: true` (gate_prob 0.5 threshold 기반)
+
+```python
+# charge_probs / discharge_probs / seg_N_probs 사용
+ch_mask[idx]   = True  for idx, p in zip(ch_ranked,   ch_probs)   if p >= 0.5
+dis_mask[idx]  = True  for idx, p in zip(dis_ranked,  dis_probs)  if p >= 0.5
+scen_masks[s, idx] = True  for idx, p in zip(seg_ranked, seg_probs) if p >= 0.5
+# fallback: 조건을 만족하는 HI가 없으면 top-1 선택
+```
+
+L0 gate가 학습 중 bimodal로 수렴했을 때(cliff 패턴) 0.5 threshold가 자연스럽게 "켜진 HI"와 "꺼진 HI"를 분리한다. yaml의 m/k 수는 lambda_l0_auto 계산에만 사용하고 실제 선택 개수는 Phase 1 학습 결과에 따라 결정된다.
+
+> **주의**: `is_auto_mk_selection: true` 사용 시 `early_stop_patience`가 너무 짧으면 ramp 구간(기본 epoch 50~150) 이전에 학습이 종료돼 gate_prob 분포가 bimodal로 수렴하지 못할 수 있다. 이 경우 0.5 threshold 결과가 예측 불가하므로 `early_stop_patience`를 `lambda_l0_warmup_epochs + lambda_l0_ramp_epochs`(기본 150) 이상으로 설정하거나 `lambda_l0_schedule: "none"`과 조합할 것을 권장한다.
 
 L0 게이트(파라미터 없음)가 고정 bool 마스크로 교체되면:
 - `charge_probe_gate / discharge_probe_gate = None` → `_charge_probe_mask_buf / _discharge_probe_mask_buf` (버퍼)
@@ -1070,10 +1203,16 @@ Phase 1 (L0 학습, delayed_warmup 스케줄)
   regression_HIs.json      [시나리오 6개 × 64개 scen 랭킹]
   gate_probs.png           [8 서브플롯 시각화]
 
-Phase 2 / 추론
-  charge_ranked[:charge_probe_m]  → 충전 probe 고정 마스크
-  discharge_ranked[:discharge_probe_m] → 방전 probe 고정 마스크
-  seg_N_ranked[:scen_k_count]     → 시나리오별 scen 고정 마스크
+Phase 2 / 추론  (is_auto_mk_selection 옵션에 따라 두 가지 모드)
+  [false] charge_ranked[:charge_probe_m]       → 충전 probe 고정 마스크 (정확히 m개)
+          discharge_ranked[:discharge_probe_m] → 방전 probe 고정 마스크 (정확히 m개)
+          seg_N_ranked[:scen_k_count]          → 시나리오별 scen 고정 마스크 (정확히 k개)
+
+  [true]  charge_probs >= 0.5 인 HI            → 충전 probe 고정 마스크 (개수 자동)
+          discharge_probs >= 0.5 인 HI         → 방전 probe 고정 마스크 (개수 자동)
+          seg_N_probs >= 0.5 인 HI             → 시나리오별 scen 고정 마스크 (개수 자동)
+          ※ Phase 1이 bimodal로 완전 수렴해야 유효 (patience > warmup+ramp 권장)
+
   probe_mlp + cap_head 재학습 (Phase 2) 또는 forward-only (추론)
 ```
 
@@ -1165,7 +1304,7 @@ _5_data_model_scr/MMDD_HHMM/
 
 ## 파라미터 수 분석
 
-기본 설정 (d_probe=64, d_head=128) 기준:
+기본 설정 (d_probe=64, d_head=128, n_heads=4, n_layers=2, d_ff=256) 기준:
 
 | 서브모듈 | 파라미터 수 |
 |---------|------------|
@@ -1173,10 +1312,20 @@ _5_data_model_scr/MMDD_HHMM/
 | discharge_probe_gate (HardConcreteGate) | 64 ≈ 0.06K |
 | Stage A MLP (공유) | 64×64+64×32+32×3 ≈ 6.2K |
 | HardConcreteGate (6×scen) | 6×64 ≈ 0.4K |
-| Capacity Head | 131×128+128×64+64×1 ≈ 25.0K |
-| **합계** | **≈ 31.8K** |
+| **Capacity Head — MLPHead** (head_in=130) | 130×128+128×64+64×1 ≈ 24.9K |
+| **Capacity Head — TransformerHead** | 3×128(embed) + 2×(128² encoder 2개) + 128 ≈ 76K |
+| **Capacity Head — ITransformerHead** | 128(value) + 130×128(feat emb) + encoder + 128 ≈ 100K |
 
-배터리 데이터 특성상 셀 수(~200개)와 전체 세그먼트 수(~60만)로 과적합 방지가 중요하기 때문에 소형 모델로 설계했다.
+Phase 2 헤드 선택에 따른 전체 파라미터 수:
+
+| Head | Phase 1 | Phase 2 합계 |
+|------|---------|-------------|
+| MLPHead | ≈ 31.6K (항상) | ≈ 31.6K |
+| TransformerHead | — | ≈ 82.7K |
+| ITransformerHead | — | ≈ 107K |
+
+배터리 데이터 특성상 셀 수(~200개)와 전체 세그먼트 수(~60만)로 과적합 방지가 중요하기 때문에 소형 모델로 설계했다.  
+head_in=130: 64(probe_x) + 64(scen_x) + 1(direction) + 1(cap_init)
 
 ---
 
@@ -1191,6 +1340,7 @@ segment_dataset.py
   load_dataset_native_seg()    native: HI 컬럼 hi_00..hi_63 매핑
   (또는 load_dataset_wide())   wide: 사이클당 6행 reshape
   split_cells()                셀 단위 60/20/20 분할 (seed 고정)
+                               [is_cross=true] datasets[0] 75/25 → train/val, datasets[1] 전체 → test
   SegmentNormalizer.fit()      훈련셋으로만 z-score 피팅 (HI 64개 + target)
   SegmentDataset()             텐서 사전 빌드
   DataLoader                   배치 생성
@@ -1202,7 +1352,6 @@ segment_dataset.py
   seg_idx    (B,)              0~5 세그먼트 인덱스
   level      (B,)              0/1/2 정답 레벨
   target     (B,)              정규화된 capacity_Ah
-  dataset_id (B,)              데이터셋 인덱스 [MIT=0.0, HUST=1.0]
   cap_init   (B,)              정규화된 초기/정격 용량
         │
         ▼
@@ -1215,8 +1364,7 @@ SCRModel.forward()
   Stage B:
     scen_x = scen_gates[seg_idx](x)                    (B,64)  [k개 비-zero]
   Head:
-    feat     = concat(probe_x, scen_x, direction,
-                      dataset_id, cap_init)             (B, 131)
+    feat     = concat(probe_x, scen_x, direction, cap_init)  (B, 130)
     cap_pred = cap_head(feat)                          (B,)
         │
         ▼
@@ -1243,17 +1391,22 @@ config.yaml
 
         │  Phase 2 / test_scr.py 실행
         ▼
-classification_HIs.json 탐색
-  charge_ranked[:charge_probe_m]    → _charge_probe_mask_buf
-  discharge_ranked[:discharge_probe_m] → _discharge_probe_mask_buf
-regression_HIs.json 탐색
-  seg_N_ranked[:scen_k_count]       → _scen_masks_buf
+classification_HIs.json 탐색 → probe 마스크 생성
+  [is_auto_mk_selection=false] charge_ranked[:charge_probe_m]  → _charge_probe_mask_buf
+                                discharge_ranked[:discharge_probe_m] → _discharge_probe_mask_buf
+  [is_auto_mk_selection=true]  charge_probs >= 0.5 인 idx       → _charge_probe_mask_buf
+                                discharge_probs >= 0.5 인 idx    → _discharge_probe_mask_buf
+regression_HIs.json 탐색 → scen 마스크 생성
+  [is_auto_mk_selection=false] seg_N_ranked[:scen_k_count]     → _scen_masks_buf
+  [is_auto_mk_selection=true]  seg_N_probs >= 0.5 인 idx       → _scen_masks_buf
 SCRModel(masks) 재구성 → Phase 2 재학습 or 추론만
 
         │  test 완료
         ▼
 figures/scatter_test.png
 figures/capacity_curve_*.png        (rep_cells_per_dataset × n_datasets 개)
+                                    2×3 레이아웃: [Charge|Discharge] × [cap curve|abs err|rel err]
+                                    cap curve: True 실선 + Pred-Low/Mid/High 점선(세그먼트별 분리)
 metrics/metrics.json
 predictions/test_predictions.csv
 routing/routing_heatmap.png         7×64 (charge∪discharge probe + 6 scen)

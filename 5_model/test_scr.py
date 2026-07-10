@@ -113,10 +113,12 @@ def main() -> None:
                   cls_cfg.get("discharge_probe_m", cls_cfg.get("probe_m_count", 1)))
     scen_k      = cfg.get("regression", {}).get("scen_k_count",
                   reg_cfg.get("scen_k_count", 5))
+    auto_mk     = cfg.get("classifier", {}).get("is_auto_mk_selection",
+                  cls_cfg.get("is_auto_mk_selection", False))
 
     # gate 마스크 로드
-    ch_mask, dis_mask = _load_probe_masks(probe_json, charge_m, discharge_m)
-    scen_masks        = _load_scen_masks(scen_json, N_SEGS, N_HI, scen_k)
+    ch_mask, dis_mask = _load_probe_masks(probe_json, charge_m, discharge_m, auto=auto_mk)
+    scen_masks        = _load_scen_masks(scen_json, N_SEGS, N_HI, scen_k, auto=auto_mk)
 
     if probe_json: print(f"[test] probe gate JSON: {probe_json}")
     if scen_json:  print(f"[test] scen  gate JSON: {scen_json}")
@@ -138,6 +140,7 @@ def main() -> None:
         charge_probe_mask=ch_mask,
         discharge_probe_mask=dis_mask,
         scen_masks=scen_masks,
+        model_cfg=m_cfg,
     )
     strict_load = not (ckpt_has_l0 and ch_mask is not None)
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=strict_load)
@@ -250,7 +253,8 @@ def _resolve_gate_json(run_dir: Path, new_name: str, old_name: str) -> Path | No
 
 
 def _load_probe_masks(
-    json_path: Path | None, charge_m: int, discharge_m: int
+    json_path: Path | None, charge_m: int, discharge_m: int,
+    auto: bool = False, threshold: float = 0.5,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     if not json_path or not json_path.exists():
         return None, None
@@ -262,25 +266,44 @@ def _load_probe_masks(
             m[i] = True
         return m
 
+    def _threshold_mask(ranked: list[int], probs: list[float]) -> torch.Tensor:
+        selected = [idx for idx, p in zip(ranked, probs) if p >= threshold]
+        return _mask(selected if selected else ranked[:1])
+
     if "charge_ranked" in data:
+        if auto:
+            return (_threshold_mask(data["charge_ranked"],    data.get("charge_probs", [])),
+                    _threshold_mask(data["discharge_ranked"], data.get("discharge_probs", [])))
         return (_mask(data["charge_ranked"][:charge_m]),
                 _mask(data["discharge_ranked"][:discharge_m]))
     # backward compat: single ranked_indices
     indices = data.get("ranked_indices", [])
+    if auto:
+        probs = data.get("probs", [1.0] * len(indices))
+        ch = _threshold_mask(indices, probs)
+        return ch, ch
     return _mask(indices[:charge_m]), _mask(indices[:discharge_m])
 
 
 def _load_scen_masks(
-    json_path: Path | None, n_segs: int, n_hi: int, k: int
+    json_path: Path | None, n_segs: int, n_hi: int, k: int,
+    auto: bool = False, threshold: float = 0.5,
 ) -> torch.Tensor | None:
     if not json_path or not json_path.exists():
         return None
     data  = json.loads(json_path.read_text())
     masks = torch.zeros(n_segs, n_hi, dtype=torch.bool)
     for s in range(n_segs):
-        indices = (data.get(f"seg_{s}_ranked", [])[:k]
-                   if f"seg_{s}_ranked" in data
-                   else data.get(f"seg_{s}", []))
+        if f"seg_{s}_ranked" in data:
+            ranked = data[f"seg_{s}_ranked"]
+            if auto:
+                probs    = data.get(f"seg_{s}_probs", [])
+                selected = [idx for idx, p in zip(ranked, probs) if p >= threshold]
+                indices  = selected if selected else ranked[:1]
+            else:
+                indices = ranked[:k]
+        else:
+            indices = data.get(f"seg_{s}", [])
         for i in indices:
             masks[s, i] = True
     return masks

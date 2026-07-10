@@ -25,6 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.hi_schema import N_HI, N_SEGS, N_LEVELS
+from models.cap_heads import build_cap_head
 
 # Segment indices by direction (based on SCEN_MAP ordering)
 _CHARGE_SEGS    = frozenset({0, 1, 2})   # chg_lo, chg_mid, chg_hi
@@ -50,6 +51,7 @@ class SCRModel(nn.Module):
         charge_probe_mask: Optional[torch.Tensor] = None,    # (N_HI,) bool
         discharge_probe_mask: Optional[torch.Tensor] = None, # (N_HI,) bool
         scen_masks: Optional[torch.Tensor] = None,           # (N_SEGS, N_HI) bool
+        model_cfg: Optional[dict] = None,  # Phase 2 전용: regression_model 선택
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -98,19 +100,12 @@ class SCRModel(nn.Module):
 
         # ----------------------------------------------------------------
         # Capacity head
-        # input: probe_x (N_HI) || scen_x (N_HI) || direction (1)
-        #        || dataset_id (1) || cap_init (1)
-        # = m active probe HIs + k active scen HIs + 3 scalars
+        # input: probe_x (N_HI) || scen_x (N_HI) || direction (1) || cap_init (1)
+        # = m active probe HIs + k active scen HIs + 2 scalars
+        # Phase 1: 항상 MLP (model_cfg=None)
+        # Phase 2: model_cfg["regression_model"] 에 따라 MLP/Transformer/iTransformer
         # ----------------------------------------------------------------
-        head_in = N_HI + N_HI + 1 + 1 + 1  # 64+64+1+1+1 = 131
-        self.cap_head = nn.Sequential(
-            nn.Linear(head_in, d_head),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_head, d_head // 2),
-            nn.ReLU(),
-            nn.Linear(d_head // 2, 1),
-        )
+        self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout)
 
     # ------------------------------------------------------------------
     # Gate helpers
@@ -213,15 +208,14 @@ class SCRModel(nn.Module):
         # Stage B: scenario-conditioned gate
         scen_x, scen_z = self._apply_scen_gate(x, seg_idx) # (B, N_HI)
 
-        # Capacity head: probe_x + scen_x + direction + dataset_id + cap_init
+        # Capacity head: probe_x + scen_x + direction + cap_init
         feat = torch.cat(
             [probe_x, scen_x,
              direction.unsqueeze(1),
-             batch["dataset_id"].unsqueeze(1),
              batch["cap_init"].unsqueeze(1)],
             dim=1,
-        )                                                   # (B, 2*N_HI+3 = 131)
-        cap_pred = self.cap_head(feat).squeeze(1)           # (B,)
+        )                                                   # (B, 2*N_HI+2 = 130)
+        cap_pred = self.cap_head(feat)                      # (B,)
 
         return {
             "cap_pred":     cap_pred,

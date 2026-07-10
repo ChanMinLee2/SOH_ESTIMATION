@@ -379,14 +379,13 @@ class SegmentDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         return {
-            "x_hi":       self.x_hi[idx],
-            "nan_mask":   self.nan_mask[idx],
-            "direction":  self.direction[idx],
-            "level":      self.level[idx],
-            "seg_idx":    self.seg_idx[idx],
-            "target":     self.target[idx],
-            "dataset_id": self.dataset_id[idx],
-            "cap_init":   self.cap_init[idx],
+            "x_hi":      self.x_hi[idx],
+            "nan_mask":  self.nan_mask[idx],
+            "direction": self.direction[idx],
+            "level":     self.level[idx],
+            "seg_idx":   self.seg_idx[idx],
+            "target":    self.target[idx],
+            "cap_init":  self.cap_init[idx],
         }
 
 
@@ -401,16 +400,24 @@ def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
 
 def build_datasets(cfg: dict) -> tuple[SegmentDataset, SegmentDataset, SegmentDataset, SegmentNormalizer]:
     """
-    Load data → split cells → build train/val/test SegmentDatasets.
-    Returns (train_ds, val_ds, test_ds, normalizer).
-    """
-    data_cfg = cfg["data"]
-    root = PROJECT_ROOT
-    seg_dir = root / data_cfg["seg_data_dir"]
-    wide_dir = root / data_cfg["data_dir"]
-    datasets_list = data_cfg["datasets"]
+    Load data → split → build train/val/test SegmentDatasets.
 
-    # Try native seg format first
+    is_cross_dataset_evaluate=false (default):
+        셀 단위 random split. datasets 전체에서 train/val/test 분리.
+    is_cross_dataset_evaluate=true:
+        datasets[0]을 train/val 소스, datasets[1]을 test 소스로 사용.
+        normalizer는 datasets[0] train 셀 기준으로만 fit.
+    """
+    data_cfg      = cfg["data"]
+    root          = PROJECT_ROOT
+    seg_dir       = root / data_cfg["seg_data_dir"]
+    wide_dir      = root / data_cfg["data_dir"]
+    datasets_list = data_cfg["datasets"]
+    is_cross      = data_cfg.get("is_cross_dataset_evaluate", False)
+
+    # ------------------------------------------------------------------
+    # Data loading (공통)
+    # ------------------------------------------------------------------
     native_df = pd.DataFrame()
     if seg_dir.exists():
         native_df = load_dataset_native_seg(seg_dir, datasets_list, wide_dir)
@@ -423,20 +430,65 @@ def build_datasets(cfg: dict) -> tuple[SegmentDataset, SegmentDataset, SegmentDa
             min_cycles=data_cfg.get("min_cycles_per_cell", 10),
         )
 
-    # Cell-level split
-    cell_ids = df["cell_id"].unique().tolist()
-    train_cells, val_cells, test_cells = split_cells(
-        cell_ids,
-        train_ratio=data_cfg.get("train_ratio", 0.8),
-        val_ratio=data_cfg.get("val_ratio", 0.1),
-        seed=data_cfg.get("split_seed", 42),
-    )
+    # ------------------------------------------------------------------
+    # Split
+    # ------------------------------------------------------------------
+    train_ratio = data_cfg.get("train_ratio", 0.6)
+    val_ratio   = data_cfg.get("val_ratio",   0.2)
+    seed        = data_cfg.get("split_seed",  42)
 
-    train_df = df[df["cell_id"].isin(train_cells)].reset_index(drop=True)
-    val_df   = df[df["cell_id"].isin(val_cells)].reset_index(drop=True)
-    test_df  = df[df["cell_id"].isin(test_cells)].reset_index(drop=True)
+    if is_cross:
+        if len(datasets_list) < 2:
+            raise ValueError(
+                "is_cross_dataset_evaluate=true requires at least 2 datasets in config"
+            )
+        train_src = datasets_list[0]
+        test_src  = datasets_list[1]
 
-    norm = SegmentNormalizer()
+        df_tv   = df[df["dataset"] == train_src].reset_index(drop=True)
+        df_test = df[df["dataset"] == test_src].reset_index(drop=True)
+
+        if len(df_tv) == 0:
+            raise RuntimeError(f"[dataset] train source '{train_src}' has no data")
+        if len(df_test) == 0:
+            raise RuntimeError(f"[dataset] test source '{test_src}' has no data")
+
+        # train/val 비율을 train_src 내에서 재정규화 (test_ratio 부분 제외)
+        tv_total    = train_ratio + val_ratio
+        adj_train   = train_ratio / tv_total
+        adj_val     = val_ratio   / tv_total
+
+        tv_cells = df_tv["cell_id"].unique().tolist()
+        train_cells, val_cells, _ = split_cells(
+            tv_cells,
+            train_ratio=adj_train,
+            val_ratio=adj_val,
+            seed=seed,
+        )
+        test_cells = df_test["cell_id"].unique().tolist()
+
+        train_df = df_tv[df_tv["cell_id"].isin(train_cells)].reset_index(drop=True)
+        val_df   = df_tv[df_tv["cell_id"].isin(val_cells)].reset_index(drop=True)
+        test_df  = df_test
+
+        print(f"[dataset] cross-dataset: train/val={train_src} | test={test_src}")
+    else:
+        cell_ids = df["cell_id"].unique().tolist()
+        train_cells, val_cells, test_cells = split_cells(
+            cell_ids,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            seed=seed,
+        )
+
+        train_df = df[df["cell_id"].isin(train_cells)].reset_index(drop=True)
+        val_df   = df[df["cell_id"].isin(val_cells)].reset_index(drop=True)
+        test_df  = df[df["cell_id"].isin(test_cells)].reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # Build datasets (normalizer는 train 기준 fit)
+    # ------------------------------------------------------------------
+    norm     = SegmentNormalizer()
     train_ds = SegmentDataset(train_df, norm, fit_normalizer=True,  data_cfg=data_cfg)
     val_ds   = SegmentDataset(val_df,   norm, fit_normalizer=False, data_cfg=data_cfg)
     test_ds  = SegmentDataset(test_df,  norm, fit_normalizer=False, data_cfg=data_cfg)

@@ -133,11 +133,15 @@ def _find_json(gates_dir: Path, new_name: str, old_name: str) -> Path | None:
 # ---------------------------------------------------------------------------
 
 def _load_probe_masks_from_json(
-    json_path: Path, charge_m: int, discharge_m: int
+    json_path: Path, charge_m: int, discharge_m: int,
+    auto: bool = False, threshold: float = 0.5,
 ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
     """
-    신형식: {"charge_ranked": [...], "discharge_ranked": [...]}
+    신형식: {"charge_ranked": [...], "charge_probs": [...], "discharge_ranked": [...], ...}
     구형식: {"ranked_indices": [...]}  → 충/방전 모두 동일하게 적용 (backward compat)
+
+    auto=False : charge_ranked[:charge_m], discharge_ranked[:discharge_m] 슬라이싱
+    auto=True  : gate_prob >= threshold 인 HI만 선택 (개수 자동 결정)
     Returns (charge_mask, discharge_mask) each (N_HI,) bool
     """
     if not json_path.exists():
@@ -150,33 +154,66 @@ def _load_probe_masks_from_json(
             mask[i] = True
         return mask
 
+    def _threshold_mask(ranked: list[int], probs: list[float]) -> torch.Tensor:
+        selected = [idx for idx, p in zip(ranked, probs) if p >= threshold]
+        if not selected:
+            selected = ranked[:1]
+        return _to_mask(selected)
+
     if "charge_ranked" in data:
-        ch_mask  = _to_mask(data["charge_ranked"][:charge_m])
-        dis_mask = _to_mask(data["discharge_ranked"][:discharge_m])
-        print(f"[train] probe masks (new format): charge top-{charge_m}, discharge top-{discharge_m}")
+        if auto:
+            ch_mask  = _threshold_mask(data["charge_ranked"],    data.get("charge_probs", []))
+            dis_mask = _threshold_mask(data["discharge_ranked"], data.get("discharge_probs", []))
+            print(f"[train] probe masks (auto thr={threshold}): "
+                  f"charge {ch_mask.sum().item()}, discharge {dis_mask.sum().item()}")
+        else:
+            ch_mask  = _to_mask(data["charge_ranked"][:charge_m])
+            dis_mask = _to_mask(data["discharge_ranked"][:discharge_m])
+            print(f"[train] probe masks (new format): charge top-{charge_m}, discharge top-{discharge_m}")
     else:
         # backward compat: single ranking → apply to both
-        indices  = data.get("ranked_indices", [])
-        ch_mask  = _to_mask(indices[:charge_m])
-        dis_mask = _to_mask(indices[:discharge_m])
-        print(f"[train] probe masks (legacy format): charge top-{charge_m}, discharge top-{discharge_m}")
+        indices = data.get("ranked_indices", [])
+        if auto:
+            probs    = data.get("probs", [1.0] * len(indices))
+            ch_mask  = _threshold_mask(indices, probs)
+            dis_mask = _threshold_mask(indices, probs)
+            print(f"[train] probe masks (legacy auto thr={threshold}): "
+                  f"charge {ch_mask.sum().item()}, discharge {dis_mask.sum().item()}")
+        else:
+            ch_mask  = _to_mask(indices[:charge_m])
+            dis_mask = _to_mask(indices[:discharge_m])
+            print(f"[train] probe masks (legacy format): charge top-{charge_m}, discharge top-{discharge_m}")
 
     return ch_mask, dis_mask
 
 
-def _load_scen_masks_from_json(json_path: Path, k: int) -> torch.Tensor | None:
+def _load_scen_masks_from_json(
+    json_path: Path, k: int,
+    auto: bool = False, threshold: float = 0.5,
+) -> torch.Tensor | None:
     if not json_path.exists():
         return None
-    data = json.loads(json_path.read_text())
+    data  = json.loads(json_path.read_text())
     masks = torch.zeros(N_SEGS, N_HI, dtype=torch.bool)
     for s in range(N_SEGS):
         if f"seg_{s}_ranked" in data:
-            indices = data[f"seg_{s}_ranked"][:k]
+            ranked = data[f"seg_{s}_ranked"]
+            if auto:
+                probs    = data.get(f"seg_{s}_probs", [])
+                selected = [idx for idx, p in zip(ranked, probs) if p >= threshold]
+                indices  = selected if selected else ranked[:1]
+            else:
+                indices = ranked[:k]
         else:
             indices = data.get(f"seg_{s}", [])
         for i in indices:
             masks[s, i] = True
-    print(f"[train] scen masks: top-{k}/scenario")
+
+    if auto:
+        avg_k = masks.sum(dim=1).float().mean().item()
+        print(f"[train] scen masks (auto thr={threshold}): avg {avg_k:.1f}/seg")
+    else:
+        print(f"[train] scen masks: top-{k}/scenario")
     return masks
 
 
@@ -337,6 +374,7 @@ def main() -> None:
     charge_m    = cls_cfg.get("charge_probe_m",    cls_cfg.get("probe_m_count", 1))
     discharge_m = cls_cfg.get("discharge_probe_m", cls_cfg.get("probe_m_count", 1))
     scen_k      = reg_cfg.get("scen_k_count", 5)
+    auto_mk     = cls_cfg.get("is_auto_mk_selection", False)
 
     timestamp  = datetime.now().strftime("%m%d_%H%M")
     output_dir = PROJECT_ROOT / cfg["data"]["output_dir"] / timestamp
@@ -430,9 +468,11 @@ def main() -> None:
             )
 
         charge_mask, discharge_mask = _load_probe_masks_from_json(
-            probe_json_in, charge_m, discharge_m
+            probe_json_in, charge_m, discharge_m, auto=auto_mk,
         ) if probe_json_in else (None, None)
-        scen_masks = _load_scen_masks_from_json(scen_json_in, scen_k) if scen_json_in else None
+        scen_masks = _load_scen_masks_from_json(
+            scen_json_in, scen_k, auto=auto_mk,
+        ) if scen_json_in else None
 
         if charge_mask is None or discharge_mask is None:
             raise RuntimeError(f"probe JSON 로드 실패: {probe_json_in}")
@@ -443,16 +483,19 @@ def main() -> None:
               f"discharge_m={discharge_mask.sum()}, scen_k={scen_k}")
         print("[train] 고정 마스크 — probe_mlp + cap_head만 학습")
 
+        m_cfg = cfg.get("model", {})
+        reg_model = m_cfg.get("regression_model", "mlp")
         model = SCRModel(
-            d_probe=cfg["model"]["d_probe"],
-            d_head=cfg["model"]["d_head"],
-            dropout=cfg["model"]["dropout"],
+            d_probe=m_cfg.get("d_probe", 64),
+            d_head=m_cfg.get("d_head", 128),
+            dropout=m_cfg.get("dropout", 0.1),
             charge_probe_mask=charge_mask,
             discharge_probe_mask=discharge_mask,
             scen_masks=scen_masks,
+            model_cfg=m_cfg,
         )
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[train] SCRModel  trainable params: {n_params:,}")
+        print(f"[train] SCRModel  trainable params: {n_params:,}  (cap_head: {reg_model})")
         print("[train] lambda_l0=0 (Phase 2: L0 페널티 자동 비활성)")
 
         trainer = SCRTrainer(model, cfg, output_dir, device, normalizer=norm)
