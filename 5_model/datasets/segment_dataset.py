@@ -308,12 +308,14 @@ class SegmentDataset(Dataset):
     One sample = one (cell, cycle, segment) triple.
 
     Tensors:
-      x_hi      : (N_HI,)   normalised HI features [float32]
-      nan_mask  : (N_HI,)   1.0 = valid, 0.0 = was NaN [float32]
-      direction : scalar     +1.0 or -1.0 [float32]
-      level     : scalar     0/1/2 int64  (ground truth for classifier loss)
-      seg_idx   : scalar     0-5 int64
-      target    : scalar     normalised capacity_Ah [float32]
+      x_hi       : (N_HI,)   normalised HI features [float32]
+      nan_mask   : (N_HI,)   1.0 = valid, 0.0 = was NaN [float32]
+      direction  : scalar     +1.0 or -1.0 [float32]
+      level      : scalar     0/1/2 int64  (ground truth for classifier loss)
+      seg_idx    : scalar     0-5 int64
+      target     : scalar     normalised capacity_Ah [float32]
+      dataset_id : scalar     데이터셋 인덱스 (datasets 리스트 순서, 0-based) [float32]
+      cap_init   : scalar     정규화된 초기/정격 용량 [float32]
     """
 
     def __init__(
@@ -321,6 +323,7 @@ class SegmentDataset(Dataset):
         df: pd.DataFrame,
         normalizer: SegmentNormalizer,
         fit_normalizer: bool = False,
+        data_cfg: dict | None = None,
     ):
         if fit_normalizer:
             normalizer.fit(df)
@@ -335,6 +338,36 @@ class SegmentDataset(Dataset):
         self.seg_idx = torch.tensor(df["seg_idx"].values, dtype=torch.long)
         self.target = torch.tensor(cap_norm, dtype=torch.float32)
 
+        # ----------------------------------------------------------------
+        # 메타 스칼라: dataset_id + cap_init
+        # ----------------------------------------------------------------
+        cfg = data_cfg or {}
+        datasets_list = cfg.get("datasets", sorted(df["dataset"].unique().tolist()))
+
+        # dataset_id: 데이터셋 순서 인덱스를 [0, 1] 범위로 정규화
+        n_ds = max(len(datasets_list) - 1, 1)
+        ds_to_id = {ds: float(i) / n_ds for i, ds in enumerate(datasets_list)}
+        self.dataset_id = torch.tensor(
+            df["dataset"].map(ds_to_id).fillna(0.0).values.astype(np.float32),
+            dtype=torch.float32,
+        )
+
+        # cap_init: 초기/정격 용량 (target 정규화 기준 동일 적용)
+        if cfg.get("use_initial_capacity", False):
+            # 셀별 최소 사이클의 capacity_Ah → 첫 사이클 실측 용량
+            first_cap = (
+                df.sort_values("cycle")
+                .groupby("cell_id")["capacity_Ah"]
+                .first()
+            )
+            cap_init_raw = df["cell_id"].map(first_cap).values.astype(np.float32)
+        else:
+            nominal = cfg.get("nominal_capacities", {})
+            cap_init_raw = df["dataset"].map(nominal).fillna(1.0).values.astype(np.float32)
+
+        cap_init_norm = normalizer.transform_target(cap_init_raw)
+        self.cap_init = torch.tensor(cap_init_norm, dtype=torch.float32)
+
         # metadata (not returned by __getitem__, but useful for evaluation)
         self.cell_ids = df["cell_id"].values.tolist()
         self.cycles = df["cycle"].values.tolist()
@@ -346,12 +379,14 @@ class SegmentDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         return {
-            "x_hi":      self.x_hi[idx],
-            "nan_mask":  self.nan_mask[idx],
-            "direction": self.direction[idx],
-            "level":     self.level[idx],
-            "seg_idx":   self.seg_idx[idx],
-            "target":    self.target[idx],
+            "x_hi":       self.x_hi[idx],
+            "nan_mask":   self.nan_mask[idx],
+            "direction":  self.direction[idx],
+            "level":      self.level[idx],
+            "seg_idx":    self.seg_idx[idx],
+            "target":     self.target[idx],
+            "dataset_id": self.dataset_id[idx],
+            "cap_init":   self.cap_init[idx],
         }
 
 
@@ -402,9 +437,9 @@ def build_datasets(cfg: dict) -> tuple[SegmentDataset, SegmentDataset, SegmentDa
     test_df  = df[df["cell_id"].isin(test_cells)].reset_index(drop=True)
 
     norm = SegmentNormalizer()
-    train_ds = SegmentDataset(train_df, norm, fit_normalizer=True)
-    val_ds   = SegmentDataset(val_df,   norm, fit_normalizer=False)
-    test_ds  = SegmentDataset(test_df,  norm, fit_normalizer=False)
+    train_ds = SegmentDataset(train_df, norm, fit_normalizer=True,  data_cfg=data_cfg)
+    val_ds   = SegmentDataset(val_df,   norm, fit_normalizer=False, data_cfg=data_cfg)
+    test_ds  = SegmentDataset(test_df,  norm, fit_normalizer=False, data_cfg=data_cfg)
 
     print(f"[dataset] cells  train={len(train_cells)} val={len(val_cells)} test={len(test_cells)}")
     print(f"[dataset] segs   train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")

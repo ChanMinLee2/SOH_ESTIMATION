@@ -99,9 +99,10 @@ class SCRModel(nn.Module):
         # ----------------------------------------------------------------
         # Capacity head
         # input: probe_x (N_HI) || scen_x (N_HI) || direction (1)
-        # = m active probe HIs (already computed) + k active scen HIs + 1
+        #        || dataset_id (1) || cap_init (1)
+        # = m active probe HIs + k active scen HIs + 3 scalars
         # ----------------------------------------------------------------
-        head_in = N_HI + N_HI + 1
+        head_in = N_HI + N_HI + 1 + 1 + 1  # 64+64+1+1+1 = 131
         self.cap_head = nn.Sequential(
             nn.Linear(head_in, d_head),
             nn.ReLU(),
@@ -212,10 +213,14 @@ class SCRModel(nn.Module):
         # Stage B: scenario-conditioned gate
         scen_x, scen_z = self._apply_scen_gate(x, seg_idx) # (B, N_HI)
 
-        # Capacity head: reuse probe_x (already computed) + scen_x + direction
+        # Capacity head: probe_x + scen_x + direction + dataset_id + cap_init
         feat = torch.cat(
-            [probe_x, scen_x, direction.unsqueeze(1)], dim=1
-        )                                                   # (B, 2*N_HI+1)
+            [probe_x, scen_x,
+             direction.unsqueeze(1),
+             batch["dataset_id"].unsqueeze(1),
+             batch["cap_init"].unsqueeze(1)],
+            dim=1,
+        )                                                   # (B, 2*N_HI+3 = 131)
         cap_pred = self.cap_head(feat).squeeze(1)           # (B,)
 
         return {

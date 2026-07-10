@@ -6,7 +6,7 @@ LFP 배터리 SOH(State of Health) 예측을 위한 **SCR(Scenario-Conditioned R
 
 ## 전체 흐름 요약
 
-배터리 1**세그먼트**(사이클 내 구간 단위) 데이터 → **64개 HI**(Health Indicator) → **Stage A: 방향별 독립 probe gate로 시나리오(Low/Mid/High) 분류** → **Stage B: 시나리오 조건부 HI 선택 + 용량 예측**
+배터리 1**세그먼트**(사이클 내 구간 단위) 데이터 → **64개 HI + 2개 메타 스칼라**(dataset_id, cap_init) → **Stage A: 방향별 독립 probe gate로 시나리오(Low/Mid/High) 분류** → **Stage B: 시나리오 조건부 HI 선택 + 용량 예측**
 
 SCR의 핵심 아이디어: "충전과 방전은 서로 다른 HI가 중요하다(클러스터링 결과). 따라서 분류용 probe gate를 방향별로 분리해 각자 최적 HI를 독립적으로 학습한다(Stage A). 그 위에 시나리오별로도 독립적인 회귀용 gate를 둬 용량 예측에 필요한 HI를 추가 선정한다(Stage B)."
 
@@ -323,6 +323,8 @@ Phase 2는 Phase 1에서 찾은 HI로 고정한 뒤, MLP/Head만 재학습해서
 | `loss` | `lambda_l0_warmup_epochs` | delayed_warmup: λ=0 유지 에폭 수 (기본 50) |
 | `loss` | `lambda_l0_ramp_epochs` | delayed_warmup: target까지 선형 증가 에폭 수 (기본 100) |
 | `loss` | `lambda_l0_cycle_epochs` | cyclic: 사이클 주기 (기본 100) |
+| `data` | `use_initial_capacity` | `true`=첫 사이클 실측 용량 / `false`=정격 용량(`nominal_capacities`) |
+| `data` | `nominal_capacities` | 데이터셋별 정격 용량 (MIT: 1.1 / HUST: 1.2 Ah) |
 | `training` | `lr` | 초기 학습률 (기본 5e-4) |
 | `training` | `warmup_epochs` | LR warmup 구간 epoch 수 (기본 10) |
 | `training` | `scheduler` | `cosine` / `step` |
@@ -470,13 +472,18 @@ wide pkl 1행 (사이클 1개, ~415 컬럼)
 ### SegmentDataset 텐서
 
 ```python
-x_hi      : (N_HI,)   정규화된 HI           [float32]
-nan_mask  : (N_HI,)   1.0=유효, 0.0=NaN     [float32]
-direction : scalar     +1.0(충전) / -1.0(방전)
-level     : scalar     0/1/2 정답 레벨       [int64]
-seg_idx   : scalar     0~5 세그먼트 인덱스   [int64]
-target    : scalar     정규화된 capacity_Ah  [float32]
+x_hi       : (N_HI,)   정규화된 HI                          [float32]
+nan_mask   : (N_HI,)   1.0=유효, 0.0=NaN                    [float32]
+direction  : scalar     +1.0(충전) / -1.0(방전)
+level      : scalar     0/1/2 정답 레벨                      [int64]
+seg_idx    : scalar     0~5 세그먼트 인덱스                  [int64]
+target     : scalar     정규화된 capacity_Ah                 [float32]
+dataset_id : scalar     데이터셋 인덱스 [0.0=MIT, 1.0=HUST] [float32]
+cap_init   : scalar     정규화된 초기/정격 용량              [float32]
 ```
+
+`dataset_id`: `cfg.data.datasets` 리스트 순서 기준으로 `[0, 1]` 범위 정규화.  
+`cap_init`: `use_initial_capacity=true`이면 셀별 첫 사이클 실측 용량, `false`이면 `nominal_capacities` 정격 용량. 둘 다 target과 동일한 z-score 정규화 적용.
 
 ### build_datasets()
 
@@ -535,7 +542,8 @@ Phase 1 학습이 진행되면서 `gate_prob` 분포는 자연스럽게 **bimoda
 ### 아키텍처
 
 ```
-입력: x_hi (B,64), nan_mask (B,64), direction (B,), seg_idx (B,)
+입력: x_hi (B,64), nan_mask (B,64), direction (B,), seg_idx (B,),
+      dataset_id (B,), cap_init (B,)
 
 [Stage A — 방향별 probe gate + 시나리오 분류기]
   direction > 0  → charge_probe_gate(64)    → probe_x (B,64) ← 충전 m1개 활성
@@ -546,10 +554,11 @@ Phase 1 학습이 진행되면서 `gate_prob` 분포는 자연스럽게 **bimoda
   HardConcreteGate × 6 (시나리오별 독립, 각 64개)
   seg_idx로 해당 gate 선택 → scen_x (B,64)
 
-[Capacity Head — m+k HI 재사용]
-  concat(probe_x, scen_x, direction) → (B, 64+64+1=129)
-  MLP(129 → d_head → d_head//2 → 1) → cap_pred (B,)
-  ← probe_x (m개 비-zero) + scen_x (k개 비-zero) = 유효 m+k+1 입력
+[Capacity Head — m+k HI 재사용 + 메타 스칼라]
+  concat(probe_x, scen_x, direction, dataset_id, cap_init)
+    → (B, 64+64+1+1+1 = 131)
+  MLP(131 → d_head → d_head//2 → 1) → cap_pred (B,)
+  ← probe_x (m개 비-zero) + scen_x (k개 비-zero) + 3 스칼라
 ```
 
 **`_CHARGE_SEGS = frozenset({0, 1, 2})`** (chg_lo, chg_mid, chg_hi)  
@@ -598,8 +607,8 @@ charge_probe_gate   : 64개 log_alpha     ≈   0.06K
 discharge_probe_gate: 64개 log_alpha     ≈   0.06K
 Stage A MLP (공유)  : 64×64+64×32+32×3  ≈   6.2K
 Stage B gates (6×64): 6×64 log_alpha    ≈   0.4K
-Capacity Head       : 129×128+128×64+64 ≈  24.7K
-합계                                     ≈  31.5K
+Capacity Head       : 131×128+128×64+64 ≈  25.0K  ← head_in 129→131
+합계                                     ≈  31.8K
 ```
 
 ---
@@ -1164,8 +1173,8 @@ _5_data_model_scr/MMDD_HHMM/
 | discharge_probe_gate (HardConcreteGate) | 64 ≈ 0.06K |
 | Stage A MLP (공유) | 64×64+64×32+32×3 ≈ 6.2K |
 | HardConcreteGate (6×scen) | 6×64 ≈ 0.4K |
-| Capacity Head | 129×128+128×64+64×1 ≈ 24.7K |
-| **합계** | **≈ 31.5K** |
+| Capacity Head | 131×128+128×64+64×1 ≈ 25.0K |
+| **합계** | **≈ 31.8K** |
 
 배터리 데이터 특성상 셀 수(~200개)와 전체 세그먼트 수(~60만)로 과적합 방지가 중요하기 때문에 소형 모델로 설계했다.
 
@@ -1187,12 +1196,14 @@ segment_dataset.py
   DataLoader                   배치 생성
         │
         ▼  (한 배치)
-  x_hi      (B, 64)            정규화된 HI (stat_q_abs, stat_energy_seg 제외)
-  nan_mask  (B, 64)            NaN 유효 마스크
-  direction (B,)               +1.0(충전) / -1.0(방전)
-  seg_idx   (B,)               0~5 세그먼트 인덱스
-  level     (B,)               0/1/2 정답 레벨
-  target    (B,)               정규화된 capacity_Ah
+  x_hi       (B, 64)           정규화된 HI (stat_q_abs, stat_energy_seg 제외)
+  nan_mask   (B, 64)           NaN 유효 마스크
+  direction  (B,)              +1.0(충전) / -1.0(방전)
+  seg_idx    (B,)              0~5 세그먼트 인덱스
+  level      (B,)              0/1/2 정답 레벨
+  target     (B,)              정규화된 capacity_Ah
+  dataset_id (B,)              데이터셋 인덱스 [MIT=0.0, HUST=1.0]
+  cap_init   (B,)              정규화된 초기/정격 용량
         │
         ▼
 SCRModel.forward()
@@ -1204,7 +1215,8 @@ SCRModel.forward()
   Stage B:
     scen_x = scen_gates[seg_idx](x)                    (B,64)  [k개 비-zero]
   Head:
-    feat     = concat(probe_x, scen_x, direction)      (B, 129)
+    feat     = concat(probe_x, scen_x, direction,
+                      dataset_id, cap_init)             (B, 131)
     cap_pred = cap_head(feat)                          (B,)
         │
         ▼
@@ -1245,4 +1257,10 @@ figures/capacity_curve_*.png        (rep_cells_per_dataset × n_datasets 개)
 metrics/metrics.json
 predictions/test_predictions.csv
 routing/routing_heatmap.png         7×64 (charge∪discharge probe + 6 scen)
+
+        │  _reapply_norm(ds, norm)
+           ds.target   ← norm.transform_target(capacity_raw)
+           ds.cap_init ← norm.transform_target(inverse → re-normalize)
+           (체크포인트 normalizer와 build_datasets가 refitting한 normalizer가
+            다를 수 있으므로 두 텐서 모두 재정규화)
 ```

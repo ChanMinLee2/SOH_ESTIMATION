@@ -84,6 +84,11 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 데이터 재구성
     # ------------------------------------------------------------------
+    # cap_init 관련 옵션은 현재 yaml 기준으로 적용 (cfg_saved가 구버전이면 키 없음)
+    for k in ("use_initial_capacity", "nominal_capacities", "datasets"):
+        if k in cfg.get("data", {}):
+            cfg_saved.setdefault("data", {})[k] = cfg["data"][k]
+
     train_ds, val_ds, test_ds, _ = build_datasets(cfg_saved)
     norm = _build_normalizer_from_ckpt(ckpt)
     for ds in (train_ds, val_ds, test_ds):
@@ -311,9 +316,13 @@ def _pick_rep_cells(test_ds, cfg: dict, n_per_dataset: int = 1) -> list[str]:
 
 
 def _reapply_norm(ds, norm: SegmentNormalizer) -> None:
-    import numpy as _np
     ds.target = torch.tensor(
         norm.transform_target(ds.capacity_raw), dtype=torch.float32
+    )
+    # cap_init도 동일 normalizer로 재정규화 (build_datasets가 refitting한 normalizer와 다를 수 있음)
+    cap_init_raw = norm.inverse_target(ds.cap_init.numpy())
+    ds.cap_init = torch.tensor(
+        norm.transform_target(cap_init_raw), dtype=torch.float32
     )
 
 
