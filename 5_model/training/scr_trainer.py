@@ -150,6 +150,7 @@ class SCRTrainer:
         self.model.train()
         total_loss = mse_sum = ce_sum = l0_sum = 0.0
         n = 0
+        all_preds, all_targets = [], []
         for batch in loader:
             batch = self._to_device(batch)
             self.optimizer.zero_grad()
@@ -166,12 +167,18 @@ class SCRTrainer:
             ce_sum     += losses["ce"].item() * bs
             l0_sum     += losses["l0"].item() * bs
             n += bs
+            all_preds.append(outputs["cap_pred"].detach().cpu())
+            all_targets.append(batch["target"].cpu())
 
+        p = torch.cat(all_preds).numpy()
+        t = torch.cat(all_targets).numpy()
         return {
             "loss": total_loss / n,
             "mse":  mse_sum / n,
             "ce":   ce_sum / n,
             "l0":   l0_sum / n,
+            "rmse": float(rmse(t, p)),
+            "r2":   float(r2(t, p)),
         }
 
     @torch.no_grad()
@@ -222,6 +229,14 @@ class SCRTrainer:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         _init_log_csv(log_path)
 
+        # Optional: 본 학습 전 의도적 과적합 테스트
+        tr_cfg = self.cfg["training"]
+        if tr_cfg.get("run_overfit_test", False):
+            n_ov  = tr_cfg.get("overfit_test_samples", 1024)
+            ep_ov = tr_cfg.get("overfit_test_epochs",  300)
+            tqdm_write(f"[overfit_test] 시작: {n_ov}샘플 × {ep_ov}에폭 (규제 없음)")
+            self.run_overfit_test(train_loader, n_samples=n_ov, max_epochs=ep_ov)
+
         for epoch in trange(self.epochs, desc="SCR training"):
             self._lr_warmup(epoch)
 
@@ -252,8 +267,8 @@ class SCRTrainer:
             if (epoch + 1) % self.log_interval == 0 or improved:
                 tqdm_write(
                     f"epoch {epoch+1:4d} | "
-                    f"tr_loss={tr['loss']:.4f} mse={tr['mse']:.4f} ce={tr['ce']:.4f} "
-                    f"l0={tr['l0']:.4f} λ_l0={eff_l0:.4f} | "
+                    f"tr_loss={tr['loss']:.4f} mse={tr['mse']:.4f} r2={tr['r2']:.4f} "
+                    f"ce={tr['ce']:.4f} l0={tr['l0']:.4f} λ_l0={eff_l0:.4f} | "
                     f"val_loss={vl['loss']:.4f} rmse={vl['rmse']:.4f} r2={vl['r2']:.4f} | "
                     f"lr={lr:.2e} t={elapsed:.1f}s"
                     + (" *" if improved else "")
@@ -267,6 +282,89 @@ class SCRTrainer:
         _load_model(self.model, ckpt_path)
         tqdm_write(f"Best val RMSE: {self.best_val_rmse:.4f} at epoch {self.best_epoch+1}")
         return self.model
+
+    # ------------------------------------------------------------------
+    # Overfit test utilities
+    # ------------------------------------------------------------------
+
+    def _collect_small_batch(self, loader: DataLoader, n_samples: int) -> dict:
+        """train_loader에서 처음 n_samples개 샘플을 하나의 배치로 반환."""
+        all_tensors: dict[str, list] = {}
+        n_collected = 0
+        for batch in loader:
+            for k, v in batch.items():
+                all_tensors.setdefault(k, []).append(v)
+            n_collected += next(iter(batch.values())).size(0)
+            if n_collected >= n_samples:
+                break
+        result = {}
+        for k, vs in all_tensors.items():
+            cat = torch.cat(vs)
+            result[k] = cat[:n_samples]
+        return result
+
+    def run_overfit_test(
+        self,
+        train_loader: DataLoader,
+        n_samples: int = 1024,
+        max_epochs: int = 300,
+        lr: float = 1e-3,
+    ) -> dict:
+        """
+        의도적 과적합 테스트: 소량 샘플에 대해 dropout=0, weight_decay=0으로 학습.
+        모델 용량이 충분하면 R²→1에 수렴; 정체되면 용량 부족 또는 태스크 노이즈 바닥.
+        결과: logs/overfit_test.csv
+        반환: {"max_r2": float, "epoch_max_r2": int, "final_r2": float}
+        """
+        import copy
+
+        tiny = self._collect_small_batch(train_loader, n_samples)
+        tiny_dev = {k: v.to(self.device) for k, v in tiny.items()}
+
+        test_model = copy.deepcopy(self.model).to(self.device)
+        for m in test_model.modules():
+            if isinstance(m, nn.Dropout):
+                m.p = 0.0
+
+        opt = torch.optim.AdamW(test_model.parameters(), lr=lr, weight_decay=0.0)
+
+        log_path = self.output_dir / "logs" / "overfit_test.csv"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(["epoch", "loss", "r2"])
+
+        max_r2 = float("-inf")
+        epoch_max_r2 = 0
+        r2_val = float("nan")
+        loss_val = float("nan")
+
+        test_model.train()
+        for epoch in range(max_epochs):
+            opt.zero_grad()
+            outputs = test_model(tiny_dev)
+            loss = torch.nn.functional.mse_loss(outputs["cap_pred"], tiny_dev["target"])
+            loss.backward()
+            opt.step()
+
+            loss_val = loss.item()
+            p_np = outputs["cap_pred"].detach().cpu().numpy()
+            t_np = tiny_dev["target"].cpu().numpy()
+            r2_val = float(r2(t_np, p_np))
+
+            if r2_val > max_r2:
+                max_r2 = r2_val
+                epoch_max_r2 = epoch + 1
+
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                with open(log_path, "a", newline="", encoding="utf-8") as f:
+                    csv.writer(f).writerow([epoch + 1, f"{loss_val:.6f}", f"{r2_val:.6f}"])
+
+        tqdm_write(
+            f"[overfit_test] {n_samples}샘플 × {max_epochs}에폭 완료 | "
+            f"max R²={max_r2:.4f} @ epoch {epoch_max_r2} | final R²={r2_val:.4f}"
+        )
+        tqdm_write(f"[overfit_test] → {log_path}")
+        return {"max_r2": max_r2, "epoch_max_r2": epoch_max_r2, "final_r2": r2_val}
 
 
 def _save_model(model: nn.Module, path: Path, cfg=None, normalizer=None) -> None:
@@ -288,7 +386,7 @@ def _load_model(model: nn.Module, path: Path) -> None:
         model.load_state_dict(state)
 
 
-_LOG_COLS = ["epoch", "tr_loss", "tr_mse", "tr_ce", "tr_l0", "lambda_l0",
+_LOG_COLS = ["epoch", "tr_loss", "tr_mse", "tr_ce", "tr_l0", "lambda_l0", "tr_rmse", "tr_r2",
              "val_loss", "val_mse", "val_rmse", "val_mae", "val_r2", "lr", "elapsed_s"]
 
 
@@ -303,6 +401,7 @@ def _append_log_csv(path: Path, epoch: int, tr: dict, vl: dict,
         epoch,
         f"{tr['loss']:.6f}", f"{tr['mse']:.6f}", f"{tr['ce']:.6f}", f"{tr['l0']:.6f}",
         f"{eff_l0:.6f}",
+        f"{tr.get('rmse', float('nan')):.6f}", f"{tr.get('r2', float('nan')):.6f}",
         f"{vl['loss']:.6f}", f"{vl['mse']:.6f}", f"{vl['rmse']:.6f}",
         f"{vl['mae']:.6f}",  f"{vl['r2']:.6f}",
         f"{lr:.6e}", f"{elapsed:.2f}",

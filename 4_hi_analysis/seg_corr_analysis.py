@@ -1,31 +1,33 @@
 """
 seg_corr_analysis.py
 
-411-HI 구조 기준 세그먼트 × 카테고리별 상관분석 + MI 분석 + Scenario 구분 능력 분석.
+HI 구조 기준 세그먼트 × 카테고리별 상관분석 + MI 분석 + Scenario 구분 능력 분석.
 
-분석 단위: 6구간(dis_hi/mid/lo, chg_lo/mid/hi) × 4카테고리(Stat/Diff/LFP/Morph) = 24 그룹
+분석 단위: N구간(축별) × 4카테고리(Stat/Diff/LFP/Morph)
 정답(target): capacity_Ah (셀 내부 Spearman 상관계수 → 전체 셀 평균)
 
-출력: 4_hi_analysis/seg_corr/<MMDD>/
-  corr_rank_stat_{ds}.png    — 카테고리 A: 6구간 × 20 통계 HI 상관계수 랭킹
-  corr_rank_diff_{ds}.png    — 카테고리 B: 6구간 × 20 미분 HI
-  corr_rank_lfp_{ds}.png     — 카테고리 C: 6구간 × 20 LFP HI
-  corr_matrix_stat_{ds}.png  — 카테고리 A: 6구간 × 20×20 feature 상관행렬
+출력: 4_hi_analysis/seg_corr/<MMDD>[_<axis>]/
+  corr_rank_stat_{ds}.png    — 카테고리 A: N구간 × 통계 HI 상관계수 랭킹
+  corr_rank_diff_{ds}.png    — 카테고리 B: N구간 × 미분 HI
+  corr_rank_lfp_{ds}.png     — 카테고리 C: N구간 × LFP HI
+  corr_matrix_stat_{ds}.png  — 카테고리 A: N구간 × feature 상관행렬
   corr_matrix_diff_{ds}.png  — 카테고리 B
   corr_matrix_lfp_{ds}.png   — 카테고리 C
-  top_cross_{ds}.png         — 4카테고리 × 6구간 Top-5 HI 비교 (전체 요약)
-  scenario_eps2_{ds}.png     — HI 컨셉별 Scenario(hi/mid/lo) 구분 능력 ε²
+  top_cross_{ds}.png         — 4카테고리 × N구간 Top-5 HI 비교 (전체 요약)
+  scenario_eps2_{ds}.png     — HI 컨셉별 Scenario 구분 능력 ε²
   mi_rank_category_{ds}.png  — 4카테고리별 HI Mutual Information 랭킹
   mi_vs_rho_{ds}.png         — MI vs |ρ| 산점도 (⚠ 항목 식별)
-  corr_3d_{ds}.png           — 시나리오(hi/mid/lo)별 |ρ| 3D 산점도
+  corr_3d_{ds}.png           — 시나리오별 |ρ| 3D 산점도
 
 사용:
   python 4_hi_analysis/seg_corr_analysis.py
-  python 4_hi_analysis/seg_corr_analysis.py --dataset mit
-  python 4_hi_analysis/seg_corr_analysis.py --min-cycles 5 --workers 8
+  python 4_hi_analysis/seg_corr_analysis.py --seg-axis protocol
+  python 4_hi_analysis/seg_corr_analysis.py --seg-axis vwindow --axis-config '{"n_windows": 4}'
+  python 4_hi_analysis/seg_corr_analysis.py --dataset mit --min-cycles 5 --workers 8
 """
 
 import argparse
+import json
 import pickle
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -59,7 +61,6 @@ except ImportError:
     from tqdm import tqdm
 
 from hi_correlation import (
-    ALL_SEGS,
     HI_GROUPS,
     HI_LABELS,
     STAT_KEYS,
@@ -69,9 +70,7 @@ from hi_correlation import (
 )
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
-HERE        = Path(__file__).resolve().parent
-PKL_DEFAULT = HERE / "hi_features.pkl"
-OUT_BASE    = HERE / "seg_corr" / date.today().strftime("%m%d")
+HERE    = Path(__file__).resolve().parent
 
 # ── 폰트 ─────────────────────────────────────────────────────────────────────
 for _f in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
@@ -90,8 +89,8 @@ CAT_COLORS = {
     "Morph": "#8e44ad",
 }
 
-# ── 세그먼트 색상 (방전=파랑 계열, 충전=주황 계열) ──────────────────────────
-SEG_COLORS = {
+# ── 세그먼트 색상 / 레이블 — 기본값(qfrac). main()에서 동적 재빌드됨 ───────────
+SEG_COLORS: dict[str, str] = {
     "dis_hi":  "#1a5276",
     "dis_mid": "#2980b9",
     "dis_lo":  "#85c1e9",
@@ -99,13 +98,20 @@ SEG_COLORS = {
     "chg_mid": "#e67e22",
     "chg_hi":  "#a04000",
 }
-SEG_LABELS = {
+SEG_LABELS: dict[str, str] = {
     "dis_hi":  "dis_hi\n(SoC 60–100%)",
     "dis_mid": "dis_mid\n(SoC 30–60%)",
     "dis_lo":  "dis_lo\n(SoC 0–30%)",
     "chg_lo":  "chg_lo\n(SoC 0–40%)",
     "chg_mid": "chg_mid\n(SoC 40–70%)",
     "chg_hi":  "chg_hi\n(SoC 70–100%)",
+}
+
+# 활성 세그먼트 목록 (순서 유지) + 방향별 분류 — main()에서 재빌드
+_ACTIVE_SEGS: list[str] = list(SEG_COLORS.keys())
+_MODE_SEGS: dict[str, tuple] = {
+    "discharge": ("dis_hi", "dis_mid", "dis_lo"),
+    "charge":    ("chg_lo", "chg_mid", "chg_hi"),
 }
 
 # ── 카테고리 메타 ─────────────────────────────────────────────────────────────
@@ -118,6 +124,47 @@ CATEGORIES = [
 
 # tab20 팔레트 (15개 feature 색 고정)
 _TAB20 = matplotlib.colormaps["tab20"].colors
+
+# ── 방향별 색상 팔레트 ────────────────────────────────────────────────────────
+_DIS_PALETTE = ["#1a5276", "#2980b9", "#85c1e9", "#5dade2", "#2471a3", "#7fb3d3", "#154360"]
+_CHG_PALETTE = ["#f0b27a", "#e67e22", "#a04000", "#dc7633", "#ca6f1e", "#fad7a0", "#784212"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 세그먼트 메타 동적 생성
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _derive_seg_meta(seg_names: list[str]) -> tuple[dict, dict, list, dict]:
+    """세그먼트 이름 목록에서 시각화 메타 동적 생성.
+
+    qfrac(dis_hi/mid/lo, chg_lo/mid/hi)뿐 아니라 protocol(chg_step0 …),
+    vwindow, rcs 등 임의 축에 대해 작동.
+
+    Returns
+    -------
+    seg_colors  : dict[str, str]        세그먼트 → 색상 hex
+    seg_labels  : dict[str, str]        세그먼트 → 범례 레이블
+    active_segs : list[str]             순서 있는 활성 세그먼트 목록
+    mode_segs   : dict[str, tuple]      방향 → 세그먼트 튜플
+    """
+    dis_segs = [s for s in seg_names if s.startswith("dis")]
+    chg_segs = [s for s in seg_names if s.startswith("chg")]
+
+    seg_colors: dict[str, str] = {}
+    seg_labels: dict[str, str] = {}
+    for i, s in enumerate(dis_segs):
+        seg_colors[s] = _DIS_PALETTE[i % len(_DIS_PALETTE)]
+        seg_labels[s] = s
+    for i, s in enumerate(chg_segs):
+        seg_colors[s] = _CHG_PALETTE[i % len(_CHG_PALETTE)]
+        seg_labels[s] = s
+
+    active_segs = dis_segs + chg_segs
+    mode_segs = {
+        "discharge": tuple(dis_segs),
+        "charge":    tuple(chg_segs),
+    }
+    return seg_colors, seg_labels, active_segs, mode_segs
 
 
 def _feat_palette(keys: list) -> dict:
@@ -225,19 +272,19 @@ def feature_corr_matrix(df: pd.DataFrame, feat_cols: list) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _concept_from_key(feat_key: str) -> str:
-    """stat_v_mean_dis_hi → stat_v_mean  (세그먼트 suffix 2토큰 제거)."""
+    """stat_v_mean_cw_dis_hi → stat_v_mean_cw  (세그먼트 suffix 2토큰 제거)."""
     return feat_key.rsplit("_", 2)[0]
 
 
 def _cat_from_concept(concept: str) -> str:
-    """stat_v_mean → Stat,  morph_vt_dtw → Morph"""
+    """stat_v_mean_cw → Stat,  morph_vt_dtw → Morph"""
     return {"stat": "Stat", "diff": "Diff", "lfp": "LFP", "morph": "Morph"}.get(
         concept.split("_")[0], "Stat"
     )
 
 
 def _short_label(concept: str) -> str:
-    """stat_v_mean → v_mean"""
+    """stat_v_mean_cw → v_mean_cw"""
     parts = concept.split("_", 1)
     return parts[1] if len(parts) > 1 else concept
 
@@ -264,20 +311,16 @@ def collect_flat(ds_summaries: dict, dataset_name: str) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 1: 상관계수 랭킹 바 차트 (6 seg × 1 cat)
+# Plot 1: 상관계수 랭킹 바 차트 (N seg × 1 cat)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_corr_rank(seg_summaries: dict, out_path: Path,
                    cat_title: str, dataset_name: str = ""):
-    """6 세그먼트 서브플롯 — feature ↔ capacity_Ah |ρ| 랭킹 바.
-
-    seg_summaries: {seg: (summary_df, hi_keys)}
-    """
+    """N 세그먼트 서브플롯 — feature ↔ capacity_Ah |ρ| 랭킹 바."""
     n_segs = len(seg_summaries)
     n_cols = 3
     n_rows = (n_segs + n_cols - 1) // n_cols
 
-    # 피처 수에 비례해 행 높이 결정 (Stat/Diff/LFP=15→~9", Morph=6→~4")
     n_his_max = max(
         (len(summ.dropna(subset=["mean"])) for summ, _ in seg_summaries.values()),
         default=15,
@@ -298,7 +341,6 @@ def plot_corr_rank(seg_summaries: dict, out_path: Path,
     for ax, (seg, (summ, _hi_keys)) in zip(axes_flat, seg_summaries.items()):
         color = SEG_COLORS.get(seg, "steelblue")
 
-        # NaN mean 피처 분리 (ICA 피크 미탐지 등으로 모든 사이클 NaN인 경우)
         summ_valid = summ.dropna(subset=["mean"])
         n_nan      = len(summ) - len(summ_valid)
 
@@ -312,7 +354,7 @@ def plot_corr_rank(seg_summaries: dict, out_path: Path,
                 xerr=stds[::-1], color=color,
                 alpha=0.82, capsize=3, height=0.65,
                 error_kw={"elinewidth": 1.0, "alpha": 0.6})
-        ax.set_ylim(-0.7, len(labels) - 0.3)   # 위아래 여백 확보 (레이블 잘림 방지)
+        ax.set_ylim(-0.7, len(labels) - 0.3)
 
         for i, (m, s) in enumerate(zip(means[::-1], stds[::-1])):
             ax.text(abs(m) + 0.02, i,
@@ -338,15 +380,12 @@ def plot_corr_rank(seg_summaries: dict, out_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 2: Feature × Feature 상관행렬 히트맵 (6 seg × 1 cat)
+# Plot 2: Feature × Feature 상관행렬 히트맵 (N seg × 1 cat)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_corr_matrix(seg_matrices: dict, out_path: Path,
                      cat_title: str, dataset_name: str = ""):
-    """6 세그먼트 서브플롯 — 15×15 feature 상관행렬.
-
-    seg_matrices: {seg: (corr_df, hi_keys)}
-    """
+    """N 세그먼트 서브플롯 — feature 상관행렬."""
     n_segs = len(seg_matrices)
     n_cols = 3
     n_rows = (n_segs + n_cols - 1) // n_cols
@@ -399,21 +438,17 @@ def plot_corr_matrix(seg_matrices: dict, out_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 3: 3카테고리 × 6구간 Top-5 비교 (전체 요약)
+# Plot 3: 카테고리 × 세그먼트 Top-5 비교 (전체 요약)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_top_cross(all_summaries: dict, out_path: Path,
                    top_n: int = 5, dataset_name: str = ""):
-    """4 × 6 그리드 — rows=카테고리(Stat/Diff/LFP/Morph), cols=세그먼트.
+    """4 × N 그리드 — rows=카테고리(Stat/Diff/LFP/Morph), cols=세그먼트."""
+    cats    = list(all_summaries.keys())
+    segs    = _ACTIVE_SEGS[:]          # 동적 세그먼트 목록 사용
+    n_cats  = len(cats)
+    n_segs  = len(segs)
 
-    all_summaries: {cat: {seg: (summary_df, hi_keys)}}
-    """
-    cats     = list(all_summaries.keys())      # ["Stat","Diff","LFP","Morph"]
-    segs     = [seg for _, _, seg, _ in ALL_SEGS]  # 6 segments
-    n_cats   = len(cats)
-    n_segs   = len(segs)
-
-    # feature 색상: 카테고리별 15개 feature에 tab20 고정 매핑
     cat_palettes = {}
     for cat, _, _, _, base_keys in CATEGORIES:
         cat_palettes[cat] = {k: _TAB20[i % 20] for i, k in enumerate(base_keys)}
@@ -423,6 +458,11 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
         figsize=(n_segs * 4.2, n_cats * 4.0),
         constrained_layout=True,
     )
+    if n_cats == 1:
+        axes = axes[np.newaxis, :]
+    if n_segs == 1:
+        axes = axes[:, np.newaxis]
+
     ds_lbl = f"[{dataset_name}] " if dataset_name else ""
     fig.suptitle(
         f"{ds_lbl}카테고리 × 세그먼트 Top-{top_n} HI  (|ρ| 기준)\n"
@@ -432,7 +472,6 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
 
     x_pos = np.arange(top_n)
     for ri, (cat, cat_title_short, _, _, base_keys) in enumerate(CATEGORIES):
-        # base_keys 인덱스로 색 결정 (stat_v_mean_* → v_mean → palette)
         palette = cat_palettes[cat]
 
         for ci, seg in enumerate(segs):
@@ -446,7 +485,6 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
 
             top       = summ.head(top_n)
             feat_keys = top.index.tolist()
-            # strip prefix+suffix → base key for color lookup
             base      = [k.split("_", 1)[1].rsplit("_", 2)[0]
                          if k.count("_") >= 3 else k
                          for k in feat_keys]
@@ -461,37 +499,32 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
                    error_kw={"elinewidth": 1.0, "alpha": 0.5})
 
             for xi, (m, ma, std, b) in enumerate(zip(means, means_abs, stds, base)):
-                # 막대 내부 인덱스 번호 (크게)
                 feat_idx   = base_keys.index(b) + 1 if b in base_keys else xi + 1
                 txt_color  = "white" if ma > 0.12 else "#333333"
                 ax.text(xi, ma * 0.42, str(feat_idx),
                         ha="center", va="center",
                         fontsize=14, fontweight="bold",
                         color=txt_color, zorder=5)
-                # 막대 상단 값 (작게)
                 ax.text(xi, ma + std + 0.025,
                         f"{ma:.2f}{'(+)' if m >= 0 else '(-)'}",
                         ha="center", va="bottom", fontsize=5.5,
                         fontweight="bold")
 
             ax.set_xticks(x_pos)
-            ax.set_xticklabels([""] * top_n)   # 번호로 대체 — x축 레이블 제거
+            ax.set_xticklabels([""] * top_n)
             ax.set_ylim(0, 1.15)
             ax.axhline(1.0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=0)
             ax.tick_params(axis="y", labelsize=7)
             ax.grid(axis="y", alpha=0.3, lw=0.6)
             ax.set_axisbelow(True)
 
-            # 열 제목 (첫 행에만)
             if ri == 0:
+                seg_color = SEG_COLORS.get(seg, "black")
                 ax.set_title(SEG_LABELS.get(seg, seg), fontsize=8.5,
-                             fontweight="bold",
-                             color=SEG_COLORS.get(seg, "black"), pad=3)
-            # 행 레이블 (첫 열에만)
+                             fontweight="bold", color=seg_color, pad=3)
             if ci == 0:
                 ax.set_ylabel(f"{cat_title_short}\n|ρ|", fontsize=8.5)
 
-    # 카테고리별 번호 범례 — idx. 이름 형식
     _prefix = {"Stat": "stat", "Diff": "diff", "LFP": "lfp", "Morph": "morph"}
     legend_handles = []
     for cat, _, _, _, base_keys in CATEGORIES:
@@ -499,10 +532,10 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
         pfx = _prefix.get(cat, "stat")
         for idx, bk in enumerate(base_keys, 1):
             col = cat_palettes[cat][bk]
-            lbl = HI_LABELS.get(f"{pfx}_{bk}_dis_hi", bk)
+            ref_seg = _ACTIVE_SEGS[0] if _ACTIVE_SEGS else "dis_hi"
+            lbl = HI_LABELS.get(f"{pfx}_{bk}_{ref_seg}", bk)
             legend_handles.append(Patch(facecolor=col, label=f"{idx:2d}. {lbl}"))
 
-    # 4카테고리(Stat15+Diff15+LFP15+Morph6+구분자4=55항) → ncol=16 기준 ~4행
     fig.legend(
         handles=legend_handles,
         loc="lower center",
@@ -523,7 +556,6 @@ def plot_top_cross(all_summaries: dict, out_path: Path,
 
 def plot_feature_rank_battery(flat_df: pd.DataFrame, out_path: Path,
                                dataset_name: str):
-    """배터리 1개 — 모든 구간·카테고리에 걸쳐 concept별 Σ|ρ| 랭킹."""
     ranked = (
         flat_df.groupby("concept")["abs_rho"]
         .sum()
@@ -549,10 +581,11 @@ def plot_feature_rank_battery(flat_df: pd.DataFrame, out_path: Path,
         ax.text(-0.1, i, f"#{i+1}", va="center", ha="right",
                 fontsize=6, color="#555555")
 
-    ax.set_xlabel("Σ |Spearman ρ|  (6구간 합산)", fontsize=9)
+    n_segs = len(_ACTIVE_SEGS)
+    ax.set_xlabel(f"Σ |Spearman ρ|  ({n_segs}구간 합산)", fontsize=9)
     ax.set_title(
         f"[{dataset_name}] Feature 종합 랭킹\n"
-        "모든 구간·카테고리에 걸쳐 |ρ| 합산 (구간 수 × 최대 1.0)",
+        f"모든 구간·카테고리에 걸쳐 |ρ| 합산 (구간 수 × 최대 1.0)",
         fontsize=12, fontweight="bold",
     )
     ax.grid(axis="x", alpha=0.3, lw=0.7)
@@ -571,10 +604,9 @@ def plot_feature_rank_battery(flat_df: pd.DataFrame, out_path: Path,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_feature_rank_seg(all_flat_df: pd.DataFrame, out_path: Path):
-    """구간 6개 서브플롯 — 모든 배터리·카테고리 합산 Σ|ρ| 랭킹 (공통 y-순서)."""
-    segs = [seg for _, _, seg, _ in ALL_SEGS]
+    """구간 N개 서브플롯 — 모든 배터리·카테고리 합산 Σ|ρ| 랭킹 (공통 y-순서)."""
+    segs = _ACTIVE_SEGS[:]            # 동적 세그먼트 목록 사용
 
-    # 전체 합산 기준 공통 y-순서 (가장 많이 쓰이는 concept부터)
     global_order = (
         all_flat_df.groupby("concept")["abs_rho"]
         .sum()
@@ -584,13 +616,20 @@ def plot_feature_rank_seg(all_flat_df: pd.DataFrame, out_path: Path):
     n = len(global_order)
     y_pos = np.arange(n)
 
-    n_cols = 3
-    n_rows = 2
+    n_segs = len(segs)
+    n_cols = min(3, n_segs)
+    n_rows = (n_segs + n_cols - 1) // n_cols
+
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=(n_cols * 7, n_rows * max(5, n * 0.3)),
         constrained_layout=True,
     )
+    if n_rows == 1 and n_cols == 1:
+        axes = np.array([[axes]])
+    elif n_rows == 1 or n_cols == 1:
+        axes = np.array(axes).reshape(n_rows, n_cols)
+
     datasets_str = " + ".join(sorted(all_flat_df["dataset"].unique()))
     fig.suptitle(
         f"[{datasets_str}] 구간별 Feature 랭킹\n"
@@ -601,7 +640,7 @@ def plot_feature_rank_seg(all_flat_df: pd.DataFrame, out_path: Path):
     bar_colors = [CAT_COLORS.get(_cat_from_concept(c), "#888888") for c in global_order]
     y_labels   = [_short_label(c) for c in global_order]
 
-    axes_flat = np.array(axes).reshape(-1)
+    axes_flat = axes.reshape(-1)
     for ax, seg in zip(axes_flat, segs):
         seg_df = all_flat_df[all_flat_df["seg"] == seg]
         if seg_df.empty:
@@ -631,7 +670,7 @@ def plot_feature_rank_seg(all_flat_df: pd.DataFrame, out_path: Path):
         ax.set_xlabel("Σ |ρ|", fontsize=8)
         ax.grid(axis="x", alpha=0.3, lw=0.7)
 
-    for ax in axes_flat[len(segs):]:
+    for ax in axes_flat[n_segs:]:
         ax.set_visible(False)
 
     legend_handles = [Patch(facecolor=CAT_COLORS[c], label=c)
@@ -645,15 +684,10 @@ def plot_feature_rank_seg(all_flat_df: pd.DataFrame, out_path: Path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot 6: Scenario ε² (Kruskal-Wallis) — q_frac 레벨(hi/mid/lo) 구분 능력
+# Plot 6: Scenario ε² (Kruskal-Wallis) — 세그먼트 레벨 구분 능력
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CAT_MAP = {"stat": "Stat", "diff": "Diff", "lfp": "LFP", "morph": "Morph"}
-
-_MODE_SEGS = {
-    "discharge": ("dis_hi", "dis_mid", "dis_lo"),
-    "charge":    ("chg_lo", "chg_mid", "chg_hi"),
-}
 
 _ALL_CONCEPTS = (
     [("stat",  k) for k in STAT_KEYS]
@@ -664,18 +698,18 @@ _ALL_CONCEPTS = (
 
 
 def compute_scenario_eps2(df: pd.DataFrame) -> pd.DataFrame:
-    """각 HI 컨셉별 scenario(hi/mid/lo 레벨) 구분 능력 ε² 계산.
+    """각 HI 컨셉별 scenario(레벨) 구분 능력 ε² 계산.
 
     ε² = max(0, (H − k + 1) / (N − k))
-      H = Kruskal-Wallis 통계량, k = 그룹 수(3), N = 전체 샘플 수
-    범위 ≈ [0, 1]: 0 → 레벨 간 분포 동일, 1 → 완전 분리.
+      H = Kruskal-Wallis 통계량, k = 그룹 수, N = 전체 샘플 수
 
-    Returns
-    -------
-    DataFrame: concept, cat, short_label, mode, eps2, H, pvalue, n_samples
+    _MODE_SEGS 모듈 전역을 사용하므로 축별 재빌드 후 자동 반영.
     """
     records = []
-    for mode_name, segs in _MODE_SEGS.items():
+    for mode_name, segs_tuple in _MODE_SEGS.items():
+        segs = list(segs_tuple)
+        if len(segs) < 2:
+            continue
         for prefix, key in _ALL_CONCEPTS:
             concept  = f"{prefix}_{key}"
             col_keys = [f"{concept}_{s}" for s in segs]
@@ -714,28 +748,34 @@ def plot_scenario_eps2(eps2_df: pd.DataFrame, out_path: Path,
                        dataset_name: str = ""):
     """HI 컨셉별 scenario ε² 수평 바 차트.
 
-    왼쪽 패널: 방전(dis_hi / dis_mid / dis_lo)
-    오른쪽 패널: 충전(chg_lo / chg_mid / chg_hi)
-    ε²가 높은 컨셉일수록 레벨 구분 능력이 강함 → Classifier HI 후보.
+    패널 수 = 방향 수 (_MODE_SEGS 기준, 최대 2개).
+    방향별 세그먼트 이름은 동적으로 title에 표기.
     """
-    mode_cfg = [
-        ("discharge", "방전  (dis_hi / dis_mid / dis_lo)"),
-        ("charge",    "충전  (chg_lo / chg_mid / chg_hi)"),
-    ]
+    modes = [m for m in ("discharge", "charge") if m in _MODE_SEGS and _MODE_SEGS[m]]
+    if not modes:
+        return
 
+    n_modes    = len(modes)
     n_concepts = eps2_df["concept"].nunique()
     fig_h      = max(10, n_concepts * 0.30)
 
-    fig, axes = plt.subplots(1, 2, figsize=(24, fig_h), constrained_layout=True)
+    fig, axes_arr = plt.subplots(1, n_modes, figsize=(12 * n_modes, fig_h),
+                                  constrained_layout=True)
+    if n_modes == 1:
+        axes_arr = [axes_arr]
+
     ds_lbl = f"[{dataset_name}] " if dataset_name else ""
     fig.suptitle(
-        f"{ds_lbl}HI 컨셉별 Scenario(hi/mid/lo) 구분 능력\n"
-        r"$\varepsilon^2$ (Kruskal-Wallis, $k$=3)  — "
-        r"높을수록 q_frac 레벨 분포 차이 큼 → Classifier HI 후보",
+        f"{ds_lbl}HI 컨셉별 Scenario 구분 능력\n"
+        r"$\varepsilon^2$ (Kruskal-Wallis)  — "
+        r"높을수록 세그먼트 분포 차이 큼 → Classifier HI 후보",
         fontsize=13, fontweight="bold",
     )
 
-    for ax, (mode_name, mode_title) in zip(axes, mode_cfg):
+    for ax, mode_name in zip(axes_arr, modes):
+        segs_in_mode = " / ".join(_MODE_SEGS.get(mode_name, ())[:4])
+        mode_title   = f"{'방전' if mode_name == 'discharge' else '충전'}  ({segs_in_mode})"
+
         sub = (
             eps2_df[eps2_df["mode"] == mode_name]
             .dropna(subset=["eps2"])
@@ -759,7 +799,6 @@ def plot_scenario_eps2(eps2_df: pd.DataFrame, out_path: Path,
         ax.set_xlabel(r"$\varepsilon^2$", fontsize=10)
         ax.set_title(mode_title, fontsize=10, fontweight="bold")
 
-        # 값 레이블
         for i, (val, pv) in enumerate(zip(sub["eps2"], sub["pvalue"])):
             if not np.isfinite(val):
                 continue
@@ -767,7 +806,6 @@ def plot_scenario_eps2(eps2_df: pd.DataFrame, out_path: Path,
             ax.text(val + x_max * 0.012, i,
                     f"{val:.3f}{sig}", va="center", fontsize=6.3)
 
-        # 효과 크기 기준선
         for thr, lbl, col in [(0.01, "small", "#aaaaaa"),
                                (0.06, "medium", "#e67e22"),
                                (0.14, "large",  "#c0392b")]:
@@ -778,10 +816,8 @@ def plot_scenario_eps2(eps2_df: pd.DataFrame, out_path: Path,
 
         ax.grid(axis="x", alpha=0.25, lw=0.7)
 
-    # 카테고리 범례
     cat_handles = [Patch(facecolor=CAT_COLORS[c], label=c)
                    for c in ["Stat", "Diff", "LFP", "Morph"]]
-    # 유의성 범례
     sig_handles = [
         Patch(facecolor="none", edgecolor="none", label="유의성: * p<0.05"),
         Patch(facecolor="none", edgecolor="none", label="** p<0.01"),
@@ -804,11 +840,7 @@ def plot_scenario_eps2(eps2_df: pd.DataFrame, out_path: Path,
 
 def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
                           dataset_name: str = ""):
-    """4 카테고리 서브플롯 — HI base 이름별 avg MI 랭킹.
-
-    all_mi_summaries: {cat: {seg: (mi_summary_df, hi_keys)}}
-    막대 = 6세그먼트 평균 MI,  점 = 세그먼트별 MI (색=SEG_COLORS).
-    """
+    """4 카테고리 서브플롯 — HI base 이름별 avg MI 랭킹."""
     n_cats = len(CATEGORIES)
     fig_h  = sum(max(3.5, len(bk) * 0.55) for _, _, _, _, bk in CATEGORIES)
 
@@ -820,7 +852,7 @@ def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
     ds_lbl = f"[{dataset_name}] " if dataset_name else ""
     fig.suptitle(
         f"{ds_lbl}카테고리별 HI Mutual Information 랭킹\n"
-        "막대 = 6세그먼트 평균 MI (nats)   점 = 세그먼트별 MI",
+        "막대 = 세그먼트 평균 MI (nats)   점 = 세그먼트별 MI",
         fontsize=13, fontweight="bold",
     )
 
@@ -832,7 +864,6 @@ def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
                     transform=ax.transAxes)
             continue
 
-        # base key → {seg → avg_mi} 집계
         base_mi: dict = {}
         for seg, (mi_summ, _hi_keys) in seg_sums.items():
             for feat_key in mi_summ.index:
@@ -849,11 +880,9 @@ def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
         sorted_bases = sorted(avg_mi, key=lambda b: avg_mi[b], reverse=True)
         means        = [avg_mi[b] for b in sorted_bases]
 
-        # 높은 것이 위: sorted_bases[::-1] = ascending from bottom
         y_pos = np.arange(len(sorted_bases))
         ax.barh(y_pos, means[::-1], color=color, alpha=0.72, height=0.60)
 
-        # 세그먼트별 점
         for yi, base in enumerate(sorted_bases[::-1]):
             for seg, seg_color in SEG_COLORS.items():
                 mi_val = base_mi.get(base, {}).get(seg, np.nan)
@@ -861,7 +890,6 @@ def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
                     ax.scatter(mi_val, yi, color=seg_color, s=22, zorder=5,
                                edgecolors="white", linewidths=0.4, alpha=0.85)
 
-        # 값 레이블
         for yi, m in enumerate(means[::-1]):
             if np.isfinite(m) and m > 0:
                 ax.text(m + 0.001, yi, f"{m:.3f}", va="center", fontsize=7)
@@ -872,8 +900,9 @@ def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
         ax.set_title(cat_title, fontsize=10, fontweight="bold", color=color)
         ax.grid(axis="x", alpha=0.3, lw=0.7)
 
-    seg_handles = [Patch(facecolor=SEG_COLORS[s], label=s) for s in SEG_COLORS]
-    fig.legend(handles=seg_handles, loc="lower center", ncol=6,
+    seg_handles = [Patch(facecolor=SEG_COLORS[s], label=SEG_LABELS.get(s, s))
+                   for s in _ACTIVE_SEGS if s in SEG_COLORS]
+    fig.legend(handles=seg_handles, loc="lower center", ncol=min(len(_ACTIVE_SEGS), 6),
                fontsize=8.5, bbox_to_anchor=(0.5, -0.03),
                title="점 = 세그먼트별 MI")
 
@@ -888,15 +917,10 @@ def plot_mi_rank_category(all_mi_summaries: dict, out_path: Path,
 
 def plot_mi_vs_rho(all_summaries: dict, all_mi_summaries: dict,
                    out_path: Path, dataset_name: str = ""):
-    """MI vs |ρ| 산점도 — 각 점 = (HI concept, seg) 조합.
-
-    상단 왼쪽(고MI/저|ρ|) → 비단조 관계, ⚠ 항목 재평가 후보.
-    상단 오른쪽(고MI/고|ρ|) → 우수 HI 후보.
-    점선 = Gaussian 이론: MI = −½ln(1−ρ²).
-    """
+    """MI vs |ρ| 산점도 — 각 점 = (HI concept, seg) 조합."""
     records = []
     for cat, _cat_title, _, _, _base_keys in CATEGORIES:
-        for seg in SEG_COLORS:
+        for seg in _ACTIVE_SEGS:     # 동적 세그먼트 목록 사용
             corr_entry = all_summaries.get(cat, {}).get(seg)
             mi_entry   = all_mi_summaries.get(cat, {}).get(seg)
             if corr_entry is None or mi_entry is None:
@@ -932,7 +956,6 @@ def plot_mi_vs_rho(all_summaries: dict, all_mi_summaries: dict,
         fontsize=12, fontweight="bold",
     )
 
-    # Gaussian 이론 곡선
     rho_th = np.linspace(0.001, 0.999, 400)
     mi_th  = -0.5 * np.log(1.0 - rho_th ** 2)
     ax.plot(rho_th, mi_th, "--", color="gray", lw=1.3, alpha=0.55, zorder=1,
@@ -947,7 +970,6 @@ def plot_mi_vs_rho(all_summaries: dict, all_mi_summaries: dict,
                    edgecolors="white", linewidths=0.4,
                    label=cat, zorder=3)
 
-    # 고MI/저|ρ| 영역 주석 (상위 30% MI & |ρ| < 0.3)
     rho_thr = 0.3
     mi_thr  = float(df_plot["mi"].quantile(0.70))
     interesting = df_plot[
@@ -982,24 +1004,35 @@ def plot_mi_vs_rho(all_summaries: dict, all_mi_summaries: dict,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_corr_3d(all_summaries: dict, out_path: Path, dataset_name: str = "") -> None:
-    """방전/충전 시나리오(hi/mid/lo)별 |ρ| 3D 산점도.
+    """방향별 세그먼트 3개(또는 가능한 수)의 |ρ| 3D 산점도.
 
-    방전: X=dis_hi, Y=dis_mid, Z=dis_lo
-    충전: X=chg_hi, Y=chg_mid, Z=chg_lo
-    각 점 = HI 하나, 색상 = 카테고리(Stat/Diff/LFP/Morph)
+    _MODE_SEGS에서 방향별 세그먼트를 동적으로 추출하므로 qfrac/protocol/vwindow 모두 호환.
+    방향당 세그먼트 < 2이면 해당 방향은 건너뜀.
     """
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-
-    _MODE_CFG = [
-        ("discharge", "방전", "dis_hi",  "dis_mid",  "dis_lo"),
-        ("charge",    "충전", "chg_hi",  "chg_mid",  "chg_lo"),
-    ]
 
     _CAT_PREFIX = {"Stat": "stat", "Diff": "diff", "LFP": "lfp", "Morph": "morph"}
     _CAT_KEYS   = {"Stat": STAT_KEYS, "Diff": DIFF_KEYS, "LFP": LFP_KEYS, "Morph": MORPH_KEYS}
 
+    # 방향별 최대 3개 세그먼트 선택
+    mode_cfg = []
+    for mode_name, segs_tuple in _MODE_SEGS.items():
+        segs = list(segs_tuple)
+        if len(segs) < 2:
+            continue
+        mode_label = "방전" if mode_name == "discharge" else "충전"
+        # 3개 미만이면 마지막으로 패딩
+        while len(segs) < 3:
+            segs.append(segs[-1])
+        seg_hi, seg_mid, seg_lo = segs[0], segs[1], segs[2]
+        mode_cfg.append((mode_name, mode_label, seg_hi, seg_mid, seg_lo))
+
+    if not mode_cfg:
+        print("[plot_corr_3d] 유효한 방향 없음, 건너뜀")
+        return
+
     rows = []
-    for mode_name, mode_label, seg_hi, seg_mid, seg_lo in _MODE_CFG:
+    for mode_name, mode_label, seg_hi, seg_mid, seg_lo in mode_cfg:
         for cat, *_ in CATEGORIES:
             s_hi  = all_summaries.get(cat, {}).get(seg_hi)
             s_mid = all_summaries.get(cat, {}).get(seg_mid)
@@ -1032,16 +1065,16 @@ def plot_corr_3d(all_summaries: dict, out_path: Path, dataset_name: str = "") ->
         print("[plot_corr_3d] 데이터 없음, 건너뜀"); return
 
     data = pd.DataFrame(rows)
-
     cats    = ["Stat", "Diff", "LFP", "Morph"]
     markers = {"Stat": "o", "Diff": "s", "LFP": "^", "Morph": "D"}
     sizes   = {"Stat": 38, "Diff": 38, "LFP": 44, "Morph": 44}
 
-    fig = plt.figure(figsize=(18, 8.5))
+    n_modes = len(mode_cfg)
+    fig = plt.figure(figsize=(10 * n_modes, 8.5))
     fig.patch.set_facecolor("#f5f6fa")
 
-    for col_idx, (mode_name, mode_label, seg_hi, seg_mid, seg_lo) in enumerate(_MODE_CFG):
-        ax = fig.add_subplot(1, 2, col_idx + 1, projection="3d")
+    for col_idx, (mode_name, mode_label, seg_hi, seg_mid, seg_lo) in enumerate(mode_cfg):
+        ax = fig.add_subplot(1, n_modes, col_idx + 1, projection="3d")
         ax.set_facecolor("#f5f6fa")
         sub = data[data["mode"] == mode_name]
 
@@ -1058,12 +1091,9 @@ def plot_corr_3d(all_summaries: dict, out_path: Path, dataset_name: str = "") ->
                 label=cat, depthshade=True,
             )
 
-        # x=y=z 대각선
         diag = np.linspace(0, 1, 60)
         ax.plot(diag, diag, diag, color="#555555", lw=0.9, alpha=0.45,
                 linestyle="--", zorder=0)
-
-        # 등방선 (xy, xz, yz 투영 참조선)
         ax.plot(diag, diag, np.zeros(60), color="#aaaaaa", lw=0.5, alpha=0.3)
         ax.plot(diag, np.zeros(60), diag, color="#aaaaaa", lw=0.5, alpha=0.3)
         ax.plot(np.zeros(60), diag, diag, color="#aaaaaa", lw=0.5, alpha=0.3)
@@ -1083,21 +1113,18 @@ def plot_corr_3d(all_summaries: dict, out_path: Path, dataset_name: str = "") ->
         )
         ax.grid(True, lw=0.4, alpha=0.3)
 
-    # 공통 범례
-    leg_handles = [
-        Patch(facecolor=CAT_COLORS.get(c, "#888"), label=c) for c in cats
-    ]
+    leg_handles = [Patch(facecolor=CAT_COLORS.get(c, "#888"), label=c) for c in cats]
     fig.legend(handles=leg_handles, loc="lower center", ncol=4,
                fontsize=9.5, framealpha=0.85, bbox_to_anchor=(0.5, 0.01))
 
     ds_label = f" — {dataset_name}" if dataset_name else ""
-    fig.suptitle(f"시나리오(high / mid / low)별 |ρ| 3D 산점도{ds_label}",
+    fig.suptitle(f"시나리오(세그먼트별) |ρ| 3D 산점도{ds_label}",
                  fontsize=13, fontweight="bold", y=0.99)
     plt.tight_layout(rect=[0, 0.06, 1, 0.97])
     plt.savefig(out_path, dpi=150, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"  [Plot] 3D 산점도 → {out_path.name}")
+    print(f"  저장: {out_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1105,8 +1132,14 @@ def plot_corr_3d(all_summaries: dict, out_path: Path, dataset_name: str = "") ->
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="411-HI 세그먼트 × 카테고리 상관분석 + Scenario ε²")
-    parser.add_argument("--pkl",        default=str(PKL_DEFAULT))
+    parser = argparse.ArgumentParser(
+        description="HI 세그먼트 × 카테고리 상관분석 + Scenario ε² (다축 호환)")
+    parser.add_argument("--pkl",        default="",
+                        help="PKL 파일 경로 (미지정 시 axis 기반 자동 선택)")
+    parser.add_argument("--seg-axis",   type=str, default="qfrac",
+                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster (기본: qfrac)")
+    parser.add_argument("--axis-config", type=str, default="{}",
+                        help="축 파라미터 JSON (예: '{\"max_steps\": 3}')")
     parser.add_argument("--dataset",    default="all", choices=["all", "mit", "hust"])
     parser.add_argument("--min-cycles", type=int, default=5)
     parser.add_argument("--workers",    type=int, default=8)
@@ -1114,10 +1147,48 @@ def main():
                         help="top_cross 플롯 상위 HI 개수 (기본: 5)")
     args = parser.parse_args()
 
+    _axis = args.seg_axis
+    try:
+        _axis_cfg: dict = json.loads(args.axis_config)
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] --axis-config JSON 파싱 실패: {e}"); return
+
+    # ── 세그먼트 메타 재빌드 ──────────────────────────────────────────────────
+    global SEG_COLORS, SEG_LABELS, _ACTIVE_SEGS, _MODE_SEGS, HI_GROUPS, HI_LABELS
+
+    if _axis != "qfrac":
+        import sys as _sys
+        _sys.path.insert(0, str(HERE.parent))
+        from common.scenario import get_segmenter as _get_seg
+        from hi_correlation import _build_hi_groups
+        _seg_names = _get_seg(_axis, {_axis: _axis_cfg}).get_spec().scenario_names
+        SEG_COLORS, SEG_LABELS, _ACTIVE_SEGS, _MODE_SEGS = _derive_seg_meta(_seg_names)
+        _new_groups, _, _new_labels = _build_hi_groups(_seg_names)
+        HI_GROUPS = _new_groups
+        HI_LABELS = _new_labels
+        print(f"[corr] 축={_axis}  세그먼트: {_seg_names}")
+    else:
+        _ACTIVE_SEGS = list(SEG_COLORS.keys())
+        _MODE_SEGS   = {
+            "discharge": ("dis_hi", "dis_mid", "dis_lo"),
+            "charge":    ("chg_lo", "chg_mid", "chg_hi"),
+        }
+
+    # ── 출력 디렉토리 ─────────────────────────────────────────────────────────
+    _dir_suffix = f"_{_axis}" if _axis != "qfrac" else ""
+    OUT_BASE = HERE / "seg_corr" / (date.today().strftime("%m%d") + _dir_suffix)
+    OUT_BASE.mkdir(parents=True, exist_ok=True)
+
     # ── PKL 로드 ──────────────────────────────────────────────────────────────
-    pkl_path = Path(args.pkl)
+    if args.pkl:
+        pkl_path = Path(args.pkl)
+    else:
+        # 축별 기본 캐시 파일
+        default_name = "hi_features.pkl" if _axis == "qfrac" else f"hi_features_{_axis}.pkl"
+        pkl_path = HERE / default_name
+
     if not pkl_path.exists():
-        candidates = sorted(HERE.glob("*hi_features*.pkl"),
+        candidates = sorted(HERE.glob(f"*hi_features*{_axis}*.pkl" if _axis != "qfrac" else "*hi_features*.pkl"),
                             key=lambda p: p.stat().st_mtime, reverse=True)
         if not candidates:
             print(f"PKL 파일 없음: {pkl_path}"); return
@@ -1130,12 +1201,10 @@ def main():
     df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
     print(f"  rows={len(df):,}  셀={df.groupby(['dataset','cell_id']).ngroups}")
 
-    OUT_BASE.mkdir(parents=True, exist_ok=True)
-
     datasets = (sorted(df["dataset"].unique().tolist())
                 if args.dataset == "all" else [args.dataset.upper()])
 
-    all_flat_records: list = []   # Plot 5 구간별 랭킹용 누적
+    all_flat_records: list = []
 
     for ds_name in datasets:
         df_ds = df[df["dataset"] == ds_name].copy()
@@ -1147,16 +1216,13 @@ def main():
               f"{df_ds.groupby('cell_id').ngroups}셀)")
         print(f"{'='*60}")
 
-        # all_summaries[cat][seg]    = (summary_df, hi_keys)
-        # all_matrices[cat][seg]     = (corr_df, hi_keys)
-        # all_mi_summaries[cat][seg] = (mi_summary_df, hi_keys)
         all_summaries:    dict = {cat: {} for cat, *_ in CATEGORIES}
         all_matrices:     dict = {cat: {} for cat, *_ in CATEGORIES}
         all_mi_summaries: dict = {cat: {} for cat, *_ in CATEGORIES}
 
         for cat, cat_title, rank_stem, matrix_stem, _base_keys in CATEGORIES:
             print(f"\n─── {cat_title} ───")
-            for _, _, seg, seg_lbl in ALL_SEGS:
+            for seg in _ACTIVE_SEGS:       # 동적 세그먼트 목록 사용
                 group_key = f"{seg} — {cat}"
                 hi_keys   = HI_GROUPS.get(group_key, [])
                 avail     = [k for k in hi_keys if k in df_ds.columns]
@@ -1164,7 +1230,6 @@ def main():
                     print(f"  [{seg}] 컬럼 없음, SKIP")
                     continue
 
-                # 상관계수
                 cell_corr = compute_corr(df_ds, avail,
                                          min_cycles=args.min_cycles,
                                          workers=args.workers)
@@ -1175,7 +1240,6 @@ def main():
                 print(f"  [{seg}] 유효셀={n_valid}  "
                       f"top ρ={summ['mean'].iloc[0]:+.3f} ({top_lbl})")
 
-                # Mutual Information
                 if _HAS_SKLEARN:
                     cell_mi_df = compute_mi(df_ds, avail,
                                             min_cycles=args.min_cycles,
@@ -1185,65 +1249,56 @@ def main():
                     top_mi_lbl = HI_LABELS.get(mi_summ.index[0], mi_summ.index[0])
                     print(f"  [{seg}] top MI={mi_summ['mean'].iloc[0]:.4f} ({top_mi_lbl})")
 
-                # feature 상관행렬
                 corr_mat = feature_corr_matrix(df_ds, avail)
                 all_matrices[cat][seg] = (corr_mat, avail)
 
-            # ── Plot 1: Rank ──────────────────────────────────────────────────
             if all_summaries[cat]:
                 rank_path = OUT_BASE / f"{rank_stem}_{ds_name.lower()}.png"
                 print(f"\n  [Plot] Rank  → {rank_path.name}")
                 plot_corr_rank(all_summaries[cat], rank_path,
                                cat_title, dataset_name=ds_name)
 
-            # ── Plot 2: Matrix ────────────────────────────────────────────────
             if all_matrices[cat]:
                 mat_path = OUT_BASE / f"{matrix_stem}_{ds_name.lower()}.png"
                 print(f"  [Plot] Matrix → {mat_path.name}")
                 plot_corr_matrix(all_matrices[cat], mat_path,
                                  cat_title, dataset_name=ds_name)
 
-        # ── Plot 3: Top-N Cross ───────────────────────────────────────────────
         top_path = OUT_BASE / f"top_cross_{ds_name.lower()}.png"
         print(f"\n  [Plot] Top-{args.top_n} Cross → {top_path.name}")
         plot_top_cross(all_summaries, top_path,
                        top_n=args.top_n, dataset_name=ds_name)
 
-        # ── Plot 4: Feature 종합 랭킹 (배터리별) ─────────────────────────────
         flat_ds = collect_flat(all_summaries, ds_name)
         all_flat_records.append(flat_ds)
         rank_batt_path = OUT_BASE / f"feature_rank_battery_{ds_name.lower()}.png"
         print(f"\n  [Plot] Feature Rank (battery) → {rank_batt_path.name}")
         plot_feature_rank_battery(flat_ds, rank_batt_path, ds_name)
 
-        # ── Plot 6: Scenario ε² ───────────────────────────────────────────────
         print(f"\n  [Plot] Scenario ε² 계산 중...")
         eps2_df   = compute_scenario_eps2(df_ds)
         eps2_path = OUT_BASE / f"scenario_eps2_{ds_name.lower()}.png"
         plot_scenario_eps2(eps2_df, eps2_path, dataset_name=ds_name)
 
-        # ── Plot 7: MI 카테고리별 랭킹 ────────────────────────────────────────
         if _HAS_SKLEARN and any(all_mi_summaries[c] for c, *_ in CATEGORIES):
             mi_rank_path = OUT_BASE / f"mi_rank_category_{ds_name.lower()}.png"
             print(f"\n  [Plot] MI Rank (category) → {mi_rank_path.name}")
             plot_mi_rank_category(all_mi_summaries, mi_rank_path,
                                   dataset_name=ds_name)
 
-            # ── Plot 8: MI vs |ρ| ─────────────────────────────────────────────
             mi_rho_path = OUT_BASE / f"mi_vs_rho_{ds_name.lower()}.png"
             print(f"  [Plot] MI vs |ρ|  → {mi_rho_path.name}")
             plot_mi_vs_rho(all_summaries, all_mi_summaries,
                            mi_rho_path, dataset_name=ds_name)
 
-        # ── Plot 9: 시나리오별 |ρ| 3D 산점도 ────────────────────────────────
         corr3d_path = OUT_BASE / f"corr_3d_{ds_name.lower()}.png"
         print(f"\n  [Plot] 3D 산점도 → {corr3d_path.name}")
         plot_corr_3d(all_summaries, corr3d_path, dataset_name=ds_name)
 
         # ε² Top-10 텍스트 요약
         print(f"\n  {'─'*60}")
-        for mode_name in ("discharge", "charge"):
-            mode_lbl = "방전(dis_hi/mid/lo)" if mode_name == "discharge" else "충전(chg_lo/mid/hi)"
+        for mode_name, segs_tuple in _MODE_SEGS.items():
+            mode_lbl = f"{'방전' if mode_name == 'discharge' else '충전'} ({'/'.join(list(segs_tuple)[:3])})"
             top10 = (
                 eps2_df[eps2_df["mode"] == mode_name]
                 .dropna(subset=["eps2"])
@@ -1256,7 +1311,6 @@ def main():
                        "*"   if r["pvalue"] < 0.05  else " ")
                 print(f"    {r['short_label']:<32} ε²={r['eps2']:.4f} {sig}  [{r['cat']}]")
 
-        # ── 텍스트 요약 ──────────────────────────────────────────────────────
         print(f"\n{'='*70}")
         print(f"  [{ds_name}] Top-3 HI 요약 (|ρ| 기준)")
         print(f"{'='*70}")
@@ -1271,7 +1325,6 @@ def main():
                 )
                 print(f"  {seg_lbl:<22} {items}")
 
-    # ── Plot 5: Feature 종합 랭킹 (구간별, 전체 배터리 합산) ─────────────────
     if all_flat_records:
         all_flat_df = pd.concat(all_flat_records, ignore_index=True)
         rank_seg_path = OUT_BASE / "feature_rank_seg.png"

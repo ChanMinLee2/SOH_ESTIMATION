@@ -114,7 +114,7 @@
 | `plateau_frac` | ｜dV/dQ｜<θ 만족 빈 비율 |
 | `plateau_v_mean` | 플래토 구간 스무딩 평균 전압 |
 | `plateau_v_std` | 플래토 구간 전압 표준편차 |
-| `plateau_q_frac` | 플래토 Q / 구간 총 Q |
+| `plateau_dvdq_std` | 플래토 구간 내 dV/dQ 표준편차 |
 | `nonlin_idx` | V-Q 비선형도 RMSE/V범위 |
 | `v_sag_mid` | 중점 V − 선형 보간 V 차이 |
 | `v_flatness` | 1−std(V)/range(V) 평탄도 |
@@ -312,7 +312,7 @@
 | 순위 | HI 키 | 일치 / 전체 | 일치율 | 주요 원인 |
 |-----|--------|-----------|-------|---------|
 | 1 | `v_flatness`     | 2/6 | 33% | 실측 일치율 최하위, raw V 기반 구현 한계 |
-| 2 | `plateau_q_frac` | 2/6 | 33% | 분자·분모 동시 감소로 비율 불안정 |
+| 2 | `plateau_dvdq_std` | — | — | plateau_q_frac 대체 신규 피처, 상관 분석 미실시 |
 | 3 | `v_q_pearson`    | 2/4 | 50% | 상관 이미 −1 포화, 변화 감지 불가 |
 | 4 | `plateau_frac`   | 2/4 | 50% | θ_flat 기준 대비 열화 신호 미약 |
 | 5 | `knee_q_frac`    | 2/4 | 50% | 변곡점 Q 비율 방향 불안정 |
@@ -361,7 +361,7 @@ Spearman ρ ≈ 0인 HI들도 MI가 높으면 비선형 모델에서 유효 피�
 | `plateau_q_onset` | 0.12 | 0.152 | 0.0025 | **61×** | 플래토 시작점, 역전 패턴 존재 |
 | `v_ent_plateau`  | 0.11 | 0.040 | 0.0025 | **15×** | 플래토 엔트로피, 비선형 구조 |
 | `v_flatness`     | 0.30 | 0.050 | 0.046  | ~1× | 실제 선형 부재 — 구현 문제 |
-| `plateau_q_frac` | 0.25 | 0.055 | 0.032  | ~2× | 방향 불안정, 약한 비선형 |
+| `plateau_dvdq_std` | — | — | — | — | plateau_q_frac 대체 신규 피처, 분석 미실시 |
 
 > **핵심 결론**: `dvdq_valley_q`는 ρ ≈ 0이지만 MI가 이론값의 328배 → Spearman 기반 순위에서 최하위이나 XGBoost·랜덤포레스트 같은 비선형 모델에서 유효 피처 가능성 존재.
 

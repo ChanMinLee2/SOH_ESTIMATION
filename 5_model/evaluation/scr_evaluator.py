@@ -28,10 +28,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from utils.metrics import compute_metrics
-from utils.hi_schema import (
-    get_hi_cost_vector, get_hi_cols_for_seg,
-    N_HI, N_SEGS, N_LEVELS, SEGMENTS,
-)
+from utils.hi_schema import get_hi_cost_vector, get_hi_cols_for_seg, N_HI
 from datasets.segment_dataset import SegmentDataset, SegmentNormalizer
 
 
@@ -43,7 +40,6 @@ try:
 except ImportError:
     _HAS_MPL = False
 
-_LEVEL_NAMES = ["Low", "Mid", "High"]
 _COST_VEC = np.array(get_hi_cost_vector("dis_hi"), dtype=np.float32)  # (65,)
 
 
@@ -63,6 +59,11 @@ class SCREvaluator:
         self.figures_dir = figures_dir
         self.rep_cells = list(rep_cells)
         self.figures_dir.mkdir(parents=True, exist_ok=True)
+        # Spec-derived dimensions (avoid hardcoding N_SEGS/N_LEVELS)
+        self._n_scenarios = model.n_scenarios
+        self._n_classes   = model.n_classes
+        self._seg_names   = model.spec.scenario_names
+        self._class_names = model.spec.class_names
 
     # ------------------------------------------------------------------
     # Inference
@@ -99,14 +100,16 @@ class SCREvaluator:
         probe_zs     = np.concatenate(probe_zs)   # (N, 65)
         scen_zs      = np.concatenate(scen_zs)    # (N, 65)
 
-        cap_pred_raw = self.normalizer.inverse_target(preds_norm)
-        cap_true_raw = self.normalizer.inverse_target(trues_norm)
+        # target은 SOH ratio (∈ (0,1]) — inverse_target 불필요
+        cap_pred_raw = preds_norm   # SOH ratio
+        cap_true_raw = trues_norm   # SOH ratio
 
         return {
-            "cap_pred_raw":  cap_pred_raw,
-            "cap_true_raw":  cap_true_raw,
+            "cap_pred_raw":  cap_pred_raw,   # SOH ratio
+            "cap_true_raw":  cap_true_raw,   # SOH ratio
             "cap_pred_norm": preds_norm,
             "cap_true_norm": trues_norm,
+            "cap_init_raw":  ds.cap_init_raw,  # Ah per sample (SOH→Ah 변환용)
             "level_pred":    level_preds,
             "level_true":    level_trues,
             "seg_idx":       seg_idxs,
@@ -175,7 +178,7 @@ class SCREvaluator:
                 m = compute_metrics(t[sel], pred[sel])
                 out[tag] = {k: float(v) for k, v in m.items()}
 
-        for i, name in enumerate(_LEVEL_NAMES):
+        for i, name in enumerate(self._class_names):
             sel = lv == i
             if sel.sum() > 1:
                 m = compute_metrics(t[sel], pred[sel])
@@ -185,20 +188,27 @@ class SCREvaluator:
     def _compute_scenario_metrics(self, p: dict) -> dict:
         y_true = p["level_true"]
         y_pred = p["level_pred"]
-        acc = float((y_true == y_pred).mean())
 
+        # CE 비활성 시 level_logits=zeros → level_pred=0 (argmax) → 무의미한 값
+        # all-zero logits 감지: pred가 모두 동일하면 분류기 미학습으로 처리
+        if len(np.unique(y_pred)) <= 1:
+            return {"disabled": True, "note": "CE loss disabled — classification not trained"}
+
+        acc = float((y_true == y_pred).mean())
+        n_cls = self._n_classes
+        cls_names = self._class_names
         per_class = []
-        for i in range(N_LEVELS):
+        for i in range(n_cls):
             sel = y_true == i
             per_class.append(float((y_pred[sel] == i).mean()) if sel.sum() > 0 else float("nan"))
 
-        cm = np.zeros((N_LEVELS, N_LEVELS), dtype=int)
+        cm = np.zeros((n_cls, n_cls), dtype=int)
         for t, pr in zip(y_true, y_pred):
             cm[t][pr] += 1
 
         return {
             "accuracy": acc,
-            "per_class_accuracy": {_LEVEL_NAMES[i]: per_class[i] for i in range(N_LEVELS)},
+            "per_class_accuracy": {cls_names[i]: per_class[i] for i in range(n_cls)},
             "confusion_matrix": cm.tolist(),
         }
 
@@ -231,13 +241,22 @@ class SCREvaluator:
 
         probe_active_n = (pred_dict["probe_z"] > 0).sum(axis=1)
         scen_active_n  = (pred_dict["scen_z"]  > 0).sum(axis=1)
+        cap_init_ah    = pred_dict["cap_init_raw"]   # Ah per sample
+
+        soh_true = pred_dict["cap_true_raw"]
+        soh_pred = pred_dict["cap_pred_raw"]
+        cap_true_ah = soh_true * cap_init_ah
+        cap_pred_ah = soh_pred * cap_init_ah
 
         rows = zip(
             pred_dict["cell_ids"],
             pred_dict["cycles"],
             pred_dict["seg_names"],
-            pred_dict["cap_true_raw"].tolist(),
-            pred_dict["cap_pred_raw"].tolist(),
+            soh_true.tolist(),
+            soh_pred.tolist(),
+            cap_true_ah.tolist(),
+            cap_pred_ah.tolist(),
+            cap_init_ah.tolist(),
             pred_dict["level_true"].tolist(),
             pred_dict["level_pred"].tolist(),
             probe_active_n.tolist(),
@@ -247,14 +266,16 @@ class SCREvaluator:
             w = csv.writer(f)
             w.writerow([
                 "cell_id", "cycle", "seg_name",
-                "cap_true_Ah", "cap_pred_Ah", "error_Ah",
+                "soh_true", "soh_pred", "soh_error",
+                "cap_true_Ah", "cap_pred_Ah", "cap_init_Ah",
                 "level_true", "level_pred",
                 "probe_active_n", "scen_active_n",
             ])
-            for cell, cyc, seg, tr, pr, lt, lp, pa, sa in rows:
+            for cell, cyc, seg, st, sp, ct, cp, ci, lt, lp, pa, sa in rows:
                 w.writerow([
                     cell, cyc, seg,
-                    f"{tr:.6f}", f"{pr:.6f}", f"{pr - tr:.6f}",
+                    f"{st:.6f}", f"{sp:.6f}", f"{sp - st:.6f}",
+                    f"{ct:.6f}", f"{cp:.6f}", f"{ci:.6f}",
                     lt, lp, pa, sa,
                 ])
         print(f"[eval] saved {path}")
@@ -276,8 +297,9 @@ class SCREvaluator:
         if scen_sel is None:
             scen_sel = self.model.get_selected_scen_his()
 
-        act_matrix = np.zeros((N_SEGS, N_HI), dtype=np.float32)
-        for s in range(N_SEGS):
+        n_scen = self._n_scenarios
+        act_matrix = np.zeros((n_scen, N_HI), dtype=np.float32)
+        for s in range(n_scen):
             for i in scen_sel.get(s, []):
                 act_matrix[s, i] = 1.0
 
@@ -285,9 +307,8 @@ class SCREvaluator:
         for i in probe_sel:
             probe_row[i] = 1.0
 
-        # Full matrix: probe row + 6 scen rows  → (7, 65)
         full_matrix = np.vstack([probe_row[np.newaxis, :], act_matrix])
-        row_labels  = ["probe"] + SEGMENTS
+        row_labels  = ["probe"] + self._seg_names
 
         # HI short names (strip seg suffix, keep category+key)
         hi_cols = get_hi_cols_for_seg("dis_hi")  # reference seg
@@ -326,20 +347,24 @@ class SCREvaluator:
             return
         y_true = pred_dict["level_true"]
         y_pred = pred_dict["level_pred"]
+        if len(np.unique(y_pred)) <= 1:
+            return  # CE 비활성 — confusion matrix 생략
 
-        cm = np.zeros((N_LEVELS, N_LEVELS), dtype=int)
+        n_cls = self._n_classes
+        cls_names = self._class_names
+        cm = np.zeros((n_cls, n_cls), dtype=int)
         for t, p in zip(y_true, y_pred):
             cm[t][p] += 1
 
         acc = (y_true == y_pred).mean()
         fig, ax = plt.subplots(figsize=(4, 3.5))
         im = ax.imshow(cm, cmap="Blues")
-        ax.set_xticks(range(N_LEVELS)); ax.set_xticklabels(_LEVEL_NAMES)
-        ax.set_yticks(range(N_LEVELS)); ax.set_yticklabels(_LEVEL_NAMES)
-        ax.set_xlabel("Predicted level"); ax.set_ylabel("True level")
+        ax.set_xticks(range(n_cls)); ax.set_xticklabels(cls_names)
+        ax.set_yticks(range(n_cls)); ax.set_yticklabels(cls_names)
+        ax.set_xlabel("Predicted class"); ax.set_ylabel("True class")
         ax.set_title(f"Level confusion ({tag})  acc={acc:.3f}")
-        for i in range(N_LEVELS):
-            for j in range(N_LEVELS):
+        for i in range(n_cls):
+            for j in range(n_cls):
                 ax.text(j, i, str(cm[i, j]), ha="center", va="center",
                         fontsize=10, color="white" if cm[i, j] > cm.max() * 0.6 else "black")
         fig.colorbar(im, ax=ax, fraction=0.04)
@@ -362,8 +387,8 @@ class SCREvaluator:
         ax.scatter(t, p, s=5, alpha=0.4)
         lim = [min(t.min(), p.min()) * 0.98, max(t.max(), p.max()) * 1.02]
         ax.plot(lim, lim, "r--", linewidth=1)
-        ax.set_xlabel("True capacity (Ah)")
-        ax.set_ylabel("Predicted capacity (Ah)")
+        ax.set_xlabel("True SOH")
+        ax.set_ylabel("Predicted SOH")
         ax.set_title(f"SCR {tag} — pred vs true")
         ax.set_xlim(lim); ax.set_ylim(lim)
         path = self.figures_dir / f"scatter_{tag}.png"
@@ -382,20 +407,32 @@ class SCREvaluator:
         if not _HAS_MPL:
             return
 
-        cell_ids   = np.array(pred_dict["cell_ids"])
-        cycles     = np.array(pred_dict["cycles"])
-        cap_true   = pred_dict["cap_true_raw"]
-        cap_pred   = pred_dict["cap_pred_raw"]
-        directions = pred_dict["direction"]
-        seg_idxs   = pred_dict["seg_idx"]
+        cell_ids    = np.array(pred_dict["cell_ids"])
+        cycles      = np.array(pred_dict["cycles"])
+        cap_init_ah = pred_dict["cap_init_raw"]           # Ah per sample
+        cap_true    = pred_dict["cap_true_raw"] * cap_init_ah   # SOH→Ah
+        cap_pred    = pred_dict["cap_pred_raw"] * cap_init_ah   # SOH→Ah
+        directions  = pred_dict["direction"]
+        seg_idxs    = pred_dict["seg_idx"]
 
-        # (seg_idx, level_idx 0-2, display label)
+        # (seg_idx, level_idx, display label) — derived from spec routing
+        _spec = self.model.spec
+        _chg_ids  = _spec.charge_scenario_ids     # dir_idx=0
+        _dis_ids  = _spec.discharge_scenario_ids  # dir_idx=1
         _DIR_SEGS = {
-            "Charge":    [(0, 0, "Low"), (1, 1, "Mid"), (2, 2, "High")],
-            "Discharge": [(3, 2, "High"), (4, 1, "Mid"), (5, 0, "Low")],
+            "Charge":    [(s, _spec.scenario_to_dir_class(s)[1],
+                           _spec.class_names[_spec.scenario_to_dir_class(s)[1]])
+                          for s in _chg_ids],
+            "Discharge": [(s, _spec.scenario_to_dir_class(s)[1],
+                           _spec.class_names[_spec.scenario_to_dir_class(s)[1]])
+                          for s in _dis_ids],
         }
-        _LV_COLOR = {0: "tab:red", 1: "tab:green", 2: "tab:orange"}
-        _LV_LS    = {0: "--", 1: "-.", 2: ":"}
+        _COLORS = ["tab:red", "tab:green", "tab:orange", "tab:purple",
+                   "tab:brown", "tab:pink", "tab:cyan", "tab:olive"]
+        _STYLES = ["--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 2)),
+                   (0, (3, 5, 1, 5)), (0, (1, 1)), "-"]
+        _LV_COLOR = {i: _COLORS[i % len(_COLORS)] for i in range(_spec.n_classes)}
+        _LV_LS    = {i: _STYLES[i % len(_STYLES)] for i in range(_spec.n_classes)}
 
         for cell in self.rep_cells:
             sel = cell_ids == cell
@@ -443,14 +480,14 @@ class SCREvaluator:
 
                     color = _LV_COLOR[lv_idx]
                     ls    = _LV_LS[lv_idx]
-                    ax_cap.plot(uniq_cyc, pred_line, ls, color=color,
+                    ax_cap.plot(uniq_cyc, pred_line, color=color, linestyle=ls,
                                 label=f"Pred-{lv_name}", linewidth=1.2)
 
                     err_abs = np.abs(pred_line - true_line)
                     err_rel = err_abs / np.where(true_line == 0, 1.0, np.abs(true_line)) * 100
-                    ax_err.plot(uniq_cyc, err_abs, ls, color=color,
+                    ax_err.plot(uniq_cyc, err_abs, color=color, linestyle=ls,
                                 label=lv_name, linewidth=1.0)
-                    ax_rel.plot(uniq_cyc, err_rel, ls, color=color,
+                    ax_rel.plot(uniq_cyc, err_rel, color=color, linestyle=ls,
                                 label=lv_name, linewidth=1.0)
 
                 ax_cap.set_xlabel("Cycle"); ax_cap.set_ylabel("Capacity (Ah)")

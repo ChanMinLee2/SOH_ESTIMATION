@@ -11,7 +11,7 @@ Excluded from model input:
 from __future__ import annotations
 
 STAT_KEYS: list[str] = [
-    "v_mean", "v_std", "v_skew", "v_kurt", "v_ent",
+    "v_mean_cw", "v_std", "v_skew", "v_kurt", "v_ent",
     "i_mean", "i_std", "v_med", "corr_qi", "corr_vi",
     "q_abs", "energy_seg", "v_iqr", "v_range", "v_p10",
     "v_p90", "v_samp_ent", "corr_vt", "i_q_slope", "v_detrended_std",
@@ -19,15 +19,15 @@ STAT_KEYS: list[str] = [
 
 DIFF_KEYS: list[str] = [
     "dvdq_mean", "dvdq_std", "dvdq_max_abs", "dvdq_min", "dvdq_area",
-    "dqdv_peak_h", "dqdv_peak_v", "dqdv_peak_w", "dqdv_area", "dvdt_slope",
-    "dqdv_peak_asym", "d2vdq2_rms", "dvdq_skew", "dvdq_ent", "r_dyn_seg",
-    "dqdv_valley_h", "dqdv_valley_v", "dvdq_peak_q", "dvdq_valley_q", "dqdv_area_asym",
+    "dqdv_peak_h", "dqdv_peak_v", "dqdv_peak_w", "dqdv_area", "v_trend_slope",
+    "dqdv_peak_asym", "d2vdq2_rms", "dvdq_skew", "dvdq_ent", "dv_di_seg",
+    "dqdv_valley_h", "dqdv_valley_v", "dvdq_peak_q", "dvdq_flat_q", "dqdv_area_asym",
 ]
 
 LFP_KEYS: list[str] = [
-    "plateau_frac", "plateau_v_mean", "plateau_v_std", "plateau_q_frac",
-    "nonlin_idx", "v_sag_mid", "v_flatness", "delta_v_rms",
-    "ocv_slope", "knee_v", "knee_q_frac", "v_concavity",
+    "plateau_frac", "plateau_v_mean", "plateau_v_std", "plateau_dvdq_std",
+    "nonlin_idx", "v_dev_mid", "v_flatness", "delta_v_rms",
+    "vq_slope_mid", "inflect_v", "inflect_q_frac", "v_concavity",
     "phase_entry_dvdq", "v_q_pearson", "ica_peak_cnt",
     "plateau_v_slope", "v_gradient_exit", "plateau_q_onset", "dv_dt_plateau", "v_ent_plateau",
 ]
@@ -42,26 +42,6 @@ LEAK_COLS: set[str] = {
     "stat_energy_seg",  # q_abs × 평균전압 → 종속 변수, 정보 중복
 }
 
-SEGMENTS: list[str] = [
-    "chg_lo", "chg_mid", "chg_hi",
-    "dis_hi", "dis_mid", "dis_lo",
-]
-
-# seg_name → (scen_code, seg_idx 0-5)
-SCEN_MAP: dict[str, tuple[int, int]] = {
-    "chg_lo":  (1,  0),
-    "chg_mid": (2,  1),
-    "chg_hi":  (3,  2),
-    "dis_hi":  (-3, 3),
-    "dis_mid": (-2, 4),
-    "dis_lo":  (-1, 5),
-}
-
-# level = |scen| - 1  ∈ {0=Low, 1=Mid, 2=High}
-SEG_LEVEL: dict[str, int] = {seg: abs(code) - 1 for seg, (code, _) in SCEN_MAP.items()}
-
-# direction = sign(scen) ∈ {+1=charge, -1=discharge}
-SEG_DIRECTION: dict[str, int] = {seg: (1 if code > 0 else -1) for seg, (code, _) in SCEN_MAP.items()}
 
 # Computation cost by category (used in L0 loss)
 CATEGORY_COSTS: dict[str, float] = {
@@ -124,5 +104,14 @@ def get_hi_cost_vector(seg: str) -> list[float]:
 
 
 N_HI: int = len(get_hi_cols_for_seg("dis_hi"))  # == 64
-N_SEGS: int = len(SEGMENTS)                     # == 6
-N_LEVELS: int = 3                               # Low / Mid / High
+
+
+def spec_from_qfrac():
+    """Default qfrac ScenarioSpec (backward-compat, avoids hardcoding N_SEGS/N_LEVELS)."""
+    import sys
+    from pathlib import Path as _Path
+    _root = _Path(__file__).resolve().parent.parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from common.scenario.qfrac import QFracSegmenter
+    return QFracSegmenter().get_spec()

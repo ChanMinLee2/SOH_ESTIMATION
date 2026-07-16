@@ -51,7 +51,13 @@ from utils.io_utils import load_config, save_json
 from datasets.segment_dataset import build_datasets, collate_fn
 from models.scr_model import SCRModel
 from training.scr_trainer import SCRTrainer
-from utils.hi_schema import N_HI, N_SEGS, SEGMENTS
+from utils.hi_schema import N_HI, spec_from_qfrac
+
+_proj_root_common = Path(__file__).resolve().parent.parent
+if str(_proj_root_common) not in sys.path:
+    sys.path.insert(0, str(_proj_root_common))
+from common.scenario import get_segmenter as _get_segmenter
+from common.scenario.base import ScenarioSpec
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +82,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-gates",    action="store_true",
                    help="[legacy] --phase 1과 동일")
     p.add_argument("--device",      default="auto")
+    # 시나리오 축
+    p.add_argument("--seg-axis",    default=None,
+                   help="세그멘테이션 축 (qfrac|protocol|vwindow|rcs|cluster). "
+                        "미지정 시 yaml scenario.axis 또는 qfrac 사용")
+    p.add_argument("--axis-config", default=None,
+                   help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}')")
+    p.add_argument("--seed",        type=int, default=None,
+                   help="재현성 시드 (yaml 오버라이드)")
     return p.parse_args()
 
 
@@ -190,12 +204,14 @@ def _load_probe_masks_from_json(
 def _load_scen_masks_from_json(
     json_path: Path, k: int,
     auto: bool = False, threshold: float = 0.5,
+    n_scenarios: int = 6, n_hi: int | None = None,
 ) -> torch.Tensor | None:
     if not json_path.exists():
         return None
+    _n_hi = n_hi or N_HI
     data  = json.loads(json_path.read_text())
-    masks = torch.zeros(N_SEGS, N_HI, dtype=torch.bool)
-    for s in range(N_SEGS):
+    masks = torch.zeros(n_scenarios, _n_hi, dtype=torch.bool)
+    for s in range(n_scenarios):
         if f"seg_{s}_ranked" in data:
             ranked = data[f"seg_{s}_ranked"]
             if auto:
@@ -256,12 +272,13 @@ def _save_scen_masks_to_json(
 ) -> None:
     """Phase 1: 시나리오별 gate_prob 전체 랭킹을 저장."""
     out = {}
-    for s in range(N_SEGS):
+    seg_names = model.spec.scenario_names
+    for s in range(model.n_scenarios):
         ranked, probs = _ranked_indices(model.scen_gates[s])
         out[f"seg_{s}_ranked"]   = ranked
         out[f"seg_{s}_names"]    = [hi_cols_by_seg[s][i] for i in ranked]
         out[f"seg_{s}_probs"]    = probs
-        out[f"seg_{s}_seg_name"] = SEGMENTS[s]
+        out[f"seg_{s}_seg_name"] = seg_names[s]
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
     print(f"[train] Saved scen HI ranking → {json_path}  (시나리오별 {N_HI}개 랭킹)")
@@ -296,8 +313,9 @@ def _plot_gate_probs(
         ("Charge Probe",    model.charge_probe_gate,    charge_m,    "steelblue"),
         ("Discharge Probe", model.discharge_probe_gate, discharge_m, "darkorange"),
     ]
-    for s in range(N_SEGS):
-        gates_info.append((f"Scen: {SEGMENTS[s]}", model.scen_gates[s], scen_k, "seagreen"))
+    seg_names = model.spec.scenario_names
+    for s in range(model.n_scenarios):
+        gates_info.append((f"Scen: {seg_names[s]}", model.scen_gates[s], scen_k, "seagreen"))
 
     n_plots = len(gates_info)   # 8
     fig, axes = plt.subplots(2, 4, figsize=(22, 8))
@@ -376,11 +394,36 @@ def main() -> None:
     scen_k      = reg_cfg.get("scen_k_count", 5)
     auto_mk     = cls_cfg.get("is_auto_mk_selection", False)
 
+    # 시나리오 축 spec 결정 (CLI > yaml scenario.axis > qfrac)
+    _axis_name = (args.seg_axis
+                  or cfg.get("scenario", {}).get("axis", "qfrac"))
+    _axis_cfg_raw = args.axis_config or cfg.get("scenario", {}).get("axis_config", None)
+    _axis_cfg: dict = json.loads(_axis_cfg_raw) if isinstance(_axis_cfg_raw, str) else (_axis_cfg_raw or {})
+    _segmenter = _get_segmenter(_axis_name, {_axis_name: _axis_cfg})
+    spec = _segmenter.get_spec()
+    print(f"[train] seg-axis={_axis_name}  n_scenarios={spec.n_scenarios}  n_classes={spec.n_classes}")
+
+    # 데이터 경로: null → scenario.axis 기반 자동 결정
+    _data_cfg = cfg["data"]
+    if not _data_cfg.get("seg_data_dir"):
+        _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_name}/seg"
+    if not _data_cfg.get("data_dir"):
+        _data_cfg["data_dir"] = f"_4_data_hi/{_axis_name}/cycle"
+    print(f"[train] data_dir={_data_cfg['data_dir']}")
+    print(f"[train] seg_data_dir={_data_cfg['seg_data_dir']}")
+
+    # seed 오버라이드
+    if args.seed is not None:
+        cfg.setdefault("training", {})["seed"] = args.seed
+
     timestamp  = datetime.now().strftime("%m%d_%H%M")
     output_dir = PROJECT_ROOT / cfg["data"]["output_dir"] / timestamp
     (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (output_dir / "gates").mkdir(parents=True, exist_ok=True)
     print(f"[train] run dir: {output_dir}")
+
+    # run_dir에 spec 저장 (test_scr.py 재사용)
+    spec.save(output_dir / "scenario_spec.json")
 
     shutil.copy(str(PROJECT_ROOT / args.config), str(output_dir / "config.yaml"))
 
@@ -390,7 +433,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 데이터
     # ------------------------------------------------------------------
-    train_ds, val_ds, test_ds, norm = build_datasets(cfg)
+    train_ds, val_ds, test_ds, norm = build_datasets(cfg, spec=spec)
 
     tr_cfg = cfg["training"]
     pin    = (device.type == "cuda")
@@ -414,6 +457,7 @@ def main() -> None:
             d_probe=cfg["model"]["d_probe"],
             d_head=cfg["model"]["d_head"],
             dropout=cfg["model"]["dropout"],
+            spec=spec,
             # 마스크 없음 → HardConcreteGate 활성화
         )
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -434,7 +478,8 @@ def main() -> None:
         # JSON 저장
         from utils.hi_schema import get_hi_cols_for_seg
         hi_cols_ref    = get_hi_cols_for_seg("dis_hi")
-        hi_cols_by_seg = {s: get_hi_cols_for_seg(SEGMENTS[s]) for s in range(N_SEGS)}
+        hi_cols_by_seg = {s: get_hi_cols_for_seg(model.spec.scenario_names[s])
+                          for s in range(model.n_scenarios)}
 
         _save_probe_masks_to_json(model, probe_json_out, hi_cols_ref)
         _save_scen_masks_to_json(model, scen_json_out, hi_cols_by_seg)
@@ -467,11 +512,19 @@ def main() -> None:
                 "--gates-from <run_dir> 또는 yaml의 gates_from을 설정하세요."
             )
 
+        # Phase 2 spec 결정: gates_from/scenario_spec.json 우선, 없으면 현재 CLI spec
+        _p2_spec_path = gates_dir.parent / "scenario_spec.json"
+        if _p2_spec_path.exists():
+            spec = ScenarioSpec.load(_p2_spec_path)
+            print(f"[train] Phase 2 spec loaded: {_p2_spec_path}")
+        # (else: spec already set from CLI / yaml above)
+
         charge_mask, discharge_mask = _load_probe_masks_from_json(
             probe_json_in, charge_m, discharge_m, auto=auto_mk,
         ) if probe_json_in else (None, None)
         scen_masks = _load_scen_masks_from_json(
             scen_json_in, scen_k, auto=auto_mk,
+            n_scenarios=spec.n_scenarios,
         ) if scen_json_in else None
 
         if charge_mask is None or discharge_mask is None:
@@ -493,6 +546,7 @@ def main() -> None:
             discharge_probe_mask=discharge_mask,
             scen_masks=scen_masks,
             model_cfg=m_cfg,
+            spec=spec,
         )
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"[train] SCRModel  trainable params: {n_params:,}  (cap_head: {reg_model})")

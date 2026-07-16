@@ -1,25 +1,76 @@
 ﻿"""
 hi_correlation.py
 
-MIT + HUST _4_data_hi/clean 에서 HI 411종을 사이클별로 추출하고
+MIT + HUST _4_data_hi/clean 에서 HI를 사이클별로 추출하고
 방전 용량(capacity_Ah)과의 Spearman 상관계수를 계산·시각화.
 
 입력 : _4_data_hi/clean/MIT/*.pkl, _4_data_hi/clean/HUST/*.pkl
 출력 : hi_correlation.png
-       _4_data_hi/MIT/{cell_id}.pkl
-       _4_data_hi/HUST/{cell_id}.pkl
-사용 : python hi_correlation.py [--workers N] [--n-top N] [--force]
+       _4_data_hi/{axis}/cycle/{DS}/{cell_id}.pkl
+       _4_data_hi/{axis}/seg/{DS}/{cell_id}.pkl   (세그먼트 포맷)
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+실행 예시 — 세그멘테이션 축(--seg-axis)별
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+① qfrac (기본, SOC 구간 균등 분할)
+    python 4_hi_analysis/hi_correlation.py
+    python 4_hi_analysis/hi_correlation.py --dataset HUST --force
+
+② protocol (CC 단계 전환 경계)
+    python 4_hi_analysis/hi_correlation.py --seg-axis protocol
+    # 파라미터 조정: max_steps(단계 수), nom_cap(정격 용량 Ah), i_step_thresh_c(C-rate 임계값)
+    python 4_hi_analysis/hi_correlation.py --seg-axis protocol \
+        --axis-config '{"protocol": {"max_steps": 3, "nom_cap": 1.1, "i_step_thresh_c": 0.5}}'
+
+③ vwindow (전압 구간 균등 분할)
+    python 4_hi_analysis/hi_correlation.py --seg-axis vwindow
+    # 파라미터 조정: n_windows(분할 수, 기본 3)
+    python 4_hi_analysis/hi_correlation.py --seg-axis vwindow \
+        --axis-config '{"vwindow": {"n_windows": 4}}'
+
+④ rcs (랜덤 구간 샘플링)
+    python 4_hi_analysis/hi_correlation.py --seg-axis rcs
+    # 파라미터 조정: n_samples(샘플 수), window(구간 폭 qfrac), seed(재현성)
+    python 4_hi_analysis/hi_correlation.py --seg-axis rcs \
+        --axis-config '{"rcs": {"n_samples": 6, "window": 0.3, "seed": 42}}'
+
+⑤ cluster (K-means 클러스터)
+    python 4_hi_analysis/hi_correlation.py --seg-axis cluster
+    # [경고] fit() 없이 실행 시 모든 세그먼트가 cluster 0으로 분류됨
+    # 파라미터 조정: n_fine(미세분할 수), split_direction(방향별 분리 여부)
+    python 4_hi_analysis/hi_correlation.py --seg-axis cluster \
+        --axis-config '{"cluster": {"n_fine": 20, "split_direction": true}}'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+공통 옵션
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  --dataset  MIT|HUST         (기본: MIT)
+  --workers  N                (병렬 프로세스 수, 기본: min(4, cpu))
+  --force                     캐시 무시하고 HI 재추출
+  --n-top    N                상관계수 산점도 표시 상위 HI 수 (기본: 4)
+  --cell     CELL_ID          curve-debug / plateau-debug 대상 셀
+  --cycle    N                시각화 대상 사이클 번호 (0 = 첫 유효 사이클)
+  --curve-debug               세그먼트×커브 시각화 (HI 유효성 검증)
+  --cycles   1,100,300        curve-debug 대상 사이클 목록 (쉼표 구분)
+  --n-cycles N                curve-debug 자동 선택 사이클 수 (기본: 5)
+  --plateau-debug             단일 사이클 플래토 판정 디버그 플롯
+  --plateau-summary           전체 데이터 plateau_frac 요약 플롯
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HI 구조 (docs/NEW_HIS.md 참조)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Global  (15):  G01–G15
-  Segment (396): 6구간 × 66  (통계 S01–S20 / 미분 D01–D20 / LFP L01–L20 / Morph M01–M06)
-  세그먼트: dis_hi / dis_mid / dis_lo / chg_lo / chg_mid / chg_hi
+  Segment (n_seg × 66): 통계 S01–S20 / 미분 D01–D20 / LFP L01–L20 / Morph M01–M06
+  세그먼트 이름: 축마다 다름 (qfrac: dis_hi/dis_mid/dis_lo/chg_lo/chg_mid/chg_hi)
   키 명명: stat_{k}_{seg} / diff_{k}_{seg} / lfp_{k}_{seg} / morph_{k}_{seg}
 """
 
 import argparse
+import json
 import os
 import pickle
+import sys
 import warnings
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -48,13 +99,17 @@ HUST_DIR     = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
 CACHE_PATH   = STEP_DIR / "hi_features.pkl"
 HI_ROOT      = PROJECT_ROOT / "_4_data_hi"
 
+# common 패키지를 subprocess에서도 import 가능하게
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HI 키 상수 정의
 # ─────────────────────────────────────────────────────────────────────────────
 THETA_FLAT = 0.25  # V/Ah — LFP 플래토 판별 임계값 (|dV/dQ| < θ_flat)
 
 GLOBAL_HI_KEYS = [
-    "q_dis", "energy_dis", "v_mean_dis", "r_dc_est", "q_plateau_frac",
+    "q_dis", "energy_dis", "v_mean_cw_dis", "r_trans_est", "q_plateau_frac",
     "ica_peak1_v", "ica_peak1_h", "ica_peak1_area",
     "dva_valley_q", "dva_valley_depth",
     "ce", "cv_q_frac", "cv_time_frac", "chg_ica_peak1_h", "ica_peak1_asym",
@@ -62,8 +117,8 @@ GLOBAL_HI_KEYS = [
 _GLOBAL_LABELS = {
     "q_dis":           "Q_dis",
     "energy_dis":      "E_dis",
-    "v_mean_dis":      "μ(V)_dis",
-    "r_dc_est":        "R_dc",
+    "v_mean_cw_dis":   "μ_cw(V)_dis",
+    "r_trans_est":     "R_trans",
     "q_plateau_frac":  "Q_plat/Q",
     "ica_peak1_v":     "V @ peak(dQ/dV)",
     "ica_peak1_h":     "max(dQ/dV)",
@@ -78,13 +133,13 @@ _GLOBAL_LABELS = {
 }
 
 STAT_KEYS = [
-    "v_mean", "v_std", "v_skew", "v_kurt", "v_ent",
+    "v_mean_cw", "v_std", "v_skew", "v_kurt", "v_ent",
     "i_mean", "i_std", "v_med", "corr_qi", "corr_vi",
     "q_abs", "energy_seg", "v_iqr", "v_range", "v_p10",
     "v_p90", "v_samp_ent", "corr_vt", "i_q_slope", "v_detrended_std",
 ]
 _STAT_LABELS = {
-    "v_mean":           "μ(V)",
+    "v_mean_cw":        "μ_cw(V)",
     "v_std":            "σ(V)",
     "v_skew":           "skew(V)",
     "v_kurt":           "kurt(V)",
@@ -108,9 +163,9 @@ _STAT_LABELS = {
 
 DIFF_KEYS = [
     "dvdq_mean", "dvdq_std", "dvdq_max_abs", "dvdq_min", "dvdq_area",
-    "dqdv_peak_h", "dqdv_peak_v", "dqdv_peak_w", "dqdv_area", "dvdt_slope",
-    "dqdv_peak_asym", "d2vdq2_rms", "dvdq_skew", "dvdq_ent", "r_dyn_seg",
-    "dqdv_valley_h", "dqdv_valley_v", "dvdq_peak_q", "dvdq_valley_q", "dqdv_area_asym",
+    "dqdv_peak_h", "dqdv_peak_v", "dqdv_peak_w", "dqdv_area", "v_trend_slope",
+    "dqdv_peak_asym", "d2vdq2_rms", "dvdq_skew", "dvdq_ent", "dv_di_seg",
+    "dqdv_valley_h", "dqdv_valley_v", "dvdq_peak_q", "dvdq_flat_q", "dqdv_area_asym",
 ]
 _DIFF_LABELS = {
     "dvdq_mean":       "μ(dV/dQ)",
@@ -122,23 +177,23 @@ _DIFF_LABELS = {
     "dqdv_peak_v":     "V @ peak(dQ/dV)",
     "dqdv_peak_w":     "FWHM(dQ/dV)",
     "dqdv_area":       "∫(dQ/dV)dV",
-    "dvdt_slope":      "ΔV/Δt",
+    "v_trend_slope":   "ΔV/Δt(seg)",
     "dqdv_peak_asym":  "ICA asym",
     "d2vdq2_rms":      "rms(d²V/dQ²)",
     "dvdq_skew":       "skew(dV/dQ)",
     "dvdq_ent":        "H(dV/dQ)",
-    "r_dyn_seg":       "R_dyn",
+    "dv_di_seg":       "|ΔV/ΔI|_seg",
     "dqdv_valley_h":   "min(dQ/dV)",
     "dqdv_valley_v":   "V @ valley(dQ/dV)",
     "dvdq_peak_q":     "Q @ max|dV/dQ|",
-    "dvdq_valley_q":   "Q @ min|dV/dQ|",
+    "dvdq_flat_q":     "Q @ min|dV/dQ|",
     "dqdv_area_asym":  "ICA area asym",
 }
 
 LFP_KEYS = [
-    "plateau_frac", "plateau_v_mean", "plateau_v_std", "plateau_q_frac",
-    "nonlin_idx", "v_sag_mid", "v_flatness", "delta_v_rms",
-    "ocv_slope", "knee_v", "knee_q_frac", "v_concavity",
+    "plateau_frac", "plateau_v_mean", "plateau_v_std", "plateau_dvdq_std",
+    "nonlin_idx", "v_dev_mid", "v_flatness", "delta_v_rms",
+    "vq_slope_mid", "inflect_v", "inflect_q_frac", "v_concavity",
     "phase_entry_dvdq", "v_q_pearson", "ica_peak_cnt",
     "plateau_v_slope", "v_gradient_exit", "plateau_q_onset", "dv_dt_plateau", "v_ent_plateau",
 ]
@@ -146,14 +201,14 @@ _LFP_LABELS = {
     "plateau_frac":      "plat. frac.",
     "plateau_v_mean":    "μ(V)|plat",
     "plateau_v_std":     "σ(V)|plat",
-    "plateau_q_frac":    "Q_plat/Q_seg",
+    "plateau_dvdq_std":  "σ(dV/dQ)|plat",
     "nonlin_idx":        "NL index",
-    "v_sag_mid":         "V sag(mid)",
+    "v_dev_mid":         "V dev(mid)",
     "v_flatness":        "V flatness",
     "delta_v_rms":       "rms(ΔV)",
-    "ocv_slope":         "dV/dQ|mid",
-    "knee_v":            "knee V",
-    "knee_q_frac":       "knee q_frac",
+    "vq_slope_mid":      "dV/dQ|mid(meas)",
+    "inflect_v":         "inflect V",
+    "inflect_q_frac":    "inflect q_frac",
     "v_concavity":       "V concav.",
     "phase_entry_dvdq":  "|dV/dQ|_entry",
     "v_q_pearson":       "corr(V,Q)",
@@ -233,6 +288,31 @@ for _, _, _seg, _seg_lbl in ALL_SEGS:
 HI_GROUP_TAG = {k: gname for gname, keys in HI_GROUPS.items() for k in keys}
 
 
+def _build_hi_groups(seg_names: list) -> tuple:
+    """HI_GROUPS, ALL_HI_KEYS, HI_LABELS을 임의 세그먼트 이름 목록으로 재빌드.
+
+    qfrac 이외 축(protocol, vwindow, rcs, cluster)은 세그먼트 이름이 달라
+    모듈 레벨 상수가 맞지 않는다. main()에서 축이 결정된 뒤 이 함수로 교체한다.
+    """
+    labels: dict = {k: _GLOBAL_LABELS[k] for k in GLOBAL_HI_KEYS}
+    groups: "OrderedDict[str, list[str]]" = OrderedDict()
+    groups["Global"] = GLOBAL_HI_KEYS[:]
+    for seg in seg_names:
+        for k in STAT_KEYS:
+            labels[f"stat_{k}_{seg}"] = _STAT_LABELS[k]
+        for k in DIFF_KEYS:
+            labels[f"diff_{k}_{seg}"] = _DIFF_LABELS[k]
+        for k in LFP_KEYS:
+            labels[f"lfp_{k}_{seg}"] = _LFP_LABELS[k]
+        for k in MORPH_KEYS:
+            labels[f"morph_{k}_{seg}"] = _MORPH_LABELS[k]
+        groups[f"{seg} — Stat"]  = [f"stat_{k}_{seg}"  for k in STAT_KEYS]
+        groups[f"{seg} — Diff"]  = [f"diff_{k}_{seg}"  for k in DIFF_KEYS]
+        groups[f"{seg} — LFP"]   = [f"lfp_{k}_{seg}"   for k in LFP_KEYS]
+        groups[f"{seg} — Morph"] = [f"morph_{k}_{seg}" for k in MORPH_KEYS]
+    return groups, list(labels.keys()), labels
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 카테고리 D: 형태학적 거리 헬퍼 (top-level — multiprocessing 호환)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +342,32 @@ def _dtw_distance(a: np.ndarray, b: np.ndarray) -> float:
                 best = dtw[i - 1, j - 1]
             dtw[i, j] = d[i, j] + best
     return float(dtw[n - 1, n - 1]) / n
+
+
+def _dtw_batch(queries: np.ndarray, bol: np.ndarray) -> np.ndarray:
+    """N개 쿼리 곡선을 단일 참조 곡선에 대해 배치 DTW 계산.
+
+    queries: (N, n)  bol: (n,)  → (N,) 정규화 DTW 거리
+    _dtw_distance와 동일한 banded DP이지만 N 차원을 numpy 배열 연산으로 처리.
+    Python 루프는 n(=50) 행에 대해서만 돌므로 호출 오버헤드가 N배 절감됨.
+    """
+    N, n = queries.shape
+    band = _DTW_BAND
+    d = np.abs(queries[:, :, None] - bol[None, None, :]).astype(np.float32)  # (N,n,n)
+    dtw = np.full((N, n, n), np.inf, dtype=np.float32)
+    dtw[:, 0, 0] = d[:, 0, 0]
+    for j in range(1, min(band + 1, n)):
+        dtw[:, 0, j] = dtw[:, 0, j - 1] + d[:, 0, j]
+    for i in range(1, min(band + 1, n)):
+        dtw[:, i, 0] = dtw[:, i - 1, 0] + d[:, i, 0]
+    for i in range(1, n):
+        j_lo = max(1, i - band)
+        j_hi = min(n, i + band + 1)
+        for j in range(j_lo, j_hi):
+            np.minimum(dtw[:, i - 1, j], dtw[:, i, j - 1], out=dtw[:, i, j])
+            np.minimum(dtw[:, i, j], dtw[:, i - 1, j - 1], out=dtw[:, i, j])
+            dtw[:, i, j] += d[:, i, j]
+    return (dtw[:, n - 1, n - 1] / n).astype(np.float64)
 
 
 def _frechet_distance(a: np.ndarray, b: np.ndarray) -> float:
@@ -513,9 +619,9 @@ def _seg_stat(vs, ims, dts, qcs, seg):
         return out
     q_rel = qcs - qcs[0]
 
-    # S01 v_mean (용량 가중 평균)
+    # S01 v_mean_cw (전하 가중 평균 전압 = Σ(V·I·dt)/Σ(I·dt))
     denom = float(np.sum(ims * dts))
-    out[f"stat_v_mean_{seg}"] = (
+    out[f"stat_v_mean_cw_{seg}"] = (
         float(np.sum(vs * ims * dts)) / denom if denom > 1e-9 else float(np.mean(vs))
     )
     # S02–S04
@@ -641,12 +747,12 @@ def _seg_diff(vs, ims, dts, qcs, seg):
             out[f"diff_dqdv_peak_w_{seg}"]    = fwhm
             out[f"diff_dqdv_peak_asym_{seg}"] = asym  # D11
 
-    # D10 dvdt_slope: 총 기울기 (FP 아티팩트 방지)
+    # D10 v_trend_slope: 구간 시작→끝 선형 기울기 ΔV/Δt_total
     dt_tot = float(np.sum(dts))
     if dt_tot >= 1.0:
-        out[f"diff_dvdt_slope_{seg}"] = float(vs[-1] - vs[0]) / dt_tot
+        out[f"diff_v_trend_slope_{seg}"] = float(vs[-1] - vs[0]) / dt_tot
 
-    # D15 r_dyn_seg: |ΔV/ΔI| where ΔI≠0, Δt<2s
+    # D15 dv_di_seg: |ΔV/ΔI| 비율 (연속 샘플, ΔI≠0, Δt<2s)
     if n > 1:
         dv_a = np.diff(vs); di_a = np.diff(ims); dt_a = dts[1:]
         valid = (np.abs(di_a) > 0.01) & (dt_a < 2.0) & (dt_a > 0)
@@ -654,7 +760,7 @@ def _seg_diff(vs, ims, dts, qcs, seg):
             r_dyn = np.abs(dv_a[valid] / di_a[valid])
             r_dyn = r_dyn[r_dyn < 1000.0]
             if len(r_dyn) > 0:
-                out[f"diff_r_dyn_seg_{seg}"] = float(np.mean(r_dyn))
+                out[f"diff_dv_di_seg_{seg}"] = float(np.mean(r_dyn))
 
     # D16–D17: IC curve valley (min of dQ/dV, relative to peak — uses ICA vmids/dqdv_sm)
     if len(vmids) >= 6:
@@ -681,13 +787,13 @@ def _seg_diff(vs, ims, dts, qcs, seg):
                 out[f"diff_dqdv_valley_h_{seg}"] = vh
                 out[f"diff_dqdv_valley_v_{seg}"] = vv
 
-    # D18–D19: V-Q curve peak/valley Q positions
+    # D18–D19: V-Q curve peak/flat Q positions
     fin18 = np.isfinite(dvdq_sm)
     if q_tot > 0.005 and fin18.sum() >= 3:
         qm_f18 = qm[fin18]
         dv_f18 = dvdq_sm[fin18]
-        out[f"diff_dvdq_peak_q_{seg}"]   = float(qm_f18[int(np.argmax(np.abs(dv_f18)))])
-        out[f"diff_dvdq_valley_q_{seg}"] = float(qm_f18[int(np.argmin(np.abs(dv_f18)))])
+        out[f"diff_dvdq_peak_q_{seg}"] = float(qm_f18[int(np.argmax(np.abs(dv_f18)))])
+        out[f"diff_dvdq_flat_q_{seg}"] = float(qm_f18[int(np.argmin(np.abs(dv_f18)))])
 
     # D20: IC area asymmetry (left / right of peak)
     if len(vmids) >= 4:
@@ -727,8 +833,10 @@ def _seg_lfp(vs, ims, dts, qcs, seg):
         plt_vs = v_sm[plt_mask]
         out[f"lfp_plateau_v_mean_{seg}"] = float(np.mean(plt_vs))
         out[f"lfp_plateau_v_std_{seg}"]  = float(np.std(plt_vs))
-        q_plt = float(plt_mask.sum() * dq_b)
-        out[f"lfp_plateau_q_frac_{seg}"] = q_plt / q_tot if q_tot > 0 else np.nan
+        plt_dv = dvdq_sm[plt_mask]
+        fin_pd = np.isfinite(plt_dv)
+        if fin_pd.sum() >= 3:
+            out[f"lfp_plateau_dvdq_std_{seg}"] = float(np.std(plt_dv[fin_pd]))
 
     # L05 nonlin_idx: RMSE(V, V_linear) / V_range
     if fin_b.sum() >= 4:
@@ -738,12 +846,12 @@ def _seg_lfp(vs, ims, dts, qcs, seg):
             rmse = float(np.sqrt(np.mean((v_sm[fin_b] - v_lin[fin_b]) ** 2)))
             out[f"lfp_nonlin_idx_{seg}"] = rmse / v_rng
 
-    # L06 v_sag_mid
+    # L06 v_dev_mid: V(q_mid) - V_linear(q_mid), 선형 대비 중간점 편차 (방전: 음, 충전: 양)
     q_mid = q_tot / 2.0
     if fin_b.any():
         v_mid     = float(np.interp(q_mid, qm, v_sm))
         v_lin_mid = float(np.interp(q_mid, [qm[0], qm[-1]], [v_sm[0], v_sm[-1]]))
-        out[f"lfp_v_sag_mid_{seg}"] = v_mid - v_lin_mid
+        out[f"lfp_v_dev_mid_{seg}"] = v_mid - v_lin_mid
 
     # L07 v_flatness
     v_rng_raw = float(vs.max() - vs.min())
@@ -758,11 +866,11 @@ def _seg_lfp(vs, ims, dts, qcs, seg):
             dv_arr = np.diff(vs)[slow]
             out[f"lfp_delta_v_rms_{seg}"] = float(np.sqrt(np.mean(dv_arr ** 2)))
 
-    # L09 ocv_slope: dV/dQ at q_mid
+    # L09 vq_slope_mid: dV/dQ at q_mid (측정 전압 기반, OCV 아님)
     if fin_b.any():
-        out[f"lfp_ocv_slope_{seg}"] = float(np.interp(q_mid, qm, dvdq_sm))
+        out[f"lfp_vq_slope_mid_{seg}"] = float(np.interp(q_mid, qm, dvdq_sm))
 
-    # L10–L11 knee (V-Q 변곡점)
+    # L10–L11 inflect (V-Q 변곡점: d²(dV/dQ)/dQ² 영교차 중 최대 곡률 지점)
     if fin_b.sum() >= 6 and n_b >= 6:
         d2 = np.gradient(dvdq_sm, dq_b)
         ws11 = min(11, n_b - (1 - n_b % 2))
@@ -774,8 +882,8 @@ def _seg_lfp(vs, ims, dts, qcs, seg):
         sc = np.where(np.diff(np.sign(d2_sm)) != 0)[0]
         if len(sc) > 0:
             best = sc[int(np.argmax(np.abs(d2_sm[sc])))]
-            out[f"lfp_knee_v_{seg}"]      = float(v_sm[best])
-            out[f"lfp_knee_q_frac_{seg}"] = float(qm[best]) / q_tot
+            out[f"lfp_inflect_v_{seg}"]      = float(v_sm[best])
+            out[f"lfp_inflect_q_frac_{seg}"] = float(qm[best]) / q_tot
 
     # L12 v_concavity
     if n >= 10:
@@ -1776,7 +1884,23 @@ def _add_phase(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _extract_one_cell(pkl_path_str: str) -> list:
+def _extract_one_cell(args) -> list:
+    if isinstance(args, tuple):
+        pkl_path_str, _axis, _axis_cfg_json = args
+    else:
+        pkl_path_str, _axis, _axis_cfg_json = str(args), "qfrac", "{}"
+
+    from common.scenario import get_segmenter as _get_seg
+    _axis_cfg = json.loads(_axis_cfg_json) if isinstance(_axis_cfg_json, str) else _axis_cfg_json
+    _segmenter = _get_seg(_axis, {_axis: _axis_cfg})
+    _spec_names = _segmenter.get_spec().scenario_names
+
+    # subprocess는 모듈 레벨 ALL_HI_KEYS(qfrac 고정)를 그대로 읽으므로 재빌드
+    if _axis != "qfrac":
+        _, _cell_hi_keys, _ = _build_hi_groups(_spec_names)
+    else:
+        _cell_hi_keys = ALL_HI_KEYS
+
     path = Path(pkl_path_str)
     try:
         with open(path, "rb") as f:
@@ -1794,10 +1918,11 @@ def _extract_one_cell(pkl_path_str: str) -> list:
 
     dataset = meta.get("dataset", "")
     cell_id = meta.get("cell_id", path.stem)
-    records = []
 
-    # 카테고리 D: BOL(최초 유효 사이클) 곡선 참조값 {seg: {"vt": arr, "vq": arr, "ve": arr}}
-    bol_curves: dict = {}
+    # {cycle: row_dict} — 배치 morph 결과를 루프 후에 채워 넣기 위해 dict 사용
+    cycle_rows: dict[int, dict] = {}
+    # {seg_name: {curve_type: [(cyc, arr), ...]}} — 배치 DTW용 곡선 버퍼
+    _curve_buf: dict[str, dict[str, list]] = {}
 
     for cyc, grp in df_all.groupby("cycle"):
         if int(cyc) == 0:
@@ -1824,16 +1949,16 @@ def _extract_one_cell(pkl_path_str: str) -> list:
             continue
 
         # ── 전체 HI 키 NaN 초기화 ────────────────────────────────────────
-        row: dict = {k: np.nan for k in ALL_HI_KEYS}
+        row: dict = {k: np.nan for k in _cell_hi_keys}
         row.update({"dataset": dataset, "cell_id": cell_id,
                     "cycle": int(cyc), "capacity_Ah": cap})
 
         # ── G01–G03 방전 기본 ─────────────────────────────────────────────
-        row["q_dis"]      = q_local
-        row["energy_dis"] = float(np.sum(v * i_mag * dt) / 3600.0)
+        row["q_dis"]          = q_local
+        row["energy_dis"]     = float(np.sum(v * i_mag * dt) / 3600.0)
         denom = float(np.sum(i_mag * dt))
         if denom > 1e-9:
-            row["v_mean_dis"] = float(np.sum(v * i_mag * dt)) / denom
+            row["v_mean_cw_dis"] = float(np.sum(v * i_mag * dt)) / denom
 
         # ── G05 q_plateau_frac ────────────────────────────────────────────
         mask_plt = (v >= 3.10) & (v <= 3.45)
@@ -1854,31 +1979,20 @@ def _extract_one_cell(pkl_path_str: str) -> list:
             v, i_mag, dt, q_local
         )
 
-        # ── 방전 세그먼트 HI ──────────────────────────────────────────────
+        # ── 방전 세그먼트 HI (segmenter 기반) ───────────────────────────────
         if q_local >= 0.05:
-            for q_lo_f, q_hi_f, seg, _ in DIS_SEGS:
-                lo  = q_lo_f * q_local
-                hi  = q_hi_f * q_local
-                m_s = (q_cum >= lo) & (q_cum < hi)
-                if m_s.sum() < 10:
-                    continue
-                vs_s = v[m_s]; ims_s = i_mag[m_s]; dts_s = dt[m_s]; qcs_s = q_cum[m_s]
+            for _rec in _segmenter.iter_segments(
+                cell_id, int(cyc), v, i_mag, dt, q_cum
+            ):
+                seg = _rec.meta.get("seg_name") or _spec_names[_rec.scenario_id]
+                vs_s = _rec.v; ims_s = _rec.i; dts_s = _rec.dt; qcs_s = _rec.q
                 row.update(_seg_stat(vs_s, ims_s, dts_s, qcs_s, seg))
                 row.update(_seg_diff(vs_s, ims_s, dts_s, qcs_s, seg))
                 row.update(_seg_lfp(vs_s, ims_s, dts_s, qcs_s, seg))
-                # D: 형태학적 거리
                 _mc = _seg_morph_curves(vs_s, ims_s, dts_s)
-                if seg not in bol_curves and all(c is not None for c in _mc):
-                    bol_curves[seg] = dict(zip(("vt", "vq", "ve"), _mc))
-                if seg in bol_curves:
-                    for _ct, _arr in zip(("vt", "vq", "ve"), _mc):
-                        _bol = bol_curves[seg].get(_ct)
-                        if _arr is not None and _bol is not None:
-                            try:
-                                row[f"morph_{_ct}_dtw_{seg}"]  = _dtw_distance(_arr, _bol)
-                                row[f"morph_{_ct}_frec_{seg}"] = _frechet_distance(_arr, _bol)
-                            except Exception:
-                                pass
+                for _ct, _arr in zip(("vt", "vq", "ve"), _mc):
+                    if _arr is not None:
+                        _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((int(cyc), _arr))
 
         # ── 충전 HI ───────────────────────────────────────────────────────
         chg_grp = grp[grp["phase"] == "charge"].sort_values("time_s")
@@ -1897,8 +2011,8 @@ def _extract_one_cell(pkl_path_str: str) -> list:
             )
 
             if q_tc > 0.05 and not _chg_incomplete:
-                # G04 r_dc_est
-                row["r_dc_est"] = _r_dc_from_chg(vc, ic, dtc)
+                # G04 r_trans_est: CC→CV 전환 시점 ΔV/ΔI [mΩ]
+                row["r_trans_est"] = _r_dc_from_chg(vc, ic, dtc)
 
                 # G11 CE
                 row["ce"] = cap / q_tc
@@ -1917,48 +2031,60 @@ def _extract_one_cell(pkl_path_str: str) -> list:
                 _, c_pk_h, _, _ = _global_ica(vc, ic, dtc)
                 row["chg_ica_peak1_h"] = c_pk_h
 
-                # 충전 세그먼트 HI (CC 전환 갭 없는 경우만)
+                # 충전 세그먼트 HI (CC 전환 갭 없는 경우만, segmenter 기반)
                 if not _chg_gap_seg and q_tc >= 0.05:
-                    for q_lo_f, q_hi_f, seg, _ in CHG_SEGS:
-                        lo  = q_lo_f * q_tc
-                        hi  = q_hi_f * q_tc
-                        m_c = (qcc >= lo) & (qcc < hi)
-                        if m_c.sum() < 10:
-                            continue
-                        vs_c = vc[m_c]; ims_c = ic[m_c]; dts_c = dtc[m_c]; qcs_c = qcc[m_c]
+                    _empty = np.empty(0, dtype=float)
+                    for _rec in _segmenter.iter_segments(
+                        cell_id, int(cyc), _empty, _empty, _empty, _empty,
+                        vc, ic, dtc, qcc,
+                    ):
+                        seg = _rec.meta.get("seg_name") or _spec_names[_rec.scenario_id]
+                        vs_c = _rec.v; ims_c = _rec.i; dts_c = _rec.dt; qcs_c = _rec.q
                         row.update(_seg_stat(vs_c, ims_c, dts_c, qcs_c, seg))
                         row.update(_seg_diff(vs_c, ims_c, dts_c, qcs_c, seg))
                         row.update(_seg_lfp(vs_c, ims_c, dts_c, qcs_c, seg))
-                        # D: 형태학적 거리
                         _mc_c = _seg_morph_curves(vs_c, ims_c, dts_c)
-                        if seg not in bol_curves and all(c is not None for c in _mc_c):
-                            bol_curves[seg] = dict(zip(("vt", "vq", "ve"), _mc_c))
-                        if seg in bol_curves:
-                            for _ct, _arr in zip(("vt", "vq", "ve"), _mc_c):
-                                _bol = bol_curves[seg].get(_ct)
-                                if _arr is not None and _bol is not None:
-                                    try:
-                                        row[f"morph_{_ct}_dtw_{seg}"]  = _dtw_distance(_arr, _bol)
-                                        row[f"morph_{_ct}_frec_{seg}"] = _frechet_distance(_arr, _bol)
-                                    except Exception:
-                                        pass
+                        for _ct, _arr in zip(("vt", "vq", "ve"), _mc_c):
+                            if _arr is not None:
+                                _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((int(cyc), _arr))
 
-        records.append(row)
+        cycle_rows[int(cyc)] = row
 
-    return records
+    # ── 배치 DTW / Fréchet (곡선 버퍼 → 루프 종료 후 일괄 처리) ──────────────
+    for _seg, _ct_dict in _curve_buf.items():
+        for _ct, _pairs in _ct_dict.items():
+            if not _pairs:
+                continue
+            _bol_arr = _pairs[0][1]                             # 첫 유효 사이클 = BOL
+            _queries  = np.array([p[1] for p in _pairs])       # (N, n)
+            _dtw_vals = _dtw_batch(_queries, _bol_arr)          # (N,)
+            _frec_vals = np.max(np.abs(_queries - _bol_arr), axis=1)  # (N,)
+            for (_c, _), _dv, _fv in zip(_pairs, _dtw_vals, _frec_vals):
+                if _c in cycle_rows:
+                    cycle_rows[_c][f"morph_{_ct}_dtw_{_seg}"]  = float(_dv)
+                    cycle_rows[_c][f"morph_{_ct}_frec_{_seg}"] = float(_fv)
+
+    return list(cycle_rows.values())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_all(pkl_dir: Path, n_workers: int = 4) -> pd.DataFrame:
-    files = sorted(pkl_dir.glob("*.pkl"))
+def load_all(
+    pkl_dir: Path,
+    n_workers: int = 4,
+    axis: str = "qfrac",
+    axis_cfg: dict | None = None,
+) -> pd.DataFrame:
+    # 사이클 수가 많은 셀(파일 크기 큰 순) 먼저 배정 → 워커 간 부하 균형 개선
+    files = sorted(pkl_dir.glob("*.pkl"), key=lambda f: f.stat().st_size, reverse=True)
+    cfg_json = json.dumps(axis_cfg or {})
     all_rec: list = []
     if n_workers <= 1:
         for f in tqdm(files, desc=pkl_dir.name):
-            all_rec.extend(_extract_one_cell(str(f)))
+            all_rec.extend(_extract_one_cell((str(f), axis, cfg_json)))
     else:
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futs = {ex.submit(_extract_one_cell, str(f)): f for f in files}
+            futs = {ex.submit(_extract_one_cell, (str(f), axis, cfg_json)): f for f in files}
             with tqdm(total=len(files), desc=pkl_dir.name) as pbar:
                 for fut in as_completed(futs):
                     all_rec.extend(fut.result())
@@ -1978,14 +2104,33 @@ def _to_cycle_df(df: pd.DataFrame) -> pd.DataFrame:
 def _to_seg_df(df: pd.DataFrame) -> pd.DataFrame:
     """평탄 HI DataFrame → 세그먼트별 HI 테이블 (long format).
 
-    출력: [cell_id, cycle, segment_id, capacity_Ah, scen, stat_v_mean, ..., morph_ve_frec]
-    - segment_id: 0(chg_lo) / 1(chg_mid) / 2(chg_hi) / 3(dis_hi) / 4(dis_mid) / 5(dis_lo)
-    - scen: -3 / -2 / -1 / 1 / 2 / 3
+    출력: [cell_id, cycle, segment_id, capacity_Ah, scen, stat_v_mean_cw, ..., morph_ve_frec]
+    - segment_id: 세그먼트 인덱스 (ScenarioSpec scenario_id 기준)
+    - scen: chg 구간 양수(1-based), dis 구간 음수(1-based); qfrac은 _SEG_SCEN 그대로
     - capacity_Ah: stat_q_abs_{seg} (구간 누적 용량 Ah)
     - HI 컬럼: _{seg} 접미사 제거 (66개/구간, 순서 고정)
     """
+    # HI_GROUPS에서 세그먼트 이름 순서 추출 (main()에서 이미 재빌드됨)
+    _seg_order = list(dict.fromkeys(
+        g.split(" — ")[0] for g in HI_GROUPS if " — " in g
+    ))
+
+    # qfrac 이면 _SEG_SCEN 그대로 사용; 아니면 방향+위치로 scen 계산
+    if all(s in _SEG_SCEN for s in _seg_order):
+        _scen_map = {s: _SEG_SCEN[s] for s in _seg_order}
+    else:
+        _chg = [s for s in _seg_order if s.startswith("chg")]
+        _dis  = [s for s in _seg_order if s not in _chg]
+        _scen_map = {}
+        for idx, seg in enumerate(_seg_order):
+            if seg in _chg:
+                sv = _chg.index(seg) + 1
+            else:
+                sv = -(_dis.index(seg) + 1)
+            _scen_map[seg] = (sv, idx)
+
     parts = []
-    for seg, (scen_val, seg_id) in _SEG_SCEN.items():
+    for seg, (scen_val, seg_id) in _scen_map.items():
         suffix    = f"_{seg}"
         # 현재 df에 존재하는 세그먼트 HI 컬럼 → base 이름 매핑
         col_map   = {f"{b}{suffix}": b for b in _SEG_HI_BASES
@@ -2036,11 +2181,15 @@ def _save_sample_csvs(df_mit: pd.DataFrame, df_hust: pd.DataFrame) -> None:
     print(f"  샘플 CSV: {sample_dir}")
 
 
-def _save_per_cell_hi(df: pd.DataFrame, dataset: str) -> tuple:
+def _save_per_cell_hi(
+    df: pd.DataFrame,
+    dataset: str,
+    axis: str = "qfrac",
+) -> tuple:
     """평탄 HI DataFrame → cycle / seg 두 가지 형식으로 셀별 pkl 저장.
 
     Returns:
-        (df_cycle, df_seg) — 이후 샘플 CSV 생성에 사용
+        (df_cycle, df_seg)
     """
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -2048,8 +2197,8 @@ def _save_per_cell_hi(df: pd.DataFrame, dataset: str) -> tuple:
     df_cycle = _to_cycle_df(df)
     df_seg   = _to_seg_df(df)
 
-    cycle_dir = HI_ROOT / "cycle" / dataset
-    seg_dir   = HI_ROOT / "seg"   / dataset
+    cycle_dir = HI_ROOT / axis / "cycle" / dataset
+    seg_dir   = HI_ROOT / axis / "seg"   / dataset
     cycle_dir.mkdir(parents=True, exist_ok=True)
     seg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2064,25 +2213,59 @@ def _save_per_cell_hi(df: pd.DataFrame, dataset: str) -> tuple:
     return df_cycle, df_seg
 
 
-def load_or_extract(cache_path: Path = CACHE_PATH,
-                    n_workers: int = 4,
-                    force: bool = False) -> pd.DataFrame:
+def load_or_extract(
+    cache_path: Path = CACHE_PATH,
+    n_workers: int = 4,
+    force: bool = False,
+    axis: str = "qfrac",
+    axis_cfg: dict | None = None,
+) -> pd.DataFrame:
     """캐시가 있으면 로드, 없으면 전체 추출 후 저장."""
-    if not force and cache_path.exists():
-        print(f"  캐시 로드: {cache_path}")
-        return pd.read_pickle(cache_path)
+    # axis별 캐시 경로 (qfrac은 기존 경로 유지)
+    _cache = (
+        cache_path
+        if axis == "qfrac"
+        else cache_path.parent / f"hi_features_{axis}.pkl"
+    )
+    if not force and _cache.exists():
+        print(f"  캐시 로드: {_cache}")
+        return pd.read_pickle(_cache)
 
-    print("=== MIT HI 추출 ===")
-    df_mit  = load_all(MIT_DIR,  n_workers=n_workers)
-    dc_mit,  ds_mit  = _save_per_cell_hi(df_mit,  "MIT")
-    print("=== HUST HI 추출 ===")
-    df_hust = load_all(HUST_DIR, n_workers=n_workers)
-    dc_hust, ds_hust = _save_per_cell_hi(df_hust, "HUST")
+    axis_cfg = dict(axis_cfg or {})
+
+    # vwindow: dis_edges/chg_edges 없으면 LFP 물리 기반 고정 경계 사용
+    if axis == "vwindow" and "dis_edges" not in axis_cfg:
+        from common.scenario.vwindow import VWindowSegmenter as _VW
+        _n_win = axis_cfg.get("n_windows", 3)
+        _tmp = _VW.from_lfp(n_windows=_n_win)
+        axis_cfg.setdefault("dis_edges", _tmp._dis_edges)
+        axis_cfg.setdefault("chg_edges", _tmp._chg_edges)
+        print(f"[vwindow] LFP 고정 전압 경계  dis={_tmp._dis_edges}  chg={_tmp._chg_edges}")
+
+    from common.scenario import get_segmenter as _get_seg
+    _segmenter = _get_seg(axis, {axis: axis_cfg or {}})
+    if axis == "cluster":
+        print("[경고] cluster 축은 fit() 없이 실행 시 모든 세그먼트가 cluster 0으로 분류됩니다. "
+              "HI는 추출되지만 시나리오 라우팅이 무의미합니다.")
+
+    print(f"=== MIT HI 추출 (axis={axis}) ===")
+    df_mit  = load_all(MIT_DIR,  n_workers=n_workers, axis=axis, axis_cfg=axis_cfg)
+    dc_mit,  ds_mit  = _save_per_cell_hi(df_mit,  "MIT",  axis=axis)
+    print(f"=== HUST HI 추출 (axis={axis}) ===")
+    df_hust = load_all(HUST_DIR, n_workers=n_workers, axis=axis, axis_cfg=axis_cfg)
+    dc_hust, ds_hust = _save_per_cell_hi(df_hust, "HUST", axis=axis)
     _save_sample_csvs(df_mit, df_hust)
+
+    # ScenarioSpec 저장
+    _spec_dir = HI_ROOT / axis
+    _spec_dir.mkdir(parents=True, exist_ok=True)
+    _segmenter.save_artifacts(_spec_dir)
+    print(f"  ScenarioSpec 저장: {_spec_dir / 'scenario_spec.json'}")
+
     df = pd.concat([df_mit, df_hust], ignore_index=True)
     print(f"  총 사이클: MIT {len(df_mit):,}  /  HUST {len(df_hust):,}")
-    df.to_pickle(cache_path)
-    print(f"  캐시 저장: {cache_path}")
+    df.to_pickle(_cache)
+    print(f"  캐시 저장: {_cache}")
     return df
 
 
@@ -2153,16 +2336,20 @@ def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
             continue
     plt.rcParams["axes.unicode_minus"] = False
 
-    # ── 레이아웃: Global + 6 segment rows + scatter ────────────────────────
+    # ── 레이아웃: Global + N segment rows + scatter ───────────────────────
     # 각 세그먼트 행: [Stat | Diff | LFP] 3 sub-panels
-    fig = plt.figure(figsize=(44, 56))
+    _segs_for_plot = [k.split(" — ")[0] for k in HI_GROUPS if k.endswith("— Stat")]
+    n_segs = len(_segs_for_plot)
+    n_seg_hi = n_segs * (len(STAT_KEYS) + len(DIFF_KEYS) + len(LFP_KEYS) + len(MORPH_KEYS))
+    fig = plt.figure(figsize=(44, 14 + 7 * n_segs))
     fig.suptitle(
-        "Health Indicator Spearman ρ  ─  285 HIs  (Global 15 + Segment 270)",
+        f"Health Indicator Spearman ρ  ─  {len(GLOBAL_HI_KEYS) + n_seg_hi} HIs"
+        f"  (Global {len(GLOBAL_HI_KEYS)} + Segment {n_seg_hi})",
         fontsize=13, fontweight="bold", y=0.999,
     )
     gs_main = gridspec.GridSpec(
-        8, 1, figure=fig,
-        height_ratios=[1.1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0],
+        n_segs + 2, 1, figure=fig,
+        height_ratios=[1.1] + [1.0] * n_segs + [2.0],
         hspace=0.60,
     )
 
@@ -2171,14 +2358,10 @@ def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
     im0, _ = _draw_heatmap(ax0, HI_GROUPS["Global"],
                            "Global  (15 HIs)", corr_df)
 
-    # ── 행 1–6: 6 세그먼트 각각 3 sub-panels ─────────────────────────────
+    # ── 행 1–N: 세그먼트별 3 sub-panels (HI_GROUPS 기반 동적 생성) ─────────
     seg_rows = [
-        ("dis_hi",  "dis_hi — SoC 60–100%  (방전 초반)",   1),
-        ("dis_mid", "dis_mid — SoC 30–60%  (플래토 중심)", 2),
-        ("dis_lo",  "dis_lo — SoC 0–30%   (방전 후반)",    3),
-        ("chg_lo",  "chg_lo — SoC 0–40%   (충전 초반)",    4),
-        ("chg_mid", "chg_mid — SoC 40–70% (플래토 중심)",  5),
-        ("chg_hi",  "chg_hi — SoC 70–100% (충전 후반·CV)", 6),
+        (seg, seg, row_idx + 1)
+        for row_idx, seg in enumerate(_segs_for_plot)
     ]
     ref_im = im0
     for seg, seg_title, row_idx in seg_rows:
@@ -2297,7 +2480,8 @@ def _plot_sample_hi(df: pd.DataFrame, corr_df: pd.DataFrame, out_dir: Path) -> N
 def main():
     cpu = os.cpu_count() or 1
     parser = argparse.ArgumentParser(description="HI 411종 추출 및 Spearman 상관 시각화")
-    parser.add_argument("--workers", type=int, default=min(4, cpu))
+    parser.add_argument("--workers", type=int, default=max(1, cpu - 2),
+                        help=f"병렬 프로세스 수 (기본: CPU수-2 = {max(1, cpu - 2)})")
     parser.add_argument("--n-top",   type=int, default=4,
                         help="산점도 표시 상위 HI 수 (기본: 4)")
     parser.add_argument("--force",   action="store_true",
@@ -2320,7 +2504,27 @@ def main():
                              "미지정 시 --n-cycles 개수만큼 자동 선택")
     parser.add_argument("--n-cycles", type=int, default=5,
                         help="curve-debug 자동 선택 사이클 수 (기본: 5)")
+    # ── 시나리오 축 ──────────────────────────────────────────────────────────
+    parser.add_argument("--seg-axis", type=str, default="qfrac",
+                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster (기본: qfrac)")
+    parser.add_argument("--axis-config", type=str, default="{}",
+                        help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}')")
     args = parser.parse_args()
+
+    _axis = args.seg_axis
+    try:
+        _axis_cfg: dict = json.loads(args.axis_config)
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] --axis-config JSON 파싱 실패: {e}"); return
+
+    # qfrac 이외 축은 세그먼트 이름이 달라 모듈 레벨 HI 상수를 재빌드
+    if _axis != "qfrac":
+        from common.scenario import get_segmenter as _get_seg_hi
+        _seg_names_hi = _get_seg_hi(_axis, {_axis: _axis_cfg}).get_spec().scenario_names
+        global HI_GROUPS, ALL_HI_KEYS, HI_LABELS, HI_GROUP_TAG
+        HI_GROUPS, ALL_HI_KEYS, HI_LABELS = _build_hi_groups(_seg_names_hi)
+        HI_GROUP_TAG = {k: g for g, ks in HI_GROUPS.items() for k in ks}
+        print(f"[hi] 세그먼트 이름 재빌드: {_seg_names_hi}")
 
     # ── curve debug 단독 실행 ──────────────────────────────────────────────
     if args.curve_debug:
@@ -2350,13 +2554,15 @@ def main():
     # ── plateau_frac 전체 요약 플롯 ────────────────────────────────────────
     if args.plateau_summary:
         print("\n=== Plateau fraction 전체 요약 플롯 ===")
-        df_s = load_or_extract(n_workers=args.workers, force=args.force)
+        df_s = load_or_extract(n_workers=args.workers, force=args.force,
+                               axis=_axis, axis_cfg=_axis_cfg)
         out_sum = STEP_DIR / "outputs" / "plateau_summary.png"
         plot_plateau_fraction_summary(df_s, out_path=out_sum)
         print("완료!")
         return
 
-    df = load_or_extract(n_workers=args.workers, force=args.force)
+    df = load_or_extract(n_workers=args.workers, force=args.force,
+                         axis=_axis, axis_cfg=_axis_cfg)
     print(f"\n총 사이클: {len(df):,}")
 
     print("\n=== Spearman ρ 계산 ===")
@@ -2372,15 +2578,34 @@ def main():
         print(f"\n── {gname} ──")
         print(sub.to_string(float_format=lambda x: f"{x:+.3f}"))
 
-    hi_plot_dir = STEP_DIR / "hi_plot" / date.today().strftime("%m%d")
+    _dir_suffix = f"_{_axis}" if _axis != "qfrac" else ""
+    hi_plot_dir = STEP_DIR / "hi_plot" / (date.today().strftime("%m%d") + _dir_suffix)
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
     out = hi_plot_dir / "hi_correlation.png"
     print(f"\n=== Plot 저장: {out} ===")
     plot_correlation(corr, df, out, n_top=args.n_top)
 
-    out_dir = STEP_DIR / "outputs" / date.today().strftime("%m%d")
+    out_dir = STEP_DIR / "outputs" / (date.today().strftime("%m%d") + _dir_suffix)
     print("\n=== 대표 셀 HI 플롯 ===")
     _plot_sample_hi(df, corr, out_dir)
+
+    # ── hi_segment_viz.py 플롯 (trend + overlay) ─────────────────────────────
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("_hi_viz", STEP_DIR / "hi_segment_viz.py")
+        _viz = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_viz)
+        print(f"\n=== Global HI 열화 추이 ===")
+        _viz.plot_hi_trend(df, hi_plot_dir / "hi_trend.png")
+        for _cat, _cat_title, _fname in _viz.CATEGORIES:
+            print(f"\n=== 세그먼트 HI 추이 ({_cat}) ===")
+            _viz.plot_segment_hi_trend(df, hi_plot_dir / _fname, _cat, _cat_title)
+        for _cat, _cat_title, _fname in _viz.OVERLAY_CATEGORIES:
+            print(f"\n=== 시나리오 오버레이 ({_cat}) ===")
+            _viz.plot_segment_hi_overlay(df, hi_plot_dir / _fname, _cat, _cat_title)
+    except Exception as _e:
+        print(f"[경고] trend/overlay 플롯 생성 실패: {_e}")
+
     print("완료!")
 
 

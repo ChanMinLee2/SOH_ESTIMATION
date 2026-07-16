@@ -81,7 +81,7 @@ def _time_stat(vs, ims, dts, qcs, seg) -> dict[str, float]:
 
     t = _pc(); denom = float(np.sum(ims * dts))
     _ = float(np.sum(vs * ims * dts)) / denom if denom > 1e-9 else float(np.mean(vs))
-    T[f"stat_v_mean_{seg}"] = _pc() - t
+    T[f"stat_v_mean_cw_{seg}"] = _pc() - t
 
     t = _pc(); _ = float(np.std(vs));               T[f"stat_v_std_{seg}"]  = _pc() - t
     t = _pc()
@@ -233,7 +233,7 @@ def _time_diff(vs, ims, dts, qcs, seg,
     t = _pc()
     dt_tot = float(np.sum(dts))
     if dt_tot >= 1.0: _ = float(vs[-1] - vs[0]) / dt_tot
-    T[f"diff_dvdt_slope_{seg}"] = _pc() - t
+    T[f"diff_v_trend_slope_{seg}"] = _pc() - t
 
     # D12 d²V/dQ²
     t = _pc()
@@ -268,7 +268,7 @@ def _time_diff(vs, ims, dts, qcs, seg,
             r_d = np.abs(dv_a[valid] / di_a[valid])
             r_d = r_d[r_d < 1000.0]
             if len(r_d) > 0: _ = float(np.mean(r_d))
-    T[f"diff_r_dyn_seg_{seg}"] = _pc() - t
+    T[f"diff_dv_di_seg_{seg}"] = _pc() - t
 
     # D16–D17 IC valley
     t = _pc()
@@ -294,7 +294,7 @@ def _time_diff(vs, ims, dts, qcs, seg,
     t = _pc()
     if q_tot > 0.005 and fin18.sum() >= 3:
         _ = float(qmf18[int(np.argmin(dvf18))])
-    T[f"diff_dvdq_valley_q_{seg}"] = _pc() - t
+    T[f"diff_dvdq_flat_q_{seg}"] = _pc() - t
 
     # D20 IC area asymmetry
     t = _pc()
@@ -338,8 +338,11 @@ def _time_lfp(vs, ims, dts, qcs, seg,
 
     t = _pc()
     if plt_mask.sum() >= min_plt:
-        _ = (float(plt_mask.sum() * dq_b) / q_tot) if q_tot > 0 else np.nan
-    T[f"lfp_plateau_q_frac_{seg}"] = _pc() - t
+        plt_dv_ = dvdq_sm[plt_mask]
+        fin_pd_ = np.isfinite(plt_dv_)
+        if fin_pd_.sum() >= 3:
+            _ = float(np.std(plt_dv_[fin_pd_]))
+    T[f"lfp_plateau_dvdq_std_{seg}"] = _pc() - t
 
     # L05 nonlin_idx
     t = _pc()
@@ -350,13 +353,13 @@ def _time_lfp(vs, ims, dts, qcs, seg,
             _ = float(np.sqrt(np.mean((v_sm[fin_b] - v_lin[fin_b]) ** 2))) / v_rng
     T[f"lfp_nonlin_idx_{seg}"] = _pc() - t
 
-    # L06 v_sag_mid
+    # L06 v_dev_mid
     t = _pc()
     if fin_b.any():
         v_mid     = float(np.interp(q_mid, qm, v_sm))
         v_lin_mid = float(np.interp(q_mid, [qm[0], qm[-1]], [v_sm[0], v_sm[-1]]))
         _ = v_mid - v_lin_mid
-    T[f"lfp_v_sag_mid_{seg}"] = _pc() - t
+    T[f"lfp_v_dev_mid_{seg}"] = _pc() - t
 
     # L07 v_flatness
     t = _pc()
@@ -372,12 +375,12 @@ def _time_lfp(vs, ims, dts, qcs, seg,
             _ = float(np.sqrt(np.mean(np.diff(vs)[slow] ** 2)))
     T[f"lfp_delta_v_rms_{seg}"] = _pc() - t
 
-    # L09 ocv_slope
+    # L09 vq_slope_mid
     t = _pc()
     if fin_b.any(): _ = float(np.interp(q_mid, qm, dvdq_sm))
-    T[f"lfp_ocv_slope_{seg}"] = _pc() - t
+    T[f"lfp_vq_slope_mid_{seg}"] = _pc() - t
 
-    # L10–L11 knee
+    # L10–L11 inflect
     t = _pc()
     if fin_b.sum() >= 6 and n_b >= 6:
         d2 = np.gradient(dvdq_sm, dq_b)
@@ -390,10 +393,10 @@ def _time_lfp(vs, ims, dts, qcs, seg,
         sc = np.where(np.diff(np.sign(d2_sm)) != 0)[0]
         if len(sc) > 0:
             best = sc[int(np.argmax(np.abs(d2_sm[sc])))]
-    T[f"lfp_knee_v_{seg}"] = _pc() - t
+    T[f"lfp_inflect_v_{seg}"] = _pc() - t
 
     t = _pc()
-    # (knee_q_frac는 knee_v와 동일 연산, 별도 타이밍)
+    # (inflect_q_frac는 inflect_v와 동일 연산, 별도 타이밍)
     if fin_b.sum() >= 6 and n_b >= 6:
         d2 = np.gradient(dvdq_sm, dq_b)
         ws11 = min(11, n_b - (1 - n_b % 2))
@@ -403,7 +406,7 @@ def _time_lfp(vs, ims, dts, qcs, seg,
         except Exception:
             d2_sm = d2
         sc = np.where(np.diff(np.sign(d2_sm)) != 0)[0]
-    T[f"lfp_knee_q_frac_{seg}"] = _pc() - t
+    T[f"lfp_inflect_q_frac_{seg}"] = _pc() - t
 
     # L12 v_concavity
     t = _pc()
@@ -527,7 +530,7 @@ def _time_global(v, i_mag, dt, q_local, vc=None, ic=None, dtc=None) -> dict[str,
     t = _pc()
     denom = float(np.sum(i_mag * dt))
     if denom > 1e-9: _ = float(np.sum(v * i_mag * dt)) / denom
-    T["v_mean_dis"] = _pc() - t
+    T["v_mean_cw_dis"] = _pc() - t
 
     # G05 q_plateau_frac
     t = _pc()
@@ -550,7 +553,7 @@ def _time_global(v, i_mag, dt, q_local, vc=None, ic=None, dtc=None) -> dict[str,
     if vc is not None and ic is not None and dtc is not None:
         t = _pc()
         _ = _r_dc_from_chg(vc, ic, dtc)
-        T["r_dc_est"] = _pc() - t
+        T["r_trans_est"] = _pc() - t
 
         q_tc = float(np.sum(ic * dtc) / 3600.0)
 

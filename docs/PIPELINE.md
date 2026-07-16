@@ -1,197 +1,52 @@
-﻿# LFP SOH Prediction — 데이터 파이프라인
+# SOH Estimation Framework — 메인 파이프라인 정리
 
-원본 데이터(.mat / .pkl)를 모델 학습까지 처리하는 전체 흐름.
+> 플롯 생성 파일(`plot_*.py`, 시각화 전용) 제외. 데이터 처리·학습·평가 메인 로직만 포함.
 
 ---
 
-## 파이프라인 흐름
+## 전체 흐름 요약
 
 ```
-원본 데이터
-  ├── _0_data_raw/FastCharge/*.mat          MIT (FastCharge, HDF5 포맷)
-  └── _0_data_raw/_0_data_raw/our_data/our_data/*.pkl   HUST (our_data 원본)
-             │
-             ▼
-  ┌─────────────────────────────────────────────────┐
-  │  Step 1: 데이터 변환          convert_unified.py  │
-  │    MIT  → mit_batch_parser/build_batch_pkl.py    │
-  │    HUST → convert_unified.py 내 _hust_worker()   │
-  └─────────────────────────────────────────────────┘
-             │
-             ├──────────────────────────────────────────┐
-             ▼                                          ▼
-  _0_data_raw/                                  _1_data_unified/
-    ├── MIT/  b1c0.pkl, b1c0.csv, ...          ├── MIT/  b1c0.pkl, b1c0.csv, ...
-    │         (이상치 제거 없음,                │         (필터 적용, 123셀)
-    │          DELETE_CELLS 포함)               └── HUST/ 1-1.pkl,  1-1.csv, ...
-    └── HUST/ 1-1.pkl,  1-1.csv, ...                     (필터 적용,  77셀)
-              (이상치 제거 없음)
-    ★ _0_data_raw/FastCharge/ (MIT 원본 .mat) 와 공존
-
-  PKL 스키마: {"meta": dict, "cycles": DataFrame}
-  _0_data_raw cycles 컬럼:     cycle, time_s, voltage_V, current_A,
-                             temperature_C, capacity_Ah, phase
-  _1_data_unified cycles 컬럼: cycle, time_s, voltage_V, current_A,
-                             capacity_Ah, phase  (temperature_C 제외)
-             │
-             ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │  Step 2: 이상 사이클·행 제거 (7단계)     preprocess.py     │
-  │    [필터1] _remove_empty_cycles          빈 사이클 제거     │
-  │    [필터2] _fix_time_monotonicity         time_s 단조 보정  │
-  │    [필터3] _remove_zero_current_rest      rest 0전류 행 제거 │
-  │    [필터4] _remove_dt_gap_cycles          시간 단절 처리    │
-  │              방전 단절 → 사이클 전체 제거                   │
-  │              충전 단절 → 충전 phase 행만 제거               │
-  │    [필터5] _remove_outlier_cycles  Rolling Median 2-pass    │
-  │              Pass 1: w=11, σ=--sigma(기본2.0) — 고립 이상치 │
-  │              Pass 2: w=31, σ2=2.0  — 클러스터 이상치       │
-  │    [필터6] _remove_bad_vend_cycles vend_min=1.8V            │
-  │              HUST 비정상 종료 사이클 ~4,214건 제거           │
-  │    [필터7] _remove_shape_outlier_cycles  V-q_frac 형상 편차  │
-  │              방전·충전 각각 rolling median 기준 곡선 대비    │
-  │              RMSE·max|ΔV|의 MAD robust z > σ(기본5.0) 제거 │
-  │              + KNOWN_SHAPE_ANOMALIES 수동 지정 사이클 추가   │
-  │                MIT b1c23 charge #1003, b1c36 discharge #73  │
-  │    _1_data_unified 원본 유지 → _2_data_clean에 저장          │
-  │    PKL: 전체 셀 / CSV: 제거 발생 셀만                       │
-  │    → outputs/cleaning_report.csv (필터별 통계 + 사이클 번호) │
-  │    → outputs/<MMDD>/*.png  (plot_cleaning_report.py 시각화) │
-  │    병렬 처리: --workers N (기본 4)                           │
-  └──────────────────────────────────────────────────────────────┘
-             │
-             ▼
-  _2_data_clean/
-    ├── MIT/  b1c0.pkl, [b1c0.csv], ...   (전처리 적용)
-    └── HUST/ 1-1.pkl,  [1-1.csv],  ...   (CSV는 제거 셀만)
-             │
-             ▼
-  ┌──────────────────────────────────────────────────┐
-  │  Step 3: 무결성 검사         check_integrity.py  │
-  │    파일 수 / 스키마 / phase / 전압범위 / NaN 등  │
-  │    병렬 처리: --workers N (기본 4)               │
-  └──────────────────────────────────────────────────┘
-             │
-             ▼
-  ┌───────────────────────────────────────────────────────────┐
-  │  Step 4: HI 분석 (탐색)                                  │
-  │    hi_correlation.py   → hi_plot/<MMDD>/                 │
-  │                            hi_correlation.png            │
-  │    hi_segment_viz.py   → hi_plot/<MMDD>/                 │
-  │                            hi_segment_cuts.png           │
-  │                            hi_trend.png                  │
-  │                            hi_segment_trend.png          │
-  │    seg_corr_analysis.py → seg_corr/<MMDD>/              │
-  │                            corr_rank_<ds>.png            │
-  │                            corr_matrix_<ds>.png          │
-  │                            top7_cross_<ds>.png           │
-  │                                                          │
-  │  HI 411종  (Global 15 + Segment 6구간×66)                │
-  │  설계 상세: docs/NEW_HIS.md 참조                          │
-  │                                                          │
-  │  Global (15):                                            │
-  │    q_dis, energy_dis, v_mean_dis, r_dc_est,              │
-  │    q_plateau_frac, ica_peak1_v/h/area, ica_peak1_asym,  │
-  │    dva_valley_q/depth, ce, cv_q_frac, cv_time_frac,      │
-  │    chg_ica_peak1_h                                       │
-  │                                                          │
-  │  Segment (6구간 × 66):                                   │
-  │    세그먼트: dis_hi / dis_mid / dis_lo                   │
-  │             chg_lo / chg_mid / chg_hi  (q_frac 기준)    │
-  │    카테고리 A — 통계(20): stat_{k}_{seg}                 │
-  │      v_mean, v_std, v_skew, v_kurt, v_ent,              │
-  │      i_mean, i_std, v_med, corr_qi, corr_vi,            │
-  │      q_abs, energy_seg, v_iqr, v_range, v_p10,          │
-  │      v_p90, v_samp_ent, corr_vt, i_q_slope,             │
-  │      v_detrended_std                                     │
-  │    카테고리 B — 미분(20): diff_{k}_{seg}                 │
-  │      dvdq_mean/std/max_abs/min/area, dqdv_peak_h/v/w,   │
-  │      dqdv_area, dvdt_slope, dqdv_peak_asym,             │
-  │      d2vdq2_rms, dvdq_skew/ent, r_dyn_seg,              │
-  │      dqdv_valley_h/v, dvdq_peak_q, dvdq_valley_q,       │
-  │      dqdv_area_asym                                      │
-  │    카테고리 C — LFP 특징(20): lfp_{k}_{seg}             │
-  │      plateau_frac/v_mean/v_std/q_frac, nonlin_idx,      │
-  │      v_sag_mid, v_flatness, delta_v_rms, ocv_slope,     │
-  │      knee_v/q_frac, v_concavity, phase_entry_dvdq,      │
-  │      v_q_pearson, ica_peak_cnt,                         │
-  │      plateau_v_slope, v_gradient_exit, plateau_q_onset, │
-  │      dv_dt_plateau, v_ent_plateau                       │
-  │    카테고리 D — 형태학적 거리(6): morph_{k}_{seg}        │
-  │      vt_dtw,  vq_dtw,  ve_dtw   (V-t/V-Q/V-E DTW)      │
-  │      vt_frec, vq_frec, ve_frec  (V-t/V-Q/V-E Fréchet)  │
-  │      BOL(사이클1) 기준 곡선 대비 누적·최대 형상 거리     │
-  └───────────────────────────────────────────────────────────┘
-             │
-             ▼
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  Step 5: SCR 모델 학습 / 평가                                    │
-  │    train_scr.py   → _5_data_model_scr/                          │
-  │                        best_scr.pt  (val RMSE 최솟값 체크포인트) │
-  │                        scr_final.pt (model + normalizer 통합)    │
-  │    test_scr.py    → eval/ (scatter + capacity curve)            │
-  │                                                                  │
-  │  아키텍처: Scenario-Conditioned Routing (SCR)                    │
-  │    Stage A: HardConcreteGate(65) → probe_x                      │
-  │             MLP(probe_x) → level_logits (3-way: Low/Mid/High)   │
-  │    Stage B: HardConcreteGate × 6 (시나리오별, 각 65개)           │
-  │             seg_idx로 해당 gate 선택 → scen_x                   │
-  │    Head:    concat(probe_x, scen_x, direction) → capacity_Ah    │
-  │                                                                  │
-  │  Loss = MSE(cap) + λ_scen·CE(level) + λ_l0·Σ cost_i·P(gate_i)  │
-  │    cost: stat=1.0, diff=1.5, lfp=2.0, morph=3.0                 │
-  │  학습 전략: Cosine LR (warmup 포함), Hard-Concrete L0 gate       │
-  │  데이터 분할: 셀 단위 80/10/10                                   │
-  │  입력: _4_data_hi/MIT + HUST (65 HIs/세그먼트, 셀별 pkl)        │
-  │  JSON 캐시: 선택된 HI 목록 저장 → 재학습 없이 즉시 추론 가능    │
-  │  GPU: CUDA 가용 시 자동 선택 (cuda:0), 없으면 cpu               │
-  │  설계 상세: docs/MODEL_BLUEPRINT.md 참조                         │
-  └──────────────────────────────────────────────────────────────────┘
+raw data
+  ↓ [1_convert]       MIT(.mat HDF5) / HUST(.pkl) → _1_data_unified/
+  ↓ [2_preprocess]    7단계 필터링                 → _4_data_hi/clean/
+  ↓ [3_integrity]     10개 항목 무결성 검사         → reports/
+  ↓ [4_hi_analysis]   HI 추출 (Global 15 + Seg 6×66)
+                        → _4_data_hi/{axis}/cycle/{ds}/*.pkl  (wide-cycle)
+                        → _4_data_hi/{axis}/seg/{ds}/*.pkl    (native-seg)
+                        → _4_data_hi/{axis}/scenario_spec.json
+  ↓ [5_model]
+      Phase 1: L0 HardConcrete gate → probe/scen HI 선택 → gates/*.json
+      Phase 2: 고정 gate + 분류 + 회귀 → checkpoints/best.pt
+  ↓ [test_scr]        평가 → metrics/ + figures/ + routing/ + predictions/
 ```
 
----
+오케스트레이터: **`run_pipeline.py`** (Step 1~5 순차 실행)
 
-## 소스 파일 역할
+```powershell
+# Step 1~5 전체 자동 실행
+python run_pipeline.py
 
-| 파일 | 단계 | 역할 |
-|------|------|------|
-| `1_convert/convert_unified.py` | 1 | MIT MAT + HUST PKL → unified PKL 변환 (전체 통합) |
-| `2_preprocess/preprocess.py` | 2 | 7단계 이상 사이클·행 제거 (빈 사이클, time 보정, 0전류 rest, 시간 단절, Rolling Median 2-pass, vend_min, 형상 편차) |
-| `2_preprocess/plot_cleaning_report.py` | 2 | cleaning_report.csv 읽어 필터별 시각화 플롯 생성 |
-| `3_integrity/check_integrity.py` | 3 | unified PKL 무결성 검사 → 이상 목록 CSV 저장 |
-| `4_hi_analysis/hi_correlation.py` | 4 | HI 411종 추출 및 풀링 Spearman 상관 시각화 (Global 15 + Segment 6구간×66, 카테고리 A–D) |
-| `4_hi_analysis/hi_segment_viz.py` | 4 | 세그먼트 분할 확인 + 카테고리 A–D HI 열화 추이 시각화 (411-HI) |
-| `4_hi_analysis/seg_corr_analysis.py` | 4 | 세그먼트별 within-cell Spearman 상관계수 랭킹·히트맵·Top-5 비교 + 통합 feature 랭킹 (4카테고리) |
-| `5_model/train_scr.py` | 5 | SCRModel 학습 진입점 — 데이터 로드→분할→정규화→학습→JSON 저장 |
-| `5_model/test_scr.py` | 5 | 체크포인트 로드 후 3-split 평가 + scatter + capacity curve 저장 |
-| `5_model/models/scr_model.py` | 5 | SCRModel 전체 아키텍처 — Stage A/B + Capacity Head |
-| `5_model/datasets/segment_dataset.py` | 5 | _4_data_hi 세그먼트 로드·셀분할·정규화·DataLoader 생성 |
-| `5_model/config/scr.yaml` | 5 | SCR 하이퍼파라미터 설정 |
+# Step N부터 실행 (예: HI 추출(4)부터)
+python run_pipeline.py 4
 
-**분석 도구** (파이프라인 외부):
+# 병렬 프로세스 수 지정
+python run_pipeline.py --workers 4
+```
 
-| 파일 | 역할 |
-|------|------|
-| `4_hi_analysis/plot_cell_cycles.py` | 특정 셀의 전체 사이클 용량 곡선 + V-q_frac 오버레이 시각화 |
-| `4_hi_analysis/plot_cycle_segments.py` | 단일 셀·사이클의 방전/충전 세그먼트 V-q_frac 시각화 |
+세그멘테이션 축 (`--seg-axis`): `qfrac` (기본) / `protocol` / `vwindow` / `rcs` / `cluster`  
+축 변경 시 Step 4와 Step 5 모두 동일한 `--seg-axis` 인수를 사용해야 함.
 
 ---
 
-## 실행 명령어
+## 1. 데이터 변환 — `1_convert/convert_unified.py`
 
-> 모든 명령은 프로젝트 루트(`LFP_SOH_prediction/`)에서 실행.
-
----
-
-### Step 1 — 데이터 변환 (`1_convert/convert_unified.py`)
-
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--dataset` | `all` | 변환할 데이터셋: `mit` / `hust` / `all` |
-| `--workers` | `3` | 병렬 프로세스 수. CPU 코어 수 이하로 설정 권장 |
-| `--cell` | (없음) | HUST 단일 셀만 변환 (예: `1-1`). MIT는 항상 전체 변환 |
-| `--output-root` | `_1_data_unified/` | 출력 디렉토리 (변경 불필요) |
-| `--no-cache` | `False` | `_0_data_raw/` 캐시 무시 — 원본 MAT/PKL부터 재파싱 |
+| 항목 | 내용 |
+|---|---|
+| 입력 | MIT: `.mat` (HDF5, MATLAB v7.3) / HUST: `.pkl` |
+| 출력 | `_0_data_raw/` (원본 복사) + `_1_data_unified/{MIT,HUST}/*.pkl` |
+| 형식 | wide DataFrame: 한 행 = 한 사이클. 컬럼: `cycle`, `capacity_Ah`, 원시 V/I/t 시계열 |
+| 주요 로직 | MIT HDF5 그룹 구조 파싱 (`b1cXX`, `b2cXX`, `b3cXX`), HUST 피클 직접 로드 |
 
 ```powershell
 # 권장 — MIT + HUST 전체 변환 (_0_data_raw/ 캐시 있으면 자동 사용)
@@ -204,549 +59,1408 @@ python 1_convert/convert_unified.py --dataset all --no-cache
 python 1_convert/convert_unified.py --dataset mit
 python 1_convert/convert_unified.py --dataset hust
 
-# 빠른 재변환 (CPU 많을 때)
-python 1_convert/convert_unified.py --dataset all --workers 8
-
 # HUST 단일 셀 테스트
 python 1_convert/convert_unified.py --dataset hust --cell 1-1
 ```
 
-출력:
-- `_0_data_raw/MIT/*.pkl` / `_0_data_raw/HUST/*.pkl` — 원본 파싱 결과 (필터 없음, 캐시로 재사용)
-- `_1_data_unified/MIT/*.pkl` / `_1_data_unified/HUST/*.pkl` — 필터 적용 결과 (셀당 .csv도 생성)
-
 ---
 
-### Step 2 — 이상 사이클·행 제거 (`2_preprocess/preprocess.py`)
+## 2. 전처리 — `2_preprocess/preprocess.py`
 
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--dataset` | `all` | 처리할 데이터셋: `mit` / `hust` / `all` |
-| `--window` | `11` | [필터5] Pass 1 Rolling Median 윈도우 크기 |
-| `--sigma` | `2.0` | [필터5] Pass 1 이상치 σ 임계값. 낮을수록 더 많이 제거 (Pass 2는 w=31, σ=2.0 고정) |
-| `--min-std` | `0.01` | [필터5] Rolling std 최솟값 플로어 (Ah). 이 이하로 내려가지 않도록 클리핑 |
-| `--vend-min` | `1.8` | [필터6] 방전 종지전압 하한 (V). HUST 2.88% 해당 |
-| `--shape-sigma` | `5.0` | [필터7] 형상 편차 MAD robust z 임계값. 낮을수록 더 많이 제거 |
-| `--shape-window` | `11` | [필터7] 기준 곡선 rolling median 윈도우 |
-| `--shape-grid` | `100` | [필터7] q_frac 보간 격자 점 수 |
-| `--dis-gap-s` | `600` | [필터4] 방전 단절 절대 기준 (초) |
-| `--dis-gap-factor` | `50` | [필터4] 방전 단절 배율 기준 (median × N) |
-| `--chg-gap-s` | `600` | [필터4] 충전 완전 중단 절대 기준 (초). CC 프로토콜 전환 갭(120~600s)은 hi_correlation에서 세그먼트 HI만 NaN |
-| `--chg-gap-factor` | `50` | [필터4] 충전 완전 중단 배율 기준 (median × N) |
-| `--workers` | `4` | 병렬 프로세스 수 |
+7단계 순차 필터 (사이클 레벨):
+
+| 단계 | 필터 |
+|---|---|
+| F1 | 빈 사이클 제거 (시계열 길이 0) |
+| F2 | 시간 단조성 검사 (역전 제거) |
+| F3 | Rest 구간 0전류 행 제거 |
+| F4 | 단절 사이클 제거 (방전 단절 → 사이클 전체 / 충전 단절 → 충전 행만) |
+| F5 | Rolling Median 2-pass 용량 이상치 제거 (w=11/31, σ=2.0) |
+| F6 | 종지전압 하한 검사 (vend_min=1.8 V) |
+| F7 | V-q_frac 형상 편차 필터 (MAD robust z > σ, KNOWN_SHAPE_ANOMALIES 수동 지정 포함) |
+
+출력: `_4_data_hi/clean/{MIT,HUST}/*.pkl` (V/I/t 시계열 보존)
 
 ```powershell
-# 권장 — 기본 파라미터 전체 실행
+# 권장 — MIT + HUST 전체 전처리 (병렬 4 프로세스)
 python 2_preprocess/preprocess.py
 
-# 병렬 처리 (CPU 많을 때)
-python 2_preprocess/preprocess.py --workers 8
-
-# HUST만 재처리
+# 데이터셋 개별 처리
+python 2_preprocess/preprocess.py --dataset mit
 python 2_preprocess/preprocess.py --dataset hust
 
-# Rolling Median 더 엄격하게
-python 2_preprocess/preprocess.py --sigma 2.0 --window 15
+# 이상치 필터 완화 (σ 높이기) — 데이터 보존 우선
+python 2_preprocess/preprocess.py --sigma 3.0 --shape-sigma 50.0
 
-# 종지전압 임계값 조정
-python 2_preprocess/preprocess.py --vend-min 1.9
+# 단절 기준 조정 — 짧은 갭 허용
+python 2_preprocess/preprocess.py --dis-gap-s 300 --chg-gap-s 300
 
-# 형상 필터 임계값 완화 (false positive 우려 시)
-python 2_preprocess/preprocess.py --shape-sigma 6.0
-
-# 형상 필터 강화 (더 많이 제거)
-python 2_preprocess/preprocess.py --shape-sigma 4.0
-
-# 시간 단절 기준 완화 (정상 갭 보존)
-python 2_preprocess/preprocess.py --dis-gap-s 1200 --dis-gap-factor 100
+# 프로세스 수 지정
+python 2_preprocess/preprocess.py --workers 2
 ```
-
-출력:
-- `_2_data_clean/MIT/*.pkl` / `_2_data_clean/HUST/*.pkl` — 전체 셀 저장
-- `_2_data_clean/MIT/*.csv` / `_2_data_clean/HUST/*.csv` — 제거 발생 셀만
-- `2_preprocess/outputs/cleaning_report.csv` — 셀별 제거 사이클 수 + 번호 리포트
-
-> **주의**: Step 1 재실행 후에는 반드시 Step 2도 재실행해야 필터가 적용됨.  
-> `_1_data_unified/` 원본은 변경되지 않음 — 후속 분석은 `_2_data_clean/` 사용.
-
-#### 2-B. 전처리 리포트 시각화 (`2_preprocess/plot_cleaning_report.py`)
-
-`cleaning_report.csv`를 읽어 필터별 제거 결과를 그래프로 출력하는 보조 스크립트.  
-`preprocess.py`와 별도로 실행 (PKL 재처리 없이 리포트만 재시각화 가능).
-
-```powershell
-python 2_preprocess/plot_cleaning_report.py
-```
-
-출력: `2_preprocess/outputs/<MMDD>/` 아래 필터별 PNG 파일
-- `F4A_dis_gap.png` — 방전 단절 사이클
-- `F4B_chg_stop.png` — 충전 완전 중단 행
-- `F4C_chg_seg.png` — 충전 CC 전환 갭 플래그
-- `F5_rolling.png` — Rolling Median 이상치 제거 전·후 용량 곡선
 
 ---
 
-### Step 3 — 무결성 검사 (`3_integrity/check_integrity.py`)
+## 3. 무결성 검사 — `3_integrity/check_integrity.py`
 
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--workers` | `4` | 병렬 프로세스 수. CPU 코어 수 이하로 설정 권장 |
+10개 항목 자동 검사 후 CSV 저장:
+
+| 수준 | criterion |
+|---|---|
+| 셀 | `missing_cols`, `invalid_phase`, `current_direction`, `capacity_increasing`, `high_nan`, `cycle_count_mismatch` |
+| 사이클 | `voltage_high` (>4.5V), `voltage_low` (<1.5V), `rest_dominant` (>80%), `time_nonmono` |
+
+출력: `3_integrity/outputs/integrity_report.csv` / `integrity_issues.csv`
 
 ```powershell
-# 기본 실행
+# 권장 — 병렬 4 프로세스 (기본값)
 python 3_integrity/check_integrity.py
 
-# 병렬 처리
-python 3_integrity/check_integrity.py --workers 8
+# 프로세스 수 지정
+python 3_integrity/check_integrity.py --workers 2
 ```
-
-검사 항목:
-
-필수 컬럼 기준: `cycle, time_s, voltage_V, current_A, capacity_Ah, phase`  
-(temperature_C는 _0_data_raw에만 저장; _1_data_unified 검사 대상 아님)
-
-| 수준 | criterion | 설명 |
-|------|-----------|------|
-| 셀 | `missing_cols` | 필수 컬럼 누락 |
-| 셀 | `invalid_phase` | charge/discharge/rest 외 phase 값 |
-| 셀 | `current_direction` | MIT 방전 전류 음수 / HUST 방전 전류 양수 |
-| 셀 | `capacity_increasing` | 용량 증가 추세 (병합 오류 의심) |
-| 셀 | `high_nan` | 컬럼 NaN 비율 50% 초과 |
-| 셀 | `cycle_count_mismatch` | meta.n_cycles ≠ 실제 사이클 수 |
-| 사이클 | `voltage_high` | v_max > 4.5V |
-| 사이클 | `voltage_low` | v_min < 1.5V |
-| 사이클 | `rest_dominant` | rest 행 비율 > 80% (비정상 프로토콜) |
-| 사이클 | `time_nonmono` | time_s 단조 증가 위반 |
-
-출력:
-- `3_integrity/outputs/integrity_report.csv` — 셀별 요약 통계
-- `3_integrity/outputs/integrity_issues.csv` — 셀·사이클별 이상 목록 (`severity`, `dataset`, `cell_id`, `cycle`, `criterion`, `detail`)
 
 ---
 
-### Step 4 — HI 추출 및 시각화
+## 4. HI 추출 — `4_hi_analysis/hi_correlation.py`
 
-#### 4-A. Spearman 상관 분석 (`4_hi_analysis/hi_correlation.py`)
+### 세그멘테이션 — `common/scenario/`
 
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--workers` | CPU 수 (최대 4) | HI 추출 병렬 워커 수 |
-| `--n-top` | `4` | 상관계수 플롯 하단 산점도에 표시할 상위 HI 개수 |
-| `--force` | `False` | 캐시(`hi_features.pkl`) 무시하고 HI 재추출 |
+Step 4의 세그먼트 분할 로직은 `common/scenario/` 패키지의 `Segmenter` ABC로 추상화되어 있다.  
+`--seg-axis` 인수로 축을 선택하며, `get_segmenter(name, cfg)` 팩토리로 인스턴스를 생성한다.
 
-```powershell
-# 권장 (첫 실행 — HI 추출 후 캐시 저장)
-python 4_hi_analysis/hi_correlation.py
+| 축 | 클래스 | 기본 시나리오 수 | 특징 |
+|---|---|---|---|
+| `qfrac` | `QFracSegmenter` | 6 | q_frac 3분할 × 방향. 현행 DIS_SEGS/CHG_SEGS 동작을 완전히 재현 |
+| `protocol` | `ProtocolSegmenter` | 가변 | CC 전환점 감지, 프로토콜 단계별 분할 |
+| `vwindow` | `VWindowSegmenter` | **2·n+1** | **LFP 고정 전압 경계** + 충전 CC/CV 분리. `from_lfp()` 기본 사용; `fit()` deprecated |
+| `rcs` | `RCSSegmenter` | 가변 | 랜덤 부분 관측 샘플러 (Deng 2022). **충전 CC 구간만** 샘플링, CV 분리 적용 |
+| `cluster` | `ClusterSegmenter` | 가변 | 사전 학습 클러스터 ID 기반 |
 
-# 산점도 상위 HI를 더 많이 보고 싶을 때
-python 4_hi_analysis/hi_correlation.py --n-top 8
-
-# convert 재실행 후 캐시 갱신
-python 4_hi_analysis/hi_correlation.py --force
+**`ScenarioSpec`** — Step 4 출력 / Step 5 입력 계약 아티팩트 (`scenario_spec.json`):
+```python
+@dataclass
+class ScenarioSpec:
+    axis: str               # "qfrac" | "protocol" | ...
+    n_scenarios: int        # Stage B gate 개수
+    scenario_names: list    # 길이 = n_scenarios
+    n_classes: int          # Stage A 분류 클래스 수
+    class_names: list       # 길이 = n_classes
+    routing: list[list[int]]# routing[dir_idx][latent_class] = scenario_id
+    classifier_default: str # "mlp_probe" | "rule" | "centroid" | "none"
 ```
 
-출력:
-- `4_hi_analysis/hi_plot/<MMDD>/hi_correlation.png` — HI×용량 풀링 Spearman ρ 히트맵 + 산점도
-- `4_hi_analysis/hi_features.pkl` — 전체 HI 추출 결과 캐시 (4-B·4-C와 공유)
-- `_4_data_hi/MIT/{cell_id}.pkl` / `_4_data_hi/HUST/{cell_id}.pkl` — 셀별 HI 특성 (첫 실행 또는 `--force` 시)
-
-#### 4-B. 세그먼트 시각화 (`4_hi_analysis/hi_segment_viz.py`)
-
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--workers` | `4` | HI 추출 병렬 워커 수 (캐시 없을 때만 사용) |
-| `--n-cycles` | `4` | 세그먼트 분할 확인 플롯에서 보여줄 대표 사이클 수 |
-| `--force` | `False` | 캐시 무시하고 HI 재추출 |
-
-```powershell
-# 권장 (4-A 실행 후 캐시에서 즉시 로드)
-python 4_hi_analysis/hi_segment_viz.py
-
-# 대표 사이클 더 많이 표시
-python 4_hi_analysis/hi_segment_viz.py --n-cycles 6
+qfrac 기본 라우팅:
+```
+routing = [[0, 1, 2], [5, 4, 3]]
+  dir_idx=0(충전): Low→chg_lo(0), Mid→chg_mid(1), Hi→chg_hi(2)
+  dir_idx=1(방전): Low→dis_lo(5), Mid→dis_mid(4), Hi→dis_hi(3)
 ```
 
-출력:
-- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_cuts.png` — V-q_frac 곡선에 세그먼트 경계 표시
-- `4_hi_analysis/hi_plot/<MMDD>/hi_trend.png` — Global HI 15종 용량 열화 추이
-- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_stat.png` — 6구간 × 15 통계 HI 열화 추이 (카테고리 A)
-- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_diff.png` — 6구간 × 15 미분 HI 열화 추이 (카테고리 B)
-- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_lfp.png` — 6구간 × 15 LFP 특징 HI 열화 추이 (카테고리 C)
-- `4_hi_analysis/hi_plot/<MMDD>/hi_segment_trend_morph.png` — 6구간 × 6 형태학적 거리 HI 열화 추이 (카테고리 D, y=0이 BOL 기준)
-
-#### 4-C. 세그먼트별 상관분석 (`4_hi_analysis/seg_corr_analysis.py`)
-
-6개 SoC 세그먼트 시나리오별로 within-cell Spearman 상관계수를 계산·시각화.  
-`hi_correlation.py`의 풀링 방식과 달리 셀 내부 상관계수를 평균내므로 SOH 추적 능력을 더 정확히 반영한다 (→ `docs/correlation_comparison.md` §6 참조).
-
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--pkl` | `hi_features.pkl` | HI 캐시 경로 (날짜 붙은 최신 파일 자동 탐색) |
-| `--dataset` | `all` | 분석 대상: `mit` / `hust` / `all` |
-| `--min-cycles` | `5` | 셀당 최소 유효 사이클 수 |
-| `--workers` | `8` | 병렬 스레드 수 |
-| `--top-n` | `5` | top_cross 플롯 상위 HI 개수 |
-
-```powershell
-# 권장 (4-A 실행 후 캐시에서 로드)
-python 4_hi_analysis/seg_corr_analysis.py
-
-# MIT만 분석
-python 4_hi_analysis/seg_corr_analysis.py --dataset mit
-
-# Top-7로 확장
-python 4_hi_analysis/seg_corr_analysis.py --top-n 7
+**`SegmentRecord`** — Segmenter → HI 추출기 사이 중간 표현:
+```python
+@dataclass
+class SegmentRecord:
+    scenario_id: int     # Stage B gate 라우팅 타깃
+    latent_class: int    # Stage A 분류 타깃
+    direction: int       # +1=충전 / -1=방전
+    v, i, dt, q: np.ndarray  # 슬라이스된 배열
+    meta: dict           # {"seg_name": "dis_hi", "q_frac_lo": 0.0, ...}
 ```
-
-출력 (`4_hi_analysis/seg_corr/<MMDD>/`):
-- `corr_rank_stat_<ds>.png`   — 카테고리 A: 6구간 × 15 통계 HI |ρ| 랭킹
-- `corr_rank_diff_<ds>.png`   — 카테고리 B: 6구간 × 15 미분 HI
-- `corr_rank_lfp_<ds>.png`    — 카테고리 C: 6구간 × 15 LFP HI
-- `corr_rank_morph_<ds>.png`  — 카테고리 D: 6구간 × 6 형태학적 거리 HI
-- `corr_matrix_stat_<ds>.png` — 카테고리 A: 6구간 × 15×15 feature 상관행렬
-- `corr_matrix_diff_<ds>.png` — 카테고리 B
-- `corr_matrix_lfp_<ds>.png`  — 카테고리 C
-- `corr_matrix_morph_<ds>.png`— 카테고리 D
-- `top_cross_<ds>.png`        — 4카테고리 × 6구간 Top-5 HI 비교 (전체 요약, 에러바=셀간 std)
-- `feature_rank_battery_<ds>.png` — 전체 카테고리 통합 feature 랭킹 (Σ|ρ| 기준, 배터리별)
-- `feature_rank_seg.png`          — 6구간별 feature 랭킹 (모든 배터리 통합, 공통 y축 순서)
-
-#### 4-D. HI 추출 내부 처리 흐름 — 검증
-
-`hi_correlation.py` 의 `_extract_one_cell` 이 한 사이클을 처리하는 단계별 흐름.
 
 ---
 
-**Step A — phase 분리 (충전 / 방전)**
+### 4-0. VWindow 세그멘테이션 — `common/scenario/vwindow.py`
+
+#### 설계 원칙
+
+| 구간 | 방법 | 근거 |
+|---|---|---|
+| **방전 / 충전 CC** | **LFP 고정 전압 경계** | 플래토 전이 전압 기준 고정 → 충전 프로토콜(단일/다단계 CC)과 무관. 노화 사이클에서 동일 전압 구간 내 Ah 감소 자체가 SOH 신호 (Dubarry et al. 2012, Hu et al. 2020) |
+| **충전 CV** | 독립 시나리오 `chg_cv` | CC/CV는 thermodynamic vs kinetic 체제로 물리가 다름. CV 지속시간·Q_CV/Q_total은 노화 지표 (Ma et al. 2018, Plett 2015) |
+
+> **이전 방식(equal-Ah 피팅) 폐기 이유**: BOL 첫 사이클 V-Q 곡선에서 분위수 보간으로 경계를 계산하는 방식은 MIT 6C→1C→CV 같은 다단계 CC 프로토콜에서 V-Q 비단조성이 발생해 충전 경계가 프로토콜 구조에 강하게 의존하는 문제가 있었다. `fit()` 메서드는 단일-CC 데이터셋 호환성을 위해 유지되지만 `UserWarning`을 발생시킨다.
+
+#### LFP 기본 전압 경계 (n_windows=3)
+
+| 구간 | 윈도우 | 범위 [V] | 전기화학적 의미 |
+|---|---|---|---|
+| **충전 CC** | chg_win0 | 2.80 – 3.38 | 사전-플래토 급경사. 다단계 CC 전류 전환 포함 |
+| | chg_win1 | 3.38 – 3.47 | 핵심 플래토. 총 용량 ~70% 집중 |
+| | chg_win2 | 3.47 – 3.60 | 플래토 탈출 + CV 진입 직전 |
+| **방전** | dis_win0 | 2.50 – 3.10 | 플래토 종료 + 급강하. 용량 페이드 끝단 |
+| | dis_win1 | 3.10 – 3.35 | 하부 플래토 중심. 2상 공존 영역 |
+| | dis_win2 | 3.35 – 3.65 | 상부 플래토 + 숄더. 노화 초기 특징 |
+
+#### 시나리오 구조 (n_windows=3 기준, 총 7개)
 
 ```
-MIT, HUST 모두 pkl에 phase 컬럼 이미 존재
-→ _add_phase() 추론 호출 없음
-
-dis  = grp[grp["phase"] == "discharge"]   ← I 음수 행만
-chg  = grp[grp["phase"] == "charge"]      ← I 양수 행만
+인덱스  이름       방향   물리 의미
+─────────────────────────────────────────
+0       chg_win0   +1     충전 CC 저전압 구간   [2.80–3.38 V]
+1       chg_win1   +1     충전 CC 중전압 구간   [3.38–3.47 V]
+2       chg_win2   +1     충전 CC 고전압 구간   [3.47–3.60 V]
+3       chg_cv     +1     충전 CV 구간 (정전압 테이퍼)
+4       dis_win0   -1     방전 저전압 구간      [2.50–3.10 V]
+5       dis_win1   -1     방전 중전압 구간      [3.10–3.35 V]
+6       dis_win2   -1     방전 고전압 구간      [3.35–3.65 V]
+─────────────────────────────────────────
+n_scenarios = 2·n_windows + 1
+n_classes   = n_windows + 1   (CC 클래스 0..n-1, CV 클래스 n)
 ```
 
-`_add_phase()` 가 호출될 경우(phase 컬럼 없을 때): `|I| > 0.01 A` 기준으로 charge/discharge 분류.
-
----
-
-**Step B — q_cum 계산 (모드별 독립 적산)**
-
-```
-방전: i_mag = |dis["current_A"]|
-      q_d   = cumsum(i_mag × dt) / 3600   →  q_local = q_d[-1]
-
-충전: ic    = |chg["current_A"]|
-      q_c   = cumsum(ic × dtc) / 3600     →  q_tc    = q_c[-1]
-```
-
-방전 q_cum 과 충전 q_cum 은 **서로 독립** — q_frac 정규화가 교차하지 않음.
-
----
-
-**Step C — q_frac 구간 마스크 → 세그먼트 라벨 부여**
-
-```
-방전 세그먼트 (DIS_SEGS):
-  q_frac [0.0, 0.4)  →  dis_hi   (SoC 60–100%)  ← 방전 초반, 고SoC
-  q_frac [0.4, 0.7)  →  dis_mid  (SoC 30–60%)
-  q_frac [0.7, 1.0)  →  dis_lo   (SoC 0–30%)    ← 방전 말기, 저SoC
-
-충전 세그먼트 (CHG_SEGS):
-  q_frac [0.0, 0.4)  →  chg_lo   (SoC 0–40%)   ← 충전 초반, 저SoC
-  q_frac [0.4, 0.7)  →  chg_mid  (SoC 40–70%)
-  q_frac [0.7, 1.0)  →  chg_hi   (SoC 70–100%) ← 충전 말기, 고SoC
-```
-
-경계 조건은 반열림 구간 `[lo, hi)` — 구간별 경계점 1개가 누락되나 무시 가능 수준.
-
-HUST 1-1 첫 사이클 실측 확인 (q_local=1.179 Ah, q_tc=1.183 Ah):
-
-| 세그먼트 | 절대 Q 경계 | V 범위 | I_mean |
-|----------|------------|--------|--------|
-| dis_hi  | 0–0.472 Ah | 3.11–3.40 V | 3.81 A (5C→1C 전환 포함) |
-| dis_mid | 0.472–0.825 Ah | 3.18–3.24 V | 1.10 A (1C) |
-| dis_lo  | 0.825–1.179 Ah | 2.05–3.18 V | 1.99 A (2C) |
-| chg_lo  | 0–0.473 Ah | 2.77–3.50 V | 5.50 A (fast CC) |
-| chg_mid | 0.473–0.828 Ah | 3.50–3.55 V | 5.50 A (fast CC) |
-| chg_hi  | 0.828–1.183 Ah | 3.38–3.60 V | 0.94 A (1C CC + CV) |
-
----
-
-**Step D — `_seg_stat` / `_seg_diff` / `_seg_lfp` 호출 → HI 컬럼명 규칙**
+#### CC→CV 전환 감지 (`_detect_cv_start`)
 
 ```python
-row.update(_seg_stat(vs, ims, dts, qcs, seg="dis_hi"))
-# → {"stat_v_mean_dis_hi": 3.149, "stat_i_q_slope_dis_hi": ..., ...}
+# V ≥ cv_v_thresh(3.60 V) AND I < cv_cc_frac(0.80) × I_max 를 동시에 만족하는 첫 인덱스
+cv_start = _detect_cv_start(chg_v, chg_i, cv_v_thresh=3.60, cv_cc_frac=0.80)
+# CC 구간: [:cv_start] → 고정 전압 윈도우
+# CV 구간: [cv_start:] → chg_cv 시나리오 (min_pts 미만이면 건너뜀)
 ```
 
-- 컬럼명: `{카테고리}_{HI이름}_{세그먼트}` (예: `stat_v_mean_chg_hi`, `diff_dvdq_mean_dis_mid`)
-- **`ims = |current_A|` 사용** → `stat_i_mean` 등 I 관련 HI는 항상 양수(절댓값). 충전/방전 구분은 컬럼명 suffix 또는 scen 부호로만 판단.
+#### 고정 경계 주입 — `hi_correlation.py`
 
----
+`load_or_extract()` 내부에서 `axis == "vwindow"` 이고 `dis_edges`가 `axis_cfg`에 없을 때
+`VWindowSegmenter.from_lfp()`로 LFP 기본 경계를 `axis_cfg`에 주입한다.
 
-**Step E — `_to_seg_df` → long-format 변환, scen / segment_id 부여**
-
-```
-suffix 제거: "stat_v_mean_dis_hi" → "stat_v_mean"
-scen / segment_id 부여:
-
-  seg 이름   scen   segment_id
-  chg_lo    +1      0
-  chg_mid   +2      1
-  chg_hi    +3      2
-  dis_hi    -3      3
-  dis_mid   -2      4
-  dis_lo    -1      5
+```python
+_tmp = VWindowSegmenter.from_lfp(n_windows=n_win)
+axis_cfg.setdefault("dis_edges", _tmp._dis_edges)   # [2.50, 3.10, 3.35, 3.65]
+axis_cfg.setdefault("chg_edges", _tmp._chg_edges)   # [2.80, 3.38, 3.47, 3.60]
+# → VWindowSegmenter(**axis_cfg) 로 인스턴스 생성
+# → ScenarioSpec.save() → scenario_spec.json 에 edges 포함 저장
 ```
 
-scen 부호: **양수 = 충전, 음수 = 방전**.
+#### VWindowSegmenter API
 
----
+```python
+# 권장: LFP 고정 경계 (프로토콜 무관)
+seg = VWindowSegmenter.from_lfp(n_windows=3, cv_v_thresh=3.60, cv_cc_frac=0.80)
 
-**주의사항**
+# 커스텀 경계 직접 지정
+seg = VWindowSegmenter(dis_edges=[2.5, 3.1, 3.35, 3.65],
+                       chg_edges=[2.8, 3.38, 3.47, 3.60])
 
-| 항목 | 내용 |
-|------|------|
-| `_4_data_hi/seg/*.pkl` 의 `capacity_Ah` | `stat_q_abs_{seg}` (구간 누적 Q) — 전체 방전 용량이 아님. SOH x축으로 직접 사용 불가 |
-| 시각화(`hi_segment_viz.py`) x축 capacity_Ah | flat HI DataFrame 의 전체 방전 용량 사용 → 올바름 |
-| MIT `capacity_Ah` 열 | 원본 .mat 에서 변환된 값으로 실측 방전 적산량과 초기 사이클에서 최대 ~10% 차이 발생 가능 |
-| `hi_segment_trend_*.png` 행 순서 | `ALL_SEGS = DIS_SEGS + CHG_SEGS` 순서(방전 먼저)이나 `SEG_ROW_LABEL` 이 충전 먼저로 정의되어 있어 레이블·배경색 불일치 발생 (수정 완료: `hi_segment_viz.py` L67–75) |
-
----
-
-### 분석 도구 — 셀 전체 사이클 시각화 (`4_hi_analysis/plot_cell_cycles.py`)
-
-특정 셀의 전체 사이클을 한 번에 확인하는 스크립트. 이상 셀 조사나 열화 패턴 검토 시 사용.
-
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--dataset` | `mit` | 데이터셋: `mit` / `hust` |
-| `--cell` | `b1c0` | 셀 ID |
-| `--phase` | `discharge` | 오버레이할 phase: `discharge` / `charge` |
-
-```powershell
-# 기본 (MIT b1c0 방전)
-python 4_hi_analysis/plot_cell_cycles.py --cell b1c0
-
-# 이상 셀 확인
-python 4_hi_analysis/plot_cell_cycles.py --cell b1c18
-
-# 충전 곡선으로 보기
-python 4_hi_analysis/plot_cell_cycles.py --cell b1c0 --phase charge
-
-# HUST 셀
-python 4_hi_analysis/plot_cell_cycles.py --dataset hust --cell 1-1
-```
-
-출력: `4_hi_analysis/cell/cell_cycles_{dataset}_{cell}.png`
-
-2개 패널:
-- **위**: 사이클별 방전 용량 (열화 곡선), 색상으로 사이클 진행 표시
-- **아래**: 전체 사이클 V-q_frac 오버레이, 초록(초기) → 빨강(말기) 컬러맵
-
----
-
-### 분석 도구 — 단일 사이클 세그먼트 확인 (`4_hi_analysis/plot_cycle_segments.py`)
-
-특정 셀·사이클 1개를 골라 방전/충전 세그먼트가 V-q_frac 축에서 어떻게 잘리는지 확인하는 **임시 디버그용** 스크립트.  
-`hi_segment_viz.py`가 전체 셀 평균 경향을 보여준다면, 이 스크립트는 **개별 사이클 한 장**을 정밀하게 검토할 때 사용.
-
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--dataset` | `mit` | 데이터셋: `mit` / `hust` |
-| `--cell` | `b1c0` | 셀 ID |
-| `--cycle` | `2` | 사이클 번호 |
-
-```powershell
-# 기본 (MIT b1c0, cycle 2)
-python 4_hi_analysis/plot_cycle_segments.py
-
-# 다른 셀·사이클 지정
-python 4_hi_analysis/plot_cycle_segments.py --cell b1c0 --cycle 50
-python 4_hi_analysis/plot_cycle_segments.py --dataset hust --cell 1-1 --cycle 5
-```
-
-출력: `4_hi_analysis/segment/segment_{dataset}_{cell}_cycle{N}.png`  
-좌측 패널(방전) / 우측 패널(충전) 2칸. 각 패널에 q_frac 0.4 / 0.7 경계선과 SoC 구간 색상 밴드 표시.
-
----
-
-### 전체 파이프라인 한 번에 실행
-
-`run_pipeline.py`를 사용하면 번호 순서대로 자동 실행.  
-스텝 실패 시 계속 진행 여부를 물어봄.
-
-```powershell
-# 전체 실행 (Step 1부터)
-python run_pipeline.py
-
-# 특정 스텝부터 재실행
-python run_pipeline.py 2         # Step 2(이상 사이클 제거)부터
-python run_pipeline.py 3         # Step 3(무결성 검사)부터
-
-# 병렬 워커 수 지정
-python run_pipeline.py --workers 8
-python run_pipeline.py 2 --workers 8
-```
-
-각 스텝을 직접 실행하려면:
-
-```powershell
-python 1_convert/convert_unified.py --dataset all --workers 3
-python 2_preprocess/preprocess.py --workers 4
-python 2_preprocess/plot_cleaning_report.py        # 전처리 결과 시각화 (선택)
-python 3_integrity/check_integrity.py --workers 4
-python 4_hi_analysis/hi_correlation.py             # HI 추출 + hi_features.pkl 캐시 생성
-python 4_hi_analysis/hi_segment_viz.py             # 캐시에서 로드
-python 4_hi_analysis/seg_corr_analysis.py          # 캐시에서 로드
-python 5_model/train_scr.py                        # Step 5: SCR 모델 학습 (LFP_SOH_ESTIMATION env)
+# 레거시: BOL 데이터 기반 equal-Ah 피팅 (단일-CC 전용, UserWarning 발생)
+seg = VWindowSegmenter(n_windows=3)
+seg.fit(first_cycle_data)   # UserWarning: 다단계 CC에서 V-Q 비단조성 위험
 ```
 
 ---
 
-### Step 5 — SCR 모델 학습 (`5_model/train_scr.py`)
+### 4-1a. RCS 세그멘테이션 — `common/scenario/rcs.py`
 
-> **실행 환경**: `LFP_SOH_ESTIMATION` conda 환경 (PyTorch 필요)
+Deng et al. (2022, *Nature Communications*) 방식의 랜덤 부분 관측 샘플러.
 
-**CLI 파라미터**
-
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `--config` | `5_model/config/scr.yaml` | YAML 설정 파일 경로 |
-| `--probe-m INT` | config 값 | probe HI 수 강제 (학습 후 top-k 절삭) |
-| `--scen-k INT` | config 값 | 시나리오별 HI 수 강제 |
-| `--device` | `auto` | `auto` / `cpu` / `cuda:0` |
-
-**주요 config 파라미터** (`5_model/config/scr.yaml`)
-
-| 항목 | 기본값 | 설명 |
-|------|--------|------|
-| `data.is_real_input` | `false` | false=사전계산 HI / true=raw V·I·t |
-| `classifier.probe_m_fixed` | `false` | false=L0 자동 / true=probe_m_count 강제 |
-| `regression.scen_k_fixed` | `false` | false=L0 자동 / true=scen_k_count 강제 |
-| `loss.lambda_scen` | `0.5` | 시나리오 분류 CE 손실 가중치 |
-| `loss.lambda_l0` | `0.01` | L0 비용 가중치 (HI 수 최소화) |
-| `training.early_stop_patience` | `30` | 조기 종료 patience |
-
-```powershell
-# 권장 — L0 자동 HI 선택
-conda activate LFP_SOH_ESTIMATION
-python 5_model/train_scr.py
-
-# probe HI 5개, 시나리오별 10개로 고정
-python 5_model/train_scr.py --probe-m 5 --scen-k 10
-
-# GPU 지정
-python 5_model/train_scr.py --device cuda:0
-
-# 캐시 초기화 후 재학습
-# (Windows PowerShell)
-Remove-Item 5_model/scenario_classification_HIs.json -ErrorAction SilentlyContinue
-Remove-Item 5_model/scenario_regression_HIs.json -ErrorAction SilentlyContinue
-python 5_model/train_scr.py
+**핵심 파라미터:**
+```python
+RCSSegmenter(
+    n_samples=6,      # 사이클당 랜덤 윈도우 수
+    window=0.3,       # 윈도우 폭 (q_frac 기준, 0.3 = 전체 용량의 30%)
+    assign="position_bin",  # "position_bin": center q_frac → lo/mid/hi 분류
+                            # "none": 방향만 구분 (Deng 원안)
+    cv_v_thresh=3.60, # CC→CV 전환 전압 임계값 [V]
+    cv_cc_frac=0.80,  # CC→CV: I < cv_cc_frac × I_max
+)
 ```
 
-출력:
-- `_5_data_model_scr/best_scr.pt` — val RMSE 최솟값 체크포인트
-- `_5_data_model_scr/scr_final.pt` — 최종 체크포인트 (model + normalizer 통합)
-- `5_model/scenario_classification_HIs.json` — 선택된 probe HI 캐시
-- `5_model/scenario_regression_HIs.json` — 시나리오별 선택 HI 캐시
+**CC/CV 분리 (충전):**  
+`iter_segments()` 내부에서 `_detect_cv_start()`(vwindow 공유 함수)로 CV 시작점을 감지하고 **CC 구간만** `_sample_segments()`에 전달한다.  
+근거: CC에서 q_frac ≈ t_frac ≈ SOC_frac (정전류)이므로 0.3 q_frac 윈도우가 균일한 물리적 의미를 가짐. CV 포함 시 동일 q_frac 윈도우의 시간 길이가 10배 이상 달라져 HI 분포 오염.
 
-#### 5-B. 평가 (`5_model/test_scr.py`)
+**윈도우 중심 분포 제약:**  
+`start_qf ∈ [0.0, 0.7]` → `center_qf ∈ [0.15, 0.85]`.  
+q_frac [0.00, 0.15] 및 [0.85, 1.00] 구간은 윈도우 중심이 될 수 없음 (구조적 특성).
+
+---
+
+### 4-2. 세그멘테이션 축별 분할 비교
+
+> **공통 기준 사이클**: LFP 방전 1C (3.65 V→2.50 V) / 충전 CC 1C (2.80 V→3.60 V)  
+> MIT 충전은 6C→1C→CV 다단 프로토콜, HUST는 1C 단일 CC→CV.
+
+#### LFP 기준 사이클 형상
+
+```
+[방전] V vs q_frac (1C)              [충전 CC] V vs q_frac
+V(V)                                 V(V)
+3.65 ┤╮ ← 고전압 숄더                 3.60 ┤           ╭─ (CV 시작)
+3.40 ┤╰──╮                           3.47 ┤      ╭────╯
+     │   ╰──────────────────╮  플래토 3.38 ┤─────╯  ← 플래토 (~3.38–3.47V)
+3.10 ┤                      ╰──╮     3.00 ┤╭╯  ← MIT 6C→1C 전환 dip
+2.50 ┤                          ╰─    2.80 ┤╯
+     └────────────────────────────         └───────────────────────────
+     0%      15%           75% 100%        0%   25%          80%  100%
+     │← 숄더 │← 플래토(~60%) →│← 말단 │   │CC1 6C│←── CC2 1C ──│← CV │
+```
+
+---
+
+#### 축 1. qfrac — 누적 용량(Ah) 등분할
+
+경계: q_frac = 0 / **0.4** / **0.7** / 1.0
+
+```
+[방전] q_frac 기준
+ 0%         40%        70%      100%
+ ├──────────┼──────────┼─────────┤
+    dis_hi     dis_mid    dis_lo
+  (≈3.65→    (≈3.15→   (≈3.15→
+   3.20V)     3.10V)    2.50V)
+
+[충전] q_frac 기준
+ 0%         40%        70%      100%
+ ├──────────┼──────────┼─────────┤
+    chg_lo     chg_mid    chg_hi
+  (≈2.80→    (≈3.35→   (≈3.45V+
+   3.35V)     3.45V)    CV 포함)
+```
+
+**특징 / 주의사항:**
+- 어떤 프로토콜·화학계에도 적용 가능한 가장 범용적인 분할
+- 정전류(CC) 환경에서 q_frac ≈ t_frac → 세그먼트 간 행 수 균형 보장
+- LFP 플래토(전체 용량의 ~70%)가 특정 세그먼트 하나에 집중 → 전기화학적으로 이질적인 구간이 묶임
+- 충전 chg_hi에 CV 구간이 섞여 들어갈 수 있음 (CV 미분리)
+
+---
+
+#### 축 2. protocol — 전류 단계(CC→CC→CV) 경계
+
+경계: |ΔI| > 0.5C 급변점 자동 감지, max_steps=3 캡
+
+```
+[MIT 충전: 6C → 1C → CV]
+│←CC1 6C (~25% Ah)→│←──CC2 1C (~55% Ah)──→│←CV (~20%)→│
+      chg_step0            chg_step1            chg_step2
+     (≈2.80→3.40V,        (≈3.00→3.60V,       (V≈3.60V,
+      고전류 고편차)        1C 플래토 통과)       I 감쇠)
+
+[HUST 충전: 1C → CV]
+│←────────── CC 1C (~85% Ah) ──────────────→│←CV (~15%)→│
+                  chg_step0                    chg_step1
+
+[방전: 단일 CC]
+│←─────────────── CC 1C or 2C ─────────────────────────→│
+                          dis_step0
+```
+
+**특징 / 주의사항:**
+- 프로토콜 구조를 직접 반영 → 동일 step 내 전류 균일 → HI 해석 명확
+- 크로스 데이터셋 위험: MIT chg_step1(1C CC2) ≠ HUST chg_step0(1C CC) — 시나리오 ID가 같아도 물리 구간이 다를 수 있음
+- HUST는 step이 2개뿐이어서 chg_step2가 항상 비어 NaN → 모델이 미사용 gate를 학습해야 함
+- n_scenarios = 6 (max_steps=3 × 방향 2) → qfrac과 동일 크기로 공정 비교 가능
+
+---
+
+#### 축 3. vwindow — LFP 고정 전압 경계
+
+경계: 방전 [2.50 / 3.10 / **3.35** / 3.65 V], 충전 CC [2.80 / 3.38 / **3.47** / 3.60 V]
+
+```
+[방전] V 기준 분할
+ V(V)
+ 3.65 ┤─────────────── dis_win2 ──────────────── (숄더 + 플래토 상부)
+ 3.35 ┤
+      ├─────────────── dis_win1 ──────────────── (플래토 중심, ~50% Ah)
+ 3.10 ┤
+      ├─────────────── dis_win0 ──────────────── (플래토 말단 + 급강하)
+ 2.50 ┤
+      └──── (Ah 분포 불균일: win1 ≈ 50-60%, win0/win2 ≈ 20-25% 각각)
+
+[충전 CC] V 기준 분할                         [충전 CV]
+ 3.60 ┤──────── chg_win2 ────────              chg_cv (별도 시나리오)
+ 3.47 ┤
+      ├──────── chg_win1 ────────  ← 핵심 플래토 (~70% Ah 집중)
+ 3.38 ┤
+      ├──────── chg_win0 ────────  ← MIT CC1(6C) 포함
+ 2.80 ┤
+```
+
+**특징 / 주의사항:**
+- 동일 V 구간 = 동일 화학 상태 → 노화 시 해당 구간의 Ah 감소 = SOH 직접 신호 (Dubarry 2012)
+- 충전 프로토콜 독립: CC1(6C)은 chg_win0에 편입되어 win1/win2를 오염하지 않음
+- Ah 불균형: chg_win1에 전체 Ah의 ~70%가 집중 → win1 세그먼트가 압도적으로 많은 행 보유
+- CC/CV 분리로 chg_cv가 독립 추출됨 (vwindow만의 특성)
+- 크로스 데이터셋 이식성 최고: 전압값은 LFP 화학계로 고정 → MIT·HUST 동일 물리 구간
+
+---
+
+#### 축 4. rcs — 랜덤 부분 관측 샘플링 (CC 전용)
+
+파라미터: n_samples=6, window=0.3, CC 구간만 (CV 제거)
+
+```
+[방전 또는 충전 CC q_frac 0~100%]  ← CV는 제거됨
+ 0%                                        100%
+ │                                               │
+ │  Sample 1:  [━━━ 0.3 ━━━]                   │  → center=0.25 → lo
+ │  Sample 2:        [━━━ 0.3 ━━━]              │  → center=0.45 → mid
+ │  Sample 3:               [━━━ 0.3 ━━━]       │  → center=0.65 → mid
+ │  Sample 4:  [━━━ 0.3 ━━━]                   │  → center=0.22 → lo
+ │  Sample 5:                    [━━━ 0.3 ━━━]  │  → center=0.79 → hi
+ │  Sample 6:     [━━━ 0.3 ━━━]                │  → center=0.35 → lo
+ │                                    ↑          │
+ │                           max start=0.70      │
+ │                                               │
+  [0.00~0.15]: 윈도우 중심 불가    [0.85~1.00]: 윈도우 중심 불가
+```
+
+**특징 / 주의사항:**
+- 1 사이클 → 6개 독립 훈련 샘플 (데이터 증강 효과, 타 축 대비 6배)
+- 부분 관측(partial charge) 시뮬레이션 → EV 실제 환경 모델링 (Deng et al. 2022)
+- CC에서 q_frac ≈ SOC_frac (정전류) → 윈도우 위치가 전기화학적 의미 가짐
+- 양끝 q_frac [0.00-0.15], [0.85-1.00] 구간은 윈도우 중심 불가 → 해당 구간 HI 추정에 불리
+- 동일 사이클 내 샘플 간 데이터 중복 가능 → 독립성 가정 위반 (미니배치 구성 시 주의)
+- seed 고정 필수 (seed 다르면 경계 위치 달라짐 → 재현성 깨짐)
+
+---
+
+#### 축 5. cluster — 데이터 기반 K-means 군집
+
+파라미터: n_fine=10 (10% 등분), k_range=(2,8), Gap statistic + 1-SE rule
+
+```
+[방전 q_frac 10분할 → 각 bin에서 (dQ_mean, dQ_std, dQ_skew) 추출 → K-means (예시 K=4)]
+
+ q_frac: 0%  10% 20% 30% 40% 50% 60% 70% 80% 90% 100%
+         [S0][S1][S2][S3][S4][S5][S6][S7][S8][S9]
+ cluster: c0  c1  c2  c2  c3  c3  c3  c2  c1  c0
+          ↑숄더           ↑플래토 중심            ↑말단
+  → 숄더·말단(빠른 V변화)이 같은 군집(c0), 플래토(완만한 V변화)가 c3
+
+ 시나리오 배정 (예시):
+  q_frac bin S0(c0) → scenario dis_c0
+  q_frac bin S4(c3) → scenario dis_c3
+  (10개 bin이 K개 시나리오로 병합됨)
+```
+
+**특징 / 주의사항:**
+- 인간이 정의한 경계 없이 데이터 패턴으로 전기화학 유사 구간을 자동 군집화 (Ke 2026)
+- K는 Gap statistic으로 자동 결정 → 과적합 방지, 단 실험마다 K가 달라질 수 있음
+- `fit()`은 반드시 train 셀만 사용 (test 정보 누출 방지)
+- 크로스 데이터셋 약점: train(MIT) 클러스터 패턴이 test(HUST)에 일반화되는지 별도 검증 필요
+- n_scenarios = 2K → K 결정 전까지 모델 아키텍처 미확정 (동적 spec)
+
+---
+
+#### 비교 요약
+
+| 축 | 경계 기준 | 시나리오 수 | 데이터 증강 | 크로스-DS 이식성 | Ah 균형 | 주요 약점 |
+|---|---|---|---|---|---|---|
+| qfrac | q_frac 등분 | 6 | ✗ | 높음 | 균일 | 플래토 이질성 미반영 |
+| protocol | 전류 전환점 감지 | 6 (max_steps×2) | ✗ | 중간 | 불균일 | step 수 불일치 시 공 시나리오 |
+| vwindow | LFP 고정 전압 | 7 | ✗ | **최고** | 불균일 | win1에 Ah 과집중 |
+| rcs | 랜덤 q_frac 창 | 6 | ✓(×6) | 높음 | 균일(per window) | 양끝 커버리지 낮음 |
+| cluster | K-means 자동 | 2K | ✗ | 낮음 | 불균일 | 크로스-DS 군집 일반화 미검증 |
+
+---
+
+### HI 구조 (총 411개 컬럼, 모델 입력 64개/세그먼트)
+
+**Global HI (15개)** — 사이클 전체 특성:
+```
+q_dis, energy_dis, v_mean_dis, r_dc_est, q_plateau_frac,
+ica_peak1_v/h/area/asym, dva_valley_q/depth,
+ce, cv_q_frac, cv_time_frac, chg_ica_peak1_h
+```
+
+**Segment HI (qfrac 기준 6구간 × 66개 = 396개)**:
+
+| 카테고리 | 수 | 컬럼 접두사 | 예시 |
+|---|---|---|---|
+| STAT | 20 | `stat_{k}_{seg}` | `v_mean`, `v_std`, `corr_qi`, `v_samp_ent` |
+| DIFF | 20 | `diff_{k}_{seg}` | `dqdv_peak_h/v/w`, `dvdq_mean`, `d2vdq2_rms` |
+| LFP  | 20 | `lfp_{k}_{seg}`  | `plateau_frac`, `plateau_dvdq_std`, `v_flatness`, `knee_v` |
+| MORPH|  6 | `morph_{k}_{seg}`| `vt_dtw`, `vq_dtw`, `ve_dtw`, `*_frec` × 3 |
+
+모델 입력: `stat_q_abs` + `stat_energy_seg` 누설 변수 제외 → **64 HI/세그먼트**
+
+> **LFP L04 변경**: `plateau_q_frac` 제거 (`plateau_frac`과 수학적으로 동일 — `n_plt/n_b` 증명).  
+> → `plateau_dvdq_std` 대체: 플래토 마스크 내 dV/dQ 표준편차. 플래토 평탄도를 직접 측정하며 다른 피처와 비중복.
+
+---
+
+### 추출 흐름 (`_extract_one_cell`)
+
+```
+1. phase 분리: dis = grp[phase=="discharge"], chg = grp[phase=="charge"]
+2. q_cum 계산: 방전 / 충전 각각 독립 적산 (Ah)
+3. Segmenter.iter_segments() 호출:
+     방전: iter_segments(cell_id, cyc, v, i_mag, dt, q_cum)
+     충전: iter_segments(..., np.empty(0)×4, vc, ic, dtc, qcc)
+           ← 방전 인자를 np.empty(0)로 전달 → min_pts 체크로 자동 skip
+4. SegmentRecord.meta["seg_name"] 또는 spec.scenario_names[scenario_id]
+5. _seg_stat / _seg_diff / _seg_lfp / _seg_morph_curves 호출
+6. row 딕셔너리 누적 → wide DataFrame (한 행 = 한 사이클)
+```
+
+multiprocessing 호환: `_extract_one_cell((pkl_path_str, axis, cfg_json))` 튜플 형태로 전달 (pickle 가능).
+
+---
+
+### 출력
+
+```
+_4_data_hi/{axis}/
+  cycle/{ds}/{cell}.pkl    wide-cycle HI (한 행=한 사이클, stat/diff/lfp/morph × 세그먼트)
+  seg/{ds}/{cell}.pkl      native-seg HI (한 행=한 세그먼트, hi_00..hi_63)
+  scenario_spec.json       해당 축의 ScenarioSpec
+hi_features.pkl            qfrac 추출 캐시 (축 변경 시 hi_features_{axis}.pkl)
+```
 
 ```powershell
-# 기본 평가 (scr_final.pt 자동 사용)
+# 권장 — qfrac 기본 축, 캐시 사용
+python 4_hi_analysis/hi_correlation.py
+
+# 캐시 무시하고 HI 재추출
+python 4_hi_analysis/hi_correlation.py --force
+
+# 다른 세그멘테이션 축
+python 4_hi_analysis/hi_correlation.py --seg-axis vwindow
+python 4_hi_analysis/hi_correlation.py --seg-axis protocol
+
+# 축 파라미터 커스터마이즈 (qfrac q_frac 분할점 변경)
+python 4_hi_analysis/hi_correlation.py --seg-axis qfrac --axis-config '{"dis_bounds":[0,0.3,0.6,1.0]}'
+
+# 병렬 프로세스 수 지정
+python 4_hi_analysis/hi_correlation.py --workers 8
+
+# 단일 사이클 플래토 디버그 플롯 (시각화)
+python 4_hi_analysis/hi_correlation.py --plateau-debug --dataset MIT --cell b1c0
+
+# 6-세그먼트 × 5-커브 유효성 검증
+python 4_hi_analysis/hi_correlation.py --curve-debug --dataset MIT --cell b1c0
+```
+
+---
+
+### 4-1. 세그멘테이션 진단 도구 — `4_hi_analysis/seg_diagnose.py`
+
+세그멘테이션 축의 균형·시각적 품질을 빠르게 진단하는 독립 스크립트.
+
+**3가지 출력 모드:**
+
+| 모드 | 내용 |
+|---|---|
+| `--no-plot` | 시나리오별 세그먼트 수·평균 행 수·평균 시간(s) 통계 출력 |
+| `--mode segment` (기본) | 사이클 V-t + V-Q(방전) + V-Q(충전) 세그먼트 색상 오버레이 |
+| `--mode ic` | 멀티사이클 V-Q + dQ/dV 커브 (vwindow: 창 경계 밴드 표시) |
+| `--mode all` | segment + ic 둘 다 생성 |
+
+**랜덤 셀 × 랜덤 사이클 시각화 (기본 동작):**
+
+`--cell` 미지정 시 데이터셋에서 `--n-random`(기본 10)개 셀을 무작위로 뽑고,
+각 셀에서 유효 사이클(방전 ≥ 30 행) 중 하나를 무작위 선택 → 셀당 PNG 1개 생성.  
+`--seed`로 재현 가능.
+
+```powershell
+# 기본: 랜덤 10셀 × 랜덤 사이클 (segment 모드)
+python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow
+
+# 재현 가능한 샘플링
+python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --seed 42
+
+# 셀 수 지정
+python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --n-random 5
+
+# 특정 셀·사이클 고정 (기존 동작)
+python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --cell b1c0 --cycle 10
+
+# IC 커브 + 창 경계 밴드 (vwindow 축에서 경계 확인용)
+python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --mode ic --n-cycles 8
+
+# 통계만 (플롯 생략)
+python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --no-plot
+python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --no-plot --dataset HUST
+```
+
+출력: `4_hi_analysis/outputs/seg_diagnose/{axis}/`
+
+---
+
+## 5. 모델 — `5_model/`
+
+### 5-0. 설정 — `5_model/config/scr.yaml`
+
+핵심 설정:
+```yaml
+scenario:
+  axis: qfrac           # 세그멘테이션 축: qfrac | protocol | vwindow | rcs | cluster
+  axis_config: {}       # 축별 파라미터 (예: vwindow: {n_windows: 3})
+
+data:
+  data_dir: null        # null → scenario.axis 기반 자동 결정 (_4_data_hi/{axis}/cycle)
+  seg_data_dir: null    # null → scenario.axis 기반 자동 결정 (_4_data_hi/{axis}/seg)
+  datasets: ["HUST", "MIT"]
+  is_cross_dataset_evaluate: false  # false=셀 단위 split | true=datasets[0] train, [1] test
+  gates_from: null | "_5_data_model_scr/MMDD_HHMM"  # null=Phase1, 경로=Phase2
+  use_initial_capacity: true        # true=첫 사이클 실측 용량 | false=정격 용량
+
+classifier:
+  charge_probe_m:   3     # 충전 probe HI 수
+  discharge_probe_m: 2    # 방전 probe HI 수
+
+regression:
+  scen_k_count: 55        # 시나리오별 regression HI 수
+
+model:
+  regression_model: "mlp" # mlp / transformer / i_transformer
+
+loss:
+  lambda_scen: 0.0        # CE 비활성 (probe_mlp 제거, 회귀 전용)
+  lambda_l0_auto: true    # true=m/k 기반 자동 계산
+```
+
+> `data_dir` / `seg_data_dir` 는 `null` 로 두면 `scenario.axis` 기준으로 자동 결정된다.  
+> `--seg-axis` CLI 인수가 yaml보다 우선.
+
+```powershell
+# 설정 파일 직접 편집
+notepad 5_model/config/scr.yaml
+
+# Phase 2 전환: yaml gates_from 경로를 Phase 1 run_dir로 설정
+# data.gates_from: "_5_data_model_scr/0711_1538"
+# (또는 train_scr.py --phase 2 --gates-from 인수로 오버라이드)
+```
+
+---
+
+### 5-0. 데이터 흐름 및 모델 입출력 구조
+
+전체 흐름: **Wide pkl → Segment DataFrame → SegmentDataset → Batch → SCRModel → 출력 dict**
+
+---
+
+#### (A) Wide pkl 포맷 (`_4_data_hi/{axis}/{MIT,HUST}/*.pkl`)
+
+한 파일 = 한 셀, 한 행 = 한 사이클.
+
+```
+columns:
+  cycle          : int — 사이클 번호
+  capacity_Ah    : float — 해당 사이클 실측 방전 용량 [Ah] = SOH 타겟 원본
+  [세그먼트별 HI × n_scenarios]:
+    stat_{key}_{seg}   18개 × n_seg   → e.g. stat_v_mean_dis_hi
+    diff_{key}_{seg}   20개 × n_seg
+    lfp_{key}_{seg}    20개 × n_seg
+    morph_{key}_{seg}   6개 × n_seg
+    (stat_q_abs, stat_energy_seg는 제외 → 세그먼트당 64 HI)
+  총 컬럼 수 ≈ 1 + 1 + 64×n_scenarios  (qfrac: 64×6=384+2=386)
+```
+
+---
+
+#### (B) Segment DataFrame (`_wide_to_segments()` 또는 native seg pkl)
+
+`pd.DataFrame` — 한 행 = 한 (셀, 사이클, 세그먼트) 트리플.
+
+| 컬럼 | 타입 | 설명 |
+|---|---|---|
+| `cell_id` | str | 셀 식별자 (e.g. `b1c0`, `1-1`) |
+| `cycle` | int | 사이클 번호 |
+| `seg_name` | str | 시나리오 이름 (e.g. `dis_hi`, `chg_win1`) |
+| `seg_idx` | int | 시나리오 인덱스 0..n_scenarios-1 |
+| `direction` | float | +1.0=충전, -1.0=방전 |
+| `level` | int | latent_class 0/1/2 (lo/mid/hi) |
+| `capacity_Ah` | float | 사이클 실측 용량 — SOH 타겟 원본 |
+| `hi_00`..`hi_63` | float32 | 64개 HI (세그먼트별, NaN 허용) |
+| `dataset` | str | `MIT` 또는 `HUST` |
+
+> Wide 포맷: `_wide_to_segments()` 로 reshape. Native seg 포맷: `load_dataset_native_seg()` 직접 로드.
+
+---
+
+#### (C) SegmentNormalizer (train 셀만 fit)
+
+```python
+mean_  : (64,) float64  # 각 HI의 train 집합 mean (전부 NaN → 0.0)
+std_   : (64,) float64  # 각 HI의 train 집합 std  (constant 또는 전부 NaN → 1.0)
+
+# transform_x():
+x_norm = (x_raw - mean_) / std_   # NaN 위치는 0.0으로 마스킹
+nan_mask = ~isnan(x_raw)          # 1.0=유효, 0.0=결측
+
+# target_mean_ / target_std_: cap_init z-scoring 전용
+# SOH ratio(target) = capacity_Ah / cap_init_Ah 는 정규화 불필요
+```
+
+---
+
+#### (D) SegmentDataset `__getitem__` 반환 (단일 샘플)
+
+```python
+{
+  "x_hi":      Tensor (64,)   float32  # z-scored HI, NaN→0
+  "nan_mask":  Tensor (64,)   float32  # 1.0=유효, 0.0=결측
+  "direction": Tensor ()      float32  # +1.0 or -1.0
+  "level":     Tensor ()      int64    # latent class (0/1/2)
+  "seg_idx":   Tensor ()      int64    # 시나리오 인덱스 0..n-1
+  "target":    Tensor ()      float32  # SOH ratio = cap_Ah / cap_init_Ah ∈ (0, 1]
+  "cap_init":  Tensor ()      float32  # z-scored 초기/정격 용량 Ah (크기 conditioning)
+}
+```
+
+`collate_fn` 후 배치:
+
+```python
+batch = {
+  "x_hi":      (B, 64)   float32
+  "nan_mask":  (B, 64)   float32
+  "direction": (B,)      float32
+  "level":     (B,)      int64
+  "seg_idx":   (B,)      int64
+  "target":    (B,)      float32
+  "cap_init":  (B,)      float32
+}
+```
+
+---
+
+#### (E) SCRModel 내부 연산 흐름
+
+```
+입력 batch
+  x_hi    (B, 64)         — z-scored HI
+  nan_mask(B, 64)         — 유효 비트
+  direction (B,)
+  seg_idx   (B,)
+  cap_init  (B,)
+
+─── 전처리 ───────────────────────────────────────────────
+x = x_hi × nan_mask                          (B, 64)  [NaN 위치 → 0]
+
+─── Stage A: 방향별 probe gate ─────────────────────────
+  충전 샘플 (direction > 0) → charge_probe_gate
+  방전 샘플 (direction ≤ 0) → discharge_probe_gate
+  Gate 타입:
+    Phase 1: HardConcreteGate (학습 가능, L0 정규화 대상)
+    Phase 2: buffer mask (고정 bool (64,))
+
+probe_x (B, 64)   — 선택된 HI만 비0 (m개 활성)
+probe_z (B, 64)   — gate 확률 벡터 (0/1 혼합 또는 이진)
+
+─── Stage B: 시나리오별 gate ────────────────────────────
+  seg_idx 기준으로 각 샘플에 해당 시나리오 gate 적용
+  scen_gates[s] (64,) — 시나리오 s 전용 gate (k개 활성)
+
+scen_x (B, 64)   — 시나리오 gate 출력
+scen_z (B, 64)   — gate 확률 벡터
+
+─── Capacity head 입력 구성 ──────────────────────────────
+feat = concat(probe_x, scen_x, direction.unsqueeze(1), cap_init.unsqueeze(1))
+     = (B, 64+64+1+1) = (B, 130)
+
+─── Capacity head (선택 가능) ────────────────────────────
+  mlp          : Linear(130→d)→ReLU→Linear(d→d/2)→ReLU→Linear(d/2→1)
+  transformer  : probe/scen/meta 3토큰 → TransformerEncoder(Pre-LN) → mean pool → Linear→1
+  i_transformer: 130 스칼라 각각이 토큰 → feature-wise attention → mean pool → Linear→1
+
+cap_pred (B,)   — SOH ratio 예측값 [정규화 없음, 직접 SOH ratio 단위]
+```
+
+---
+
+#### (F) SCRModel `forward()` 반환 (출력 dict)
+
+```python
+{
+  "cap_pred":     Tensor (B,)          float32  # SOH ratio 예측 ∈ (0, ~1]
+  "level_logits": Tensor (B, n_classes) float32  # all-zero (CE 비활성, 호환용)
+  "probe_z":      Tensor (B, 64)       float32  # Stage A gate 확률
+  "scen_z":       Tensor (B, 64)       float32  # Stage B gate 확률
+}
+```
+
+**손실 계산 (`scr_loss.py`):**
+```
+L = MSE(cap_pred, batch["target"])       ← SOH ratio vs SOH ratio
+  + λ_l0 × L0_penalty(probe_z, scen_z)  ← Phase 1만 비0
+```
+
+---
+
+#### (G) 평가 시 후처리 (`scr_evaluator.py`)
+
+```python
+# SOH ratio → Ah 변환 (논문 지표 및 capacity curve 플롯용)
+cap_pred_Ah = cap_pred_raw × cap_init_raw   # (N,) float32
+cap_true_Ah = cap_true_raw × cap_init_raw   # (N,) float32
+
+# 지표 계산 (SOH 단위 기준)
+RMSE = sqrt(mean((cap_pred_raw - cap_true_raw)²))   # SOH 단위
+MAE  = mean(|cap_pred_raw - cap_true_raw|)
+R²   = 1 - SS_res / SS_tot
+MAPE = mean(|Δ| / cap_true_raw) × 100  [%]
+```
+
+**저장 텐서 크기 요약:**
+
+| 텐서/배열 | 형태 | 단위 | 어디서 생성 |
+|---|---|---|---|
+| `x_hi` | `(B, 64)` | z-score | SegmentDataset |
+| `nan_mask` | `(B, 64)` | 0/1 | SegmentDataset |
+| `probe_z`, `scen_z` | `(B, 64)` | 확률 | SCRModel |
+| `cap_pred` | `(B,)` | SOH ratio | SCRModel |
+| `cap_pred_Ah` | `(N_test,)` | Ah | SCREvaluator |
+| `norm.mean_`, `norm.std_` | `(64,)` | 원본 단위 | SegmentNormalizer |
+
+---
+
+### 5-1. HI 스키마 — `5_model/utils/hi_schema.py`
+
+```python
+N_HI = 64   # STAT 18 + DIFF 20 + LFP 20 + MORPH 6 (q_abs, energy_seg 제외)
+
+# 카테고리별 컬럼 키 목록 (순서 고정)
+STAT_KEYS   # 20개
+DIFF_KEYS   # 20개
+LFP_KEYS    # 20개
+MORPH_KEYS  # 6개
+
+CATEGORY_COSTS = {"stat": 1.0, "diff": 1.5, "lfp": 2.0, "morph": 3.0}
+LEAK_COLS = {"stat_q_abs", "stat_energy_seg"}   # 모델 입력 제외
+
+def get_hi_cols_for_seg(seg: str) -> list[str]:  # 64개 컬럼명 반환 (순서 고정)
+def get_hi_cost_vector(seg: str) -> list[float]: # 64개 L0 비용 벡터
+def spec_from_qfrac() -> ScenarioSpec:           # backward-compat: qfrac 기본 spec 반환
+```
+
+**제거됨** (시나리오 하드코딩 → ScenarioSpec으로 이관):
+- `N_SEGS`, `N_LEVELS`, `SEGMENTS`, `SCEN_MAP`, `SEG_LEVEL`, `SEG_DIRECTION`
+
+---
+
+### 5-2. 데이터셋 — `5_model/datasets/segment_dataset.py`
+
+**로딩 경로 (우선순위 순):**
+
+```
+1순위: native-seg pkl (_4_data_hi/{axis}/seg/{ds}/*.pkl)
+       → load_dataset_native_seg(seg_dir, datasets, wide_dir, spec)
+       → 한 행 = 한 세그먼트 (이미 reshape됨)
+       → wide pkl에서 cycle-level capacity_Ah 덮어쓰기 (segment q_abs 대신)
+
+2순위: wide-cycle pkl (_4_data_hi/{axis}/cycle/{ds}/*.pkl)
+       → load_dataset_wide(data_dir, datasets, spec=spec)
+       → _wide_to_segments(df, cell_id, spec) 로 reshape
+       → 한 행 = 한 사이클 → n_scenarios 행으로 분해
+```
+
+**ScenarioSpec 연동:**
+```python
+_DEFAULT_SPEC: ScenarioSpec = spec_from_qfrac()   # 모듈 레벨 기본값
+
+def _wide_to_segments(df, cell_id, spec=None):
+    _spec = spec or _DEFAULT_SPEC
+    for seg_idx, seg in enumerate(_spec.scenario_names):
+        hi_cols = get_hi_cols_for_seg(seg)
+        dir_idx, latent_class = _spec.scenario_to_dir_class(seg_idx)
+        direction = 1 if dir_idx == 0 else -1  # +1=충전, -1=방전
+        level = latent_class                    # 0=lo, 1=mid, 2=hi
+
+def build_datasets(cfg, spec=None) -> (train_ds, val_ds, test_ds, norm):
+    ...  # spec=None 이면 _DEFAULT_SPEC(qfrac) 사용
+```
+
+**SegmentNormalizer:**
+- `fit()`: train 분할로 HI별 z-score 파라미터 계산
+  - 전-NaN 컬럼 (예: RCS/vwindow CC 전용 → `corr_qi`, `r_dyn_seg` 구조적 NaN): mean=0, std=1 (no-op)
+  - `warnings.catch_warnings()` + `warnings.simplefilter("ignore", RuntimeWarning)` 로 empty-slice 경고 억제
+    - (이전 `np.errstate(all="ignore")`는 Python 레벨 RuntimeWarning을 잡지 못함)
+- `transform_x()`: NaN 위치를 `nan_mask`로 기록 후 0.0으로 대체
+
+**SegmentDataset (PyTorch Dataset):**
+
+| 텐서 (`__getitem__` 반환) | 형상 | 설명 |
+|---|---|---|
+| `x_hi` | (64,) | z-score 정규화된 HI 피처 |
+| `nan_mask` | (64,) | 1=유효값, 0=원래NaN |
+| `direction` | scalar | +1=충전, -1=방전 |
+| `level` | scalar(int64) | 0=lo, 1=mid, 2=hi (spec.class_names 인덱스) |
+| `seg_idx` | scalar(int64) | 0~(n_scenarios-1) scenario_id |
+| `cap_init` | scalar | z-score 정규화된 초기/정격 용량 Ah (모델 conditioning) |
+| `target` | scalar | **SOH ratio** = `capacity_Ah / cap_init_Ah` ∈ (0, 1] |
+
+| 메타 속성 (평가용, `__getitem__` 미반환) | 형상 | 설명 |
+|---|---|---|
+| `cap_init_raw` | (N,) float32 | 초기/정격 용량 Ah (SOH→Ah 변환: `soh × cap_init_raw`) |
+| `capacity_raw` | (N,) float32 | 실측 `capacity_Ah` |
+| `cell_ids` / `cycles` / `seg_names` | list[str/int] | 평가 메타데이터 |
+
+> **SOH ratio 채택 이유**: HUST(1.2 Ah)와 MIT(1.1 Ah)의 nominal capacity 차이로 인한  
+> 스케일 불일치를 제거한다. `target ∈ (0, 1]` 이므로 정규화기가 불필요하다.
+
+**유틸리티:**
+```python
+from datasets.segment_dataset import filter_dataset_by_cells
+
+# cell_id 리스트로 Dataset 서브셋 생성 (fine-tuning split 등에 사용)
+sub_ds = filter_dataset_by_cells(ds, ["b1c0", "b1c1", "1-1"])
+```
+
+---
+
+### 5-3. L0 게이트 — `5_model/models/hard_concrete.py`
+
+Louizos et al. (2018) Hard-Concrete:
+```
+Train:  z = clamp(sigmoid((log U - log(1-U) + log_alpha) / β) × (ζ-γ) + γ, 0, 1)
+Infer:  z = (sigmoid(log_alpha) × (ζ-γ) + γ > 0).float()  ← 이진 마스크
+
+β=2/3, γ=-0.1, ζ=1.1
+P(z>0) = sigmoid(log_alpha - β×log(-γ/ζ))  ← L0 패널티 계산에 사용
+```
+`active_indices()`: 추론 시 활성(z>0) HI 인덱스 반환
+
+---
+
+### 5-4. 모델 아키텍처 — `5_model/models/scr_model.py`
+
+```
+입력: x_hi(64) + nan_mask(64) + direction(±1) + cap_init(z-scored Ah)
+
+Stage A — direction-aware probe gate (HI 서브셋 선택, 회귀 전용)
+  direction 기반 라우팅:
+    충전 → charge_probe_gate    (HardConcreteGate, 64→64)
+    방전 → discharge_probe_gate (HardConcreteGate, 64→64)
+  ※ probe_mlp (분류 헤드) 제거 — CE 손실 비활성.
+     level_logits = zeros(B, n_classes)  (evaluator 로그 호환용)
+
+Stage B — scenario-conditioned regression
+  scen_gates[n_scenarios]: 각 시나리오별 HardConcreteGate (64→64)
+                           n_scenarios = spec.n_scenarios
+  x_probe = probe_gate(x_hi)               # (B, 64), direction별 게이트
+  x_scen  = scen_gates[seg_idx](x_hi)      # (B, 64), seg_idx 하드 라우팅
+  feat    = [x_probe | x_scen | direction | cap_init]  # (B, 130)
+  cap_pred = cap_head(feat)                # (B,) — SOH ratio ∈ (0,1]
+
+출력 dict:
+  cap_pred      : (B,) SOH ratio 예측값
+  level_logits  : (B, n_classes) 항상 0 (CE 비활성)
+  probe_z       : (B, 64) probe gate 활성값
+  scen_z        : (B, 64) scenario gate 활성값
+```
+
+**SCRModel 생성:**
+```python
+model = SCRModel(
+    d_probe=64, d_head=128, dropout=0.1,
+    charge_probe_mask=None,    # Phase 1: None → HardConcreteGate (학습 가능)
+    discharge_probe_mask=None, # Phase 2/FT: (64,) bool tensor → 고정 buffer
+    scen_masks=None,           # Phase 2/FT: (n_scenarios, 64) bool tensor → 고정 buffer
+    model_cfg={"regression_model": "mlp"},
+    spec=spec,                 # ScenarioSpec — None이면 qfrac 기본값
+)
+# model.spec, model.n_scenarios, model.n_classes 로 접근
+```
+
+**Phase 전환:**
+- **Phase 1**: gate 학습, L0 패널티 활성. gate_prob 랭킹 JSON 저장
+- **Phase 2/Fine-tune**: JSON 로드 → 고정 buffer. **cap_head만 학습**  
+  (gates가 buffer이므로 `model.parameters()` = cap_head만 → 명시적 freeze 불필요)
+
+**cap_head 옵션** (`5_model/models/cap_heads.py`):
+
+| 모드 | 구조 | 특징 |
+|---|---|---|
+| `mlp` | Linear(130→d)→ReLU→…→1 | 기본, 빠름 |
+| `transformer` | probe/scen/meta 3토큰 → TransformerEncoder | semantic 토큰 분리 |
+| `i_transformer` | 130 피처 각각이 토큰 → feature-wise attention | feature-wise |
+
+---
+
+### 5-5. 시나리오 분류기 플러그인 — `5_model/models/scenario_classifier.py`
+
+`ScenarioClassifier` ABC: `classify(probe_x, batch) → (B, n_classes) logits`
+
+| 클래스 | CE 손실 | 레이블 필요 | 용도 |
+|---|---|---|---|
+| `MLPProbeClassifier` | ✓ | ✗ | probe_mlp 동작 래퍼 (d_hidden=64) |
+| `RuleClassifier` | ✓ | ✗ | `spec.scenario_to_dir_class(seg_idx)`로 결정론적 배정 |
+| `CentroidClassifier` | ✓ | fit 단계 | L2 최근접 센트로이드 (`update()+finalize()` 또는 `fit()`) |
+| `OracleClassifier` | ~0 | ✓ | `batch["level"]` 직접 사용 → 상한선 측정 |
+| `NoneClassifier` | ✗ | ✗ | 전-0 로짓 반환, `disables_ce=True` (`lambda_scen=0`과 함께 사용) |
+
+```python
+from models.scenario_classifier import build_classifier
+clf = build_classifier("rule",    n_hi=64, n_classes=3, spec=spec)
+clf = build_classifier("mlp",     n_hi=64, n_classes=3, d_hidden=64)
+clf = build_classifier("oracle",  n_hi=64, n_classes=3)
+clf = build_classifier("none",    n_hi=64, n_classes=3)
+```
+
+> 현재 `SCRModel.probe_mlp`는 내장 MLP이며 이 플러그인과 직접 연결되지 않는다.  
+> 향후 `SCRModel(classifier=build_classifier(...))` 형태로 통합 가능한 인터페이스를 제공한다.
+
+---
+
+### 5-6. 손실 — `5_model/training/scr_loss.py`
+
+```
+L = MSE(cap_pred, target)   ← target은 SOH ratio ∈ (0,1]
+  + λ_l0 × L0_penalty
+
+# CE 항 완전 제거 (λ_scen 파라미터는 호환성 유지용이지만 내부에서 0.0 강제)
+# 이유: qfrac/protocol/vwindow 등 구조적 축에서 seg_idx → level이 1:1 결정론적
+#       → CE가 probe_gate를 "level-discriminative" HI로 편향시켜 회귀 성능 저하
+
+L0_penalty = (1 / model.n_scenarios) × Σ_s Σ_i cost_i × P(z_i≠0 in scenario s)
+  P(z_i≠0) = 1 - (1 - p_probe_i)(1 - p_scen_i)
+  충전 시나리오 (model.spec.charge_scenario_ids): charge_probe_gate 사용
+  방전 시나리오 (model.spec.discharge_scenario_ids): discharge_probe_gate 사용
+```
+
+- `model.spec.charge_scenario_ids` / `discharge_scenario_ids`: 하드코딩 제거, ScenarioSpec에서 동적 결정
+- Phase 2 / Fine-tune: gate가 buffer → L0_penalty = 0 자동
+
+---
+
+### 5-7. 학습 루프 — `5_model/training/scr_trainer.py`
+
+**Phase 1 — L0 게이트 학습:**
+```
+λ_l0 스케줄 (loss.lambda_l0_schedule):
+  delayed_warmup : λ_l0=0 (warmup_epochs) → 선형 증가 (ramp_epochs)
+  exp_ramp       : 지수 증가
+  cyclic         : 주기적 증감
+  none           : 고정 lambda_l0
+
+Early stopping (patience=20, val RMSE 기준)
+Gate JSON 저장:
+  gates/classification_HIs.json  : charge_ranked + discharge_ranked + probs
+  gates/regression_HIs.json      : seg_{s}_ranked + probs (s = 0..n_scenarios-1)
+  gates/gate_probs.png           : gate 확률 bar chart
+```
+
+**Phase 2 — 회귀 정밀 학습:**
+```
+gates_from 경로에서 JSON 로드 → 고정 buffer 마스크 (SCRModel에 주입)
+λ_l0 = 0, λ_scen = 0 (L0·CE 비활성)
+학습 파라미터: cap_head만 (probe/scen gates는 buffer → requires_grad=False)
+Early stopping (patience=20, val SOH RMSE 기준)
+checkpoints/best.pt 저장 (norm_mean/std/target_mean/target_std 포함)
+```
+
+공통: AdamW + CosineAnnealingLR (warmup 10 epoch) + grad_clip 1.0
+
+---
+
+### 5-8. 학습 진입점 — `5_model/train_scr.py`
+
+**Phase / Spec 결정 흐름:**
+```
+--phase > --no-gates(legacy) > yaml gates_from 유무 순서로 Phase 결정
+--seg-axis > yaml scenario.axis > "qfrac" 순서로 축 결정
+spec = get_segmenter(axis, cfg).get_spec()
+spec.save(output_dir / "scenario_spec.json")       ← test_scr.py 재사용
+build_datasets(cfg, spec=spec)                     ← spec 명시 전달 필수
+  # spec 미전달 시 _DEFAULT_SPEC(qfrac, n_scenarios=6)으로 fallback →
+  # vwindow(n_scenarios=7) 데이터에서 segment_id=6 매핑 실패(IntCastingNaNError)
+```
+
+```bash
+python 5_model/train_scr.py --phase 1
+python 5_model/train_scr.py --phase 2
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0711_1538
+
+# 세그멘테이션 축 지정 (Step 4와 동일하게)
+python 5_model/train_scr.py --phase 1 --seg-axis vwindow
+python 5_model/train_scr.py --phase 1 --seg-axis qfrac \
+  --axis-config '{"dis_bounds":[0,0.3,0.6,1.0]}'
+
+# probe/scen HI 수 오버라이드
+python 5_model/train_scr.py --phase 2 --charge-m 3 --discharge-m 1 --scen-k 10
+
+# 재현성 시드
+python 5_model/train_scr.py --phase 1 --seed 42
+```
+
+run_dir 자동 생성: `_5_data_model_scr/MMDD_HHMM/`
+
+---
+
+### 5-9. 평가 진입점 — `5_model/test_scr.py`
+
+```bash
 python 5_model/test_scr.py
-
-# 체크포인트 명시
-python 5_model/test_scr.py --checkpoint _5_data_model_scr/scr_final.pt
-
-# 대표 셀 지정
-python 5_model/test_scr.py --rep-cells b1c0 1-1
-
-# GPU 지정
-python 5_model/test_scr.py --device cuda:0
+python 5_model/test_scr.py --checkpoint _5_data_model_scr/0711_1538/checkpoints/best.pt
+python 5_model/test_scr.py --rep-cells b1c0 b1c1 1-1
 ```
 
-출력 (`_5_data_model_scr/eval/`):
-- `scatter_test.png` — 예측 vs 실측 산점도
-- `capacity_curve_b1c0.png` — 대표 셀 열화 곡선 (실측+예측+오차)
-- `capacity_curve_1-1.png`
+**Spec 로드 순서 (build_datasets 이전에 수행):**
+```python
+run_dir    = ckpt_path.parent.parent
+_spec_path = run_dir / "scenario_spec.json"
+spec = ScenarioSpec.load(_spec_path) if _spec_path.exists() else spec_from_qfrac()
+# spec 로드 후 build_datasets(cfg_saved, spec=spec) 호출
+# → SCRModel(spec=spec) 에 전달 → n_scenarios / n_classes 복원
+# ※ spec 로드 전에 build_datasets 호출 시 _DEFAULT_SPEC(qfrac) fallback → segment_id 매핑 오류
+```
 
 ---
 
-## 데이터 디렉토리
+### 5-10. 평가 모듈 — `5_model/evaluation/scr_evaluator.py`
+
+**SCREvaluator 생성 시 spec 정보 추출:**
+```python
+self._n_scenarios = model.n_scenarios       # spec.n_scenarios
+self._n_classes   = model.n_classes         # spec.n_classes
+self._seg_names   = model.spec.scenario_names
+self._class_names = model.spec.class_names  # ["lo", "mid", "hi"] (qfrac)
+                                             # ["win0","win1","win2","cv"] (vwindow)
+```
+
+하드코딩 제거: `N_SEGS`, `N_LEVELS`, `SEGMENTS`, `_LEVEL_NAMES` 상수 없음.  
+`_compute_breakdown()` 내 level 루프는 `self._class_names` 을 사용 (`_LEVEL_NAMES` 참조 버그 수정).
+
+**predict_dataset 반환 dict:**
+```python
+{
+  "cap_pred_raw":  np.ndarray,  # SOH ratio 예측값 — inverse_target 불필요
+  "cap_true_raw":  np.ndarray,  # SOH ratio 실측값
+  "cap_init_raw":  np.ndarray,  # Ah per sample (SOH→Ah 변환: pred × cap_init_raw)
+  ...
+}
+```
+
+**저장 파일:**
+
+| 경로 | 내용 |
+|---|---|
+| `figures/scatter_test.png` | pred SOH vs true SOH 산포도 (x/y축 "SOH") |
+| `figures/capacity_curve_{cell}.png` | 대표 셀 용량 곡선 Ah (SOH × cap_init_raw 변환 후 표시) |
+| `figures/confusion_matrix_test.png` | CE 비활성 시 생략 (level_logits=zeros 감지) |
+| `metrics/metrics.json` | capacity(RMSE/MAE/R2/MAPE, SOH 단위) + breakdown + scenario(disabled) + efficiency |
+| `routing/routing_heatmap.png` | probe(1행) + scen(n_scenarios행) × HI(64열) 활성 히트맵 |
+| `routing/routing_table.csv` | gate별 선택 HI 목록 |
+| `predictions/test_predictions.csv` | `soh_true`, `soh_pred`, `soh_error`, `cap_true_Ah`, `cap_pred_Ah`, `cap_init_Ah`, level_true/pred, active HI 수 |
+
+---
+
+### 5-11. Few-shot Fine-tuning — `5_model/finetune_scr.py`
+
+Phase 2 checkpoint를 소수의 target dataset 셀로 재학습하는 도메인 적응 스크립트.
+
+**프로토콜:**
+```
+1. Phase-2 checkpoint 로드 (probe + scen gates = 고정 buffer)
+2. target dataset 전체 셀을 checkpoint normalizer로 로드 (HI z-score 유지)
+   → SOH ratio target은 dataset-agnostic이므로 정규화기 재학습 불필요
+3. 셀 split:
+     N 셀 (--finetune-cells)  → few-shot train
+     20% of remainder         → val (early stopping)
+     나머지                   → test (최종 평가)
+4. gates가 buffer이므로 optimizer = cap_head 파라미터만 자동 포함
+5. before/after 비교 리포트 저장
+```
+
+```bash
+# MIT 5셀로 fine-tune (HUST→MIT cross-dataset)
+python 5_model/finetune_scr.py \
+    --checkpoint _5_data_model_scr/0711_1538/checkpoints/best.pt \
+    --finetune-dataset MIT \
+    --finetune-cells 5
+
+# 하이퍼파라미터 조정
+python 5_model/finetune_scr.py \
+    --checkpoint ...  --finetune-dataset MIT \
+    --finetune-cells 5 --epochs 100 --lr 1e-4 --seed 42
+```
+
+**출력 구조:**
+```
+_5_data_model_scr/{run_id}/ft_{dataset}_{N}shot_{timestamp}/
+  before_metrics.json      # fine-tune 전 test RMSE/MAE/R2
+  finetune_report.json     # before / after / delta 비교
+  checkpoints/best.pt      # fine-tuned checkpoint
+  logs/train_log.csv
+  figures/scatter_test.png
+  metrics/metrics.json
+```
+
+---
+
+### 5-12. HI 클러스터링 분석 — `5_model/clustering.py`
+
+Phase 1 학습 전 probe HI 수(m) 결정 보조 도구:
+
+```bash
+python 5_model/clustering.py
+python 5_model/clustering.py --k-max 9 --mrmr-m 20 --knn 10
+```
+
+- **mRMR**: MI(HI_i; level) - 선택된 HI와의 Pearson 중복 → 최적 HI 순위 도출
+- **Silhouette + KNN Purity** (k=2..k_max): K-Means 군집 품질 평가
+- **LogReg 5-fold CV**: m개 HI로 n_classes-class 분류 정확도 vs m 곡선 → plateau_m 결정
+
+출력: `charge_probe_m`, `discharge_probe_m` 권장값 → `scr.yaml`에 수동 반영
+
+---
+
+## 데이터 디렉토리 구조
 
 ```
-LFP_SOH_prediction/
-  _0_data_raw/
-    FastCharge/                    MIT 원본 .mat 파일 (입력)
-    our_data/our_data/             HUST 원본 .pkl 파일 (입력)
-    MIT/                           파싱 원본 .pkl / .csv  (이상치 제거 없음, DELETE_CELLS 포함)
-    HUST/                          파싱 원본 .pkl / .csv  (이상치 제거 없음)
-  _1_data_unified/
-    MIT/                           변환된 셀별 .pkl / .csv  (필터 적용, Step 1 출력)
-    HUST/                          변환된 셀별 .pkl / .csv  (필터 적용, Step 1 출력)
-  _2_data_clean/
-    MIT/                           전처리된 셀별 .pkl + .csv (제거 셀만)
-    HUST/                          전처리된 셀별 .pkl + .csv (제거 셀만)
-  1_convert/
-    convert_unified.py
-    mit_batch_parser/
-  2_preprocess/
-    preprocess.py
-    plot_cleaning_report.py        cleaning_report.csv → 필터별 시각화
-    outputs/
-      cleaning_report.csv          이상치 제거 리포트 (날짜 무관, 항상 덮어씀)
-      <MMDD>/                      실행 날짜별 서브폴더
-        F4A_dis_gap.png
-        F4B_chg_stop.png
-        F4C_chg_seg.png
-        F5_rolling.png
-  3_integrity/
-    check_integrity.py
-  4_hi_analysis/
-    hi_correlation.py
-    hi_segment_viz.py
-    seg_corr_analysis.py           세그먼트별 within-cell 상관분석
-    plot_cell_cycles.py
-    plot_cycle_segments.py
-    hi_features.pkl                HI 추출 캐시 (4-A/4-B/4-C 공유)
-    hi_plot/
-      <MMDD>/                      실행 날짜별 서브폴더
-        hi_correlation.png           풀링 Spearman 히트맵
-        hi_segment_cuts.png          세그먼트 분할 확인
-        hi_trend.png                 Global HI 15종 열화 추이
-        hi_segment_trend_stat.png    6구간 × 15 통계 HI (카테고리 A)
-        hi_segment_trend_diff.png    6구간 × 15 미분 HI (카테고리 B)
-        hi_segment_trend_lfp.png     6구간 × 15 LFP HI (카테고리 C)
-        hi_segment_trend_morph.png   6구간 × 6 형태학적 거리 HI (카테고리 D)
-    seg_corr/
-      <MMDD>/                                실행 날짜별 서브폴더
-        corr_rank_{stat|diff|lfp|morph}_*.png  카테고리별 6구간 |ρ| 랭킹
-        corr_matrix_{stat|diff|lfp|morph}_*.png 카테고리별 6구간 feature 상관행렬
-        top_cross_*.png                          4카테고리 × 6구간 Top-5 요약
-        feature_rank_battery_*.png               배터리별 통합 feature 랭킹 (Σ|ρ|)
-        feature_rank_seg.png                     6구간별 통합 feature 랭킹 (Σ|ρ|)
-    cell/
-      cell_cycles_*.png            셀별 전체 사이클 시각화
-    segment/
-      segment_*.png                단일 사이클 세그먼트 시각화
-  _4_data_hi/
-    MIT/                           셀별 HI 특성 .pkl (hi_correlation.py 출력)
-    HUST/
-  docs/
-    PIPELINE.md
-    NEW_HIS.md                       411-HI 설계 상세 (카테고리 A–D, LFP 도메인 전문가 관점)
-    HI_DESCRIPTION.md
-    DATASET_ANOMALIES.md           파이프라인 단계별 이상치 처리 정리
-    correlation_comparison.md      preprocess.ipynb vs 현재 / 풀링 vs within-cell 비교
-    mit_capacity_nonmonotonic.md   MIT capacity 단조성 위반 원인 및 2-pass 필터 설명
-    differences.md                 구현 변경점 상세 기록
-    HI_OUTLIER_FIXES.md            HI 피처 버그 수정 이력
-    hi_overlap_analysis.md         HI 중복·leakage 분석
-    DATASET_MIT_README.md          MIT 데이터셋 설명
-    DATASET_HUST_README.md         HUST 데이터셋 설명
+_0_data_raw/              # 원본 복사본 (MIT .mat / HUST .pkl)
+_1_data_unified/          # 변환된 통합 포맷
+  MIT/ HUST/              # 셀별 .pkl + .csv
+_4_data_hi/               # HI 추출 결과
+  clean/                  # hi_correlation.py 입력 (전처리 완료 시계열)
+    MIT/ HUST/
+  {axis}/                 # 세그멘테이션 축별 서브트리 (예: qfrac/)
+    cycle/                # wide-cycle HI (한 행=한 사이클)
+      MIT/ HUST/          # b1c0.pkl, 1-1.pkl, ...
+    seg/                  # native-seg HI (한 행=한 세그먼트)
+      MIT/ HUST/
+    scenario_spec.json    # ScenarioSpec (n_scenarios, routing, class_names ...)
+_5_data_model_scr/        # 학습 결과
+  MMDD_HHMM/              # run_dir (Phase 1 또는 Phase 2)
+    scenario_spec.json    # 사용된 ScenarioSpec 복사본
+    config.yaml           # 학습 시 yaml 복사본
+    gates/
+      classification_HIs.json   # probe gate 랭킹 (charge/discharge)
+      regression_HIs.json       # scen gate 랭킹 (시나리오별)
+      gate_probs.png
+    checkpoints/
+      best.pt             # val SOH RMSE 최솟값 (normalizer 포함)
+      final.pt            # 최종 (model + normalizer)
+    figures/ metrics/ routing/ predictions/
+    ft_{dataset}_{N}shot_{timestamp}/   # finetune_scr.py 출력
+      before_metrics.json
+      finetune_report.json
+      checkpoints/best.pt
+      logs/ figures/ metrics/
+common/
+  scenario/
+    __init__.py           # get_segmenter() 레지스트리
+    base.py               # ScenarioSpec, SegmentRecord, Segmenter ABC
+    qfrac.py              # QFracSegmenter (기본, 6 시나리오)
+    protocol.py           # ProtocolSegmenter
+    vwindow.py            # VWindowSegmenter
+    rcs.py                # RCSSegmenter
+    cluster.py            # ClusterSegmenter
 ```
+
+---
+
+## Phase 1 → Phase 2 → Fine-tuning 실행 순서
+
+```bash
+# 0. (선택) clustering.py로 probe_m 결정
+python 5_model/clustering.py
+
+# 1. Step 4: HI 추출 (축 변경 시 --seg-axis 지정)
+python 4_hi_analysis/hi_correlation.py               # qfrac 기본
+python 4_hi_analysis/hi_correlation.py --seg-axis vwindow
+# → _4_data_hi/{axis}/cycle/, seg/, scenario_spec.json 생성
+
+# 2. scr.yaml 확인
+#    scenario.axis: qfrac   (또는 사용할 축)
+#    data_dir / seg_data_dir: null   ← 자동 결정
+#    data.datasets:    ["HUST", "MIT"]
+#    data.is_cross_dataset_evaluate: true   ← cross-dataset 실험 시
+#    data.gates_from:  null   ← Phase 1
+
+# 3. Phase 1 (L0 gate 학습 → HI 서브셋 탐색)
+conda activate LFP_SOH_ESTIMATION
+python 5_model/train_scr.py --phase 1
+# → _5_data_model_scr/MMDD_HHMM/gates/*.json 생성
+
+# 4. Phase 2 (고정 gate + 회귀 정밀 학습, cap_head만 업데이트)
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/MMDD_HHMM
+
+# 5. Zero-shot 평가 (논문 Table 메인 결과 — Phase 2 모델, 적응 없음)
+python 5_model/test_scr.py --checkpoint _5_data_model_scr/MMDD_HHMM2/checkpoints/best.pt
+
+# 6. Few-shot Fine-tuning (논문 Ablation — N셀 적응 후 성능)
+#    내부적으로 before(zero-shot 부분집합) / after(N셀 적응) 동시 비교
+python 5_model/finetune_scr.py \
+    --checkpoint _5_data_model_scr/MMDD_HHMM2/checkpoints/best.pt \
+    --finetune-dataset MIT \
+    --finetune-cells 5
+# → finetune_report.json: before RMSE(MIT 부분집합) / after RMSE 비교
+# → Step 5의 test_scr.py 결과(MIT 전체)가 논문 Table 메인 zero-shot 수치
+
+# (선택) Fine-tuned 모델 전체 재평가 (scatter/커브 플롯이 필요할 때)
+# python 5_model/test_scr.py \
+#     --checkpoint _5_data_model_scr/MMDD_HHMM2/ft_MIT_5shot_.../checkpoints/best.pt
+```
+
+**축별 전체 실행 예시 (vwindow):**
+
+```bash
+python 4_hi_analysis/hi_correlation.py --seg-axis vwindow
+python 5_model/train_scr.py --phase 1 --seg-axis vwindow
+python 5_model/train_scr.py --phase 2 --seg-axis vwindow --gates-from _5_data_model_scr/MMDD_HHMM
+python 5_model/test_scr.py
+python 5_model/finetune_scr.py --checkpoint ... --finetune-dataset MIT --finetune-cells 5
+```
+
+---
+
+## 논문 완성을 위한 향후 수행 목록 (리뷰어 관점)
+
+> **최종 목표**: LFP 배터리 SOH 추정 방법론(SCR 프레임워크)을 크로스-데이터셋 일반화 관점에서 학술 발표.  
+> 아래 항목들은 IEEE TII / Journal of Power Sources / Applied Energy 수준 리뷰어가 Accept 판단 전에 요구하는 필수·강화·선택 과제.
+
+---
+
+### I. 실험 필수 항목 (없으면 Reject 가능성 높음)
+
+#### 1. 베이스라인 비교
+
+리뷰어가 가장 먼저 묻는 것: "기존 방법 대비 얼마나 좋은가?"
+
+| 베이스라인 | 유형 | 구현 방법 | 비고 |
+|---|---|---|---|
+| Severson 2019 feature set | 피처 기반 | 논문 Table S1 피처 → LinearReg / ElasticNet | NATURE ENERGY, 과학계 기준점 |
+| XGBoost (hand-crafted HI) | 트리 앙상블 | `data_HI/{axis}/*.pkl` → xgb.train() | 피처 중요도 vs SCR gate 비교 가능 |
+| LSTM (raw V-I-t 시계열) | Deep | PyTorch LSTM, 전체 방전 곡선 입력 | raw signal 모델 상한선 |
+| Single-segment (probe-only) | SCR 어블레이션 | scen gate 비활성, probe만 → MLP head | 라우팅 효용 검증 |
+
+#### 2. 양방향 크로스-데이터셋 평가
+
+현재 train(MIT)→test(HUST)만 확인된 것으로 보임. 리뷰어는 반드시 **양방향**을 요구한다.
+
+```bash
+# 방향 A: MIT 학습 → HUST 테스트 (현재 구현)
+# scr.yaml: datasets: [MIT, HUST], cross_dataset_evaluate: true
+python 5_model/train_scr.py --phase 1 && python 5_model/train_scr.py --phase 2
+
+# 방향 B: HUST 학습 → MIT 테스트
+# scr.yaml: datasets: [HUST, MIT], cross_dataset_evaluate: true
+python 5_model/train_scr.py --phase 1 && python 5_model/train_scr.py --phase 2
+```
+
+- **왜 중요한가**: 결과가 비대칭(한 방향만 좋음)이면 방법론 자체의 일반화 한계 노출  
+- **예상 난점**: MIT 충전 6C→1C는 HUST 1C와 프로토콜이 다름 → qfrac/vwindow 축이 protocol 축보다 유리할 가능성
+
+#### 3. 통계적 유의성 (복수 seed 반복)
+
+단일 seed 결과는 리뷰어가 "운이 좋았다"고 기각할 수 있음.
+
+```bash
+for seed in 0 1 2 3 4; do
+    python 5_model/train_scr.py --phase 1 --seed $seed
+    python 5_model/train_scr.py --phase 2 --seed $seed --gates-from ...
+    python 5_model/test_scr.py --checkpoint ...
+done
+```
+
+보고 형식: **mean ± std (5-seed)** — 표 아래 footnote로 기재
+
+---
+
+### II. 분석 강화 항목 (없으면 Major Revision 확정)
+
+#### 4. 어블레이션 연구 (Ablation Study)
+
+각 설계 결정의 기여도를 정량화해야 한다.
+
+| 변형 실험 | 목적 | 기대 결과 |
+|---|---|---|
+| 축 비교 (5개 전체) | 세그멘테이션 축 선택의 영향 | vwindow > qfrac > protocol > rcs > cluster 예상 |
+| HI 카테고리 기여도 (전기화학/통계/dVdQ/용량) | 어떤 물리량이 핵심인가 | dVdQ·전기화학 계열이 높을 것으로 예상 |
+| Gate 비활성화 (probe 제거 / scen 제거 / 둘 다 제거) | L0 라우팅의 효용 | Gate 포함 > probe-only > scen-only > 없음 |
+| n_windows(K) 민감도 (K=2,3,4) | 파라미터 튜닝 불필요성 검증 | K=3에서 plateau 확인 |
+
+#### 5. 선택된 HI의 물리 해석
+
+리뷰어: "gate가 선택한 HI가 전기화학적으로 의미 있는가?"
+
+- `routing/routing_table.csv`에서 top-HI 추출
+- `docs/HI_DESCRIPTION.md`와 대조 → 물리 의미 연결
+- 논문 Table 또는 Figure: "selected HI list + physical interpretation + degradation mechanism"
+- 예시 연결: `dvdq_peak_v` 선택 → "Li plating 전위 변화 (Dahn 2012)" 인용
+
+#### 6. dvdq_peak_q / dvdq_valley_q 절대량 → 정규화 변환
+
+현재 `dvdq_peak_q`, `dvdq_valley_q`는 절대 Ah 단위 → 셀 용량이 다른 크로스-데이터셋에서 도메인 갭 직접 유발.
+
+```python
+# hi_extractor.py 수정 대상
+hi["dvdq_peak_q"]   = peak_q / q_total   # q_frac 단위 (0~1)
+hi["dvdq_valley_q"] = valley_q / q_total
+```
+
+- MIT (3Ah) vs HUST (2Ah): peak_q 절대값이 1.5배 차이 → 같은 피처 축에서 군집 분리 발생
+- 수정 후 게이트 재학습 → 크로스-데이터셋 RMSE 변화 측정 (기대: 감소)
+
+---
+
+### III. 모델 개선 항목 (있으면 논문 강화, Accept 확률 ↑)
+
+#### 7. Few-shot 적응 커브 (N-shot curve)
+
+현재 finetune_scr.py로 단일 N 실험만 가능. 논문 그림으로 필요한 것:
+
+```
+RMSE
+  |▓▓▓ Zero-shot (N=0)
+  |▓▓  
+  |▓   N=1
+  |    N=3   N=5   N=10
+  └──────────────────────→ N (# adaptation cells)
+```
+
+```bash
+for n in 1 3 5 10; do
+    python 5_model/finetune_scr.py --finetune-cells $n ...
+done
+```
+
+참고 문헌: [Deng 2022 MAML 기반 배터리 few-shot], [Liu 2023 meta-learning SOH]
+
+#### 8. 도메인 적응 (선택적, 논문 차별화)
+
+Zero-shot 결과가 경쟁력 없을 경우:
+
+| 방법 | 적용 위치 | 참고 |
+|---|---|---|
+| MMD (Maximum Mean Discrepancy) | HI 공간에서 소스/타겟 분포 정렬 | Pan 2010 |
+| DANN (Domain-Adversarial NN) | Probe 뒤에 domain discriminator 추가 | Ganin 2016 |
+| BOL 기준 상대화 피처 | HI 자체를 1사이클 기준으로 정규화 | Severson 2019 변형 |
+
+#### 9. 불확실성 정량화 (UQ, Uncertainty Quantification)
+
+실용 배포 관점에서 confidence interval이 없으면 신뢰성 주장 약화.
+
+- **MC Dropout**: cap_head dropout 유지, inference 시 T=50 forward pass → mean/std
+- **Deep Ensemble**: 3-5 seed 모델의 예측 ensemble → 분산 = epistemic uncertainty
+- 보고 지표: ECE (Expected Calibration Error), PICP (Prediction Interval Coverage)
+
+---
+
+### IV. 미해결 코드 과제 (논문 제출 전 수정 필요)
+
+| 항목 | 위치 | 현재 상태 | 수정 방향 |
+|---|---|---|---|
+| `THETA_FLAT` 문서 불일치 | `docs/HI_DESCRIPTION.md` | 0.05V로 기재, 코드는 0.25V | 코드 재확인 후 문서 수정 |
+| `dvdq_peak_q` 단위 | `hi_extractor.py` | 절대 Ah → 크로스-DS 편향 | `peak_q / q_total` q_frac 변환 |
+| cluster 축 크로스-DS 검증 | `cluster.py` | train K-means의 test 일반화 미검증 | HUST train 클러스터 → MIT test 적용 실험 |
+| 재현성 문서화 | 전체 | seed=42 기본값 있으나 FRAMEWORK 미기재 | Phase 1/2/finetune seed 전파 정책 명시 |
+
+---
+
+### V. 논문 구조 제안 (IEEE TII 기준 6섹션)
+
+```
+§1 Introduction       — LFP 배터리 노화, 크로스-DS 일반화 문제
+§2 Related Work       — 피처 기반(Severson), DL(LSTM/Transformer), 부분 충전(Deng)
+§3 Methodology        — 5단계 파이프라인, SCR 모델, 세그멘테이션 축 5종
+§4 Experimental Setup — MIT/HUST 데이터셋 사양, 양방향 cross-DS 분할
+§5 Results            — 베이스라인 비교 / 어블레이션 / 물리 해석 / Few-shot
+§6 Conclusion
+Appendix              — HI 전체 목록 (148D), 축별 ASCII 분할 다이어그램
+```
+
+---
+
+> **체크리스트 (제출 직전)**
+> - [ ] 5-seed 반복 실험 완료 (mean ± std)
+> - [ ] 양방향 크로스-DS 결과 표 완성
+> - [ ] dvdq_peak_q q_frac 변환 후 gate 재학습
+> - [ ] THETA_FLAT 문서-코드 일치 확인
+> - [ ] 베이스라인 4종 RMSE/MAE 표 완성
+> - [ ] 어블레이션 5종 실험 완료
+> - [ ] 선택 HI 물리 해석 표 작성
+> - [ ] Few-shot 커브 그림 (N=0/1/3/5/10)

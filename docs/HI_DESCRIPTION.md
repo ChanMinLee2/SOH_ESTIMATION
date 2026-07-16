@@ -153,7 +153,7 @@ LFP 이상전이(two-phase reaction) 및 플래토 거동에 특화된 지표.
 | L01 | `plateau_frac` | `len(samples where \|dV/dQ\|<θ_flat) / N_seg` | 구간 내 플래토 비율 (θ_flat=0.05 V/Ah) | ↓ | `dis_mid`, `chg_mid`에서 크고 다른 구간은 작음; 열화 시 감소 |
 | L02 | `plateau_v_mean` | `mean(V)` where `\|dV/dQ\|<θ_flat` [V] | 플래토 평균 전압 | ↓ (분극) | 플래토 서브구간 없으면 NaN |
 | L03 | `plateau_v_std` | `std(V)` where `\|dV/dQ\|<θ_flat` [V] | 플래토 전압 균일성 | ↑ (플래토 기울어짐) | LFP 건강 지표: 작을수록 좋음 |
-| L04 | `plateau_q_frac` | `Q_plateau / Q_seg` where plateau 정의 동일 | 구간 내 플래토 용량 비율 | ↓ | L01과 상관 높지만 시간 vs 용량 기준 차이 |
+| L04 | `plateau_dvdq_std` | `std(dV/dQ)` where `\|dV/dQ\|<θ_flat` [V/Ah] | 플래토 구간 내 dV/dQ 분산 (플래토 균일성) | ↑ (플래토 불균일 심화) | L03(V 퍼짐)과 달리 dV/dQ 공간에서 균일성 측정; `diff_dvdq_std`(세그먼트 전체)와 달리 플래토 마스크 한정 |
 | L05 | `nonlin_idx` | `RMSE(V_actual, V_linear) / V_range_seg` | V-Q 곡선 선형 기준 편차 비율 | ↑ | V_linear: (Q_start, V_start)→(Q_end, V_end) 직선 |
 | L06 | `v_sag_mid` | `V_actual(q_mid) − V_linear(q_mid)` [V] | 구간 중점에서 V-Q 처짐 | ↑ 음수 (dis) | 분극 의존; 방전은 음수(처짐), 충전은 양수(부풀음) |
 | L07 | `v_flatness` | `1 − std(V) / (V_max − V_min)` in seg | 전압 평탄도 지수 [0–1] | ↓ (플래토 붕괴) | 1에 가까울수록 완벽한 플래토 |
@@ -174,7 +174,7 @@ LFP 이상전이(two-phase reaction) 및 플래토 거동에 특화된 지표.
 > **θ_flat 설정 근거**: LFP 플래토에서 실측 dV/dQ ≈ 0.01–0.03 V/Ah. θ_flat=0.05 V/Ah로 여유 있게 설정하여 측정 노이즈 포함.
 >
 > **계산 주의사항**
-> - `plateau_frac`, `plateau_v_mean`, `plateau_v_std`, `plateau_q_frac`: dV/dQ 스무딩 후 적용. 플래토 서브구간이 전체 구간의 5% 미만이면 신뢰도 낮음 → NaN 처리 권장.
+> - `plateau_frac`, `plateau_v_mean`, `plateau_v_std`, `plateau_dvdq_std`: dV/dQ 스무딩 후 적용. 플래토 서브구간이 전체 구간의 5% 미만이면 신뢰도 낮음 → NaN 처리 권장. `plateau_dvdq_std`는 플래토 빈 수 ≥3이어야 계산됨.
 > - `v_sag_mid`: V_linear는 구간 양 끝점을 잇는 직선. 음수(방전 처짐) / 양수(충전 부풀음)로 부호 있음.
 > - `knee_v`, `knee_q_frac`: d²V/dQ² smoothed(window=11) 후 부호 전환 탐색. 전환점이 없거나 복수이면 primary (최대 절댓값) 선택.
 > - `v_concavity`: V_start = 구간 첫 샘플 전압, V_end = 마지막 샘플 전압, V_mean = capacity-weighted mean. 구간 길이 < 10 샘플이면 NaN.

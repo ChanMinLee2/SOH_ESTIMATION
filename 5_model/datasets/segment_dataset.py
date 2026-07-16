@@ -29,9 +29,15 @@ from torch.utils.data import Dataset
 
 from utils.hi_schema import (
     STAT_KEYS, DIFF_KEYS, LFP_KEYS, MORPH_KEYS,
-    SEGMENTS, SCEN_MAP, SEG_LEVEL, SEG_DIRECTION,
-    get_hi_cols_for_seg, get_hi_cost_vector, N_HI, N_SEGS,
+    get_hi_cols_for_seg, get_hi_cost_vector, N_HI, spec_from_qfrac,
 )
+
+_proj_root = Path(__file__).resolve().parent.parent.parent
+if str(_proj_root) not in sys.path:
+    sys.path.insert(0, str(_proj_root))
+from common.scenario.base import ScenarioSpec
+
+_DEFAULT_SPEC: ScenarioSpec = spec_from_qfrac()
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +84,11 @@ def _load_wide_pkl(pkl_path: Path) -> pd.DataFrame:
     raise ValueError(f"Unexpected pkl type: {type(data)}")
 
 
-def _wide_to_segments(df: pd.DataFrame, cell_id: str) -> pd.DataFrame:
+def _wide_to_segments(
+    df: pd.DataFrame,
+    cell_id: str,
+    spec: ScenarioSpec | None = None,
+) -> pd.DataFrame:
     """
     Reshape one cell's wide DataFrame (one row = one cycle) into
     segment-level DataFrame (one row = one segment).
@@ -87,29 +97,29 @@ def _wide_to_segments(df: pd.DataFrame, cell_id: str) -> pd.DataFrame:
       cell_id, cycle, seg_name, seg_idx, scen, direction, level,
       capacity_Ah, hi_00 .. hi_64
     """
+    _spec = spec or _DEFAULT_SPEC
     rows = []
     for _, cycle_row in df.iterrows():
         cycle_num = int(cycle_row.get("cycle", cycle_row.name))
         cap_ah = float(cycle_row["capacity_Ah"])
 
-        for seg in SEGMENTS:
+        for seg_idx, seg in enumerate(_spec.scenario_names):
             hi_cols = get_hi_cols_for_seg(seg)
-            # Some segments may not exist in older data — silently skip
             if not all(c in cycle_row.index for c in hi_cols):
                 continue
 
             hi_vals = cycle_row[hi_cols].values.astype(np.float32)
-            scen_code, seg_idx = SCEN_MAP[seg]
-            level = SEG_LEVEL[seg]
-            direction = SEG_DIRECTION[seg]
+            dir_idx, latent_class = _spec.scenario_to_dir_class(seg_idx)
+            direction_val = 1 if dir_idx == 0 else -1
+            level = latent_class
 
             rows.append({
                 "cell_id":     cell_id,
                 "cycle":       cycle_num,
                 "seg_name":    seg,
                 "seg_idx":     seg_idx,
-                "scen":        scen_code,
-                "direction":   direction,
+                "scen":        seg_idx,   # legacy field; == scenario_id
+                "direction":   direction_val,
                 "level":       level,
                 "capacity_Ah": cap_ah,
                 **{f"hi_{i:02d}": v for i, v in enumerate(hi_vals)},
@@ -122,12 +132,14 @@ def load_dataset_wide(
     data_dir: Path,
     datasets: Sequence[str],
     min_cycles: int = 10,
+    spec: ScenarioSpec | None = None,
 ) -> pd.DataFrame:
     """
     Load wide pkl files for all datasets and return a combined segment-level DataFrame.
 
     data_dir: e.g. Path("_4_data_hi")
     datasets: e.g. ["MIT", "HUST"]
+    spec: ScenarioSpec to use for segment routing (default: qfrac)
     """
     all_segs: list[pd.DataFrame] = []
     for ds in datasets:
@@ -144,7 +156,7 @@ def load_dataset_wide(
                 continue
             if len(df) < min_cycles:
                 continue
-            seg_df = _wide_to_segments(df, cell_id)
+            seg_df = _wide_to_segments(df, cell_id, spec=spec)
             if len(seg_df) == 0:
                 continue
             seg_df["dataset"] = ds
@@ -174,13 +186,13 @@ def _get_native_hi_cols() -> list[str]:
 
 
 _NATIVE_HI_COLS: list[str] = _get_native_hi_cols()
-_SCEN_TO_SEG: dict[int, str] = {code: seg for seg, (code, _) in SCEN_MAP.items()}
 
 
 def load_dataset_native_seg(
     seg_data_dir: Path,
     datasets: Sequence[str],
     wide_data_dir: Path | None = None,
+    spec: ScenarioSpec | None = None,
 ) -> pd.DataFrame:
     """
     Load native segment-format pkls (one row = one segment).
@@ -227,11 +239,18 @@ def load_dataset_native_seg(
             else:
                 print(f"[dataset] WARNING: no wide pkl for {ds}/{cell_id}, using segment capacity_Ah")
 
-            # Add metadata columns from scen/segment_id
-            df["seg_name"]  = df["scen"].map(_SCEN_TO_SEG)
+            # Add metadata columns from segment_id via spec
+            _spec = spec or _DEFAULT_SPEC
+            _seg_names  = _spec.scenario_names
+            _id_to_name = {i: n for i, n in enumerate(_seg_names)}
+            _id_to_dir  = {i: (1 if _spec.scenario_to_dir_class(i)[0] == 0 else -1)
+                           for i in range(_spec.n_scenarios)}
+            _id_to_lvl  = {i: _spec.scenario_to_dir_class(i)[1]
+                           for i in range(_spec.n_scenarios)}
             df["seg_idx"]   = df["segment_id"].astype(np.int64)
-            df["direction"] = df["scen"].apply(lambda x: 1.0 if x > 0 else -1.0).astype(np.float32)
-            df["level"]     = (df["scen"].abs() - 1).astype(np.int64)
+            df["seg_name"]  = df["seg_idx"].map(_id_to_name)
+            df["direction"] = df["seg_idx"].map(_id_to_dir).astype(np.float32)
+            df["level"]     = df["seg_idx"].map(_id_to_lvl).astype(np.int64)
 
             # Map native HI cols → hi_00..hi_64 (exclude stat_q_abs)
             available = [c for c in _NATIVE_HI_COLS if c in df.columns]
@@ -270,11 +289,18 @@ class SegmentNormalizer:
         return [f"hi_{i:02d}" for i in range(N_HI)]
 
     def fit(self, df: pd.DataFrame) -> "SegmentNormalizer":
+        import warnings
         x = df[self.hi_cols].values.astype(np.float64)
-        self.mean_ = np.nanmean(x, axis=0)
-        self.std_ = np.nanstd(x, axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            self.mean_ = np.nanmean(x, axis=0)
+            self.std_ = np.nanstd(x, axis=0)
+        all_nan = np.isnan(self.mean_)  # 학습 데이터에서 전부 NaN인 컬럼
+        self.mean_[all_nan] = 0.0       # no-op 처리 (x - 0)
+        self.std_[all_nan] = 1.0        # no-op 처리 (/ 1)
         self.std_[self.std_ < 1e-8] = 1.0  # constant columns → no-op
 
+        # target_mean_/target_std_: cap_init z-scoring 전용 (target은 SOH ratio, 정규화 불필요)
         cap = df["capacity_Ah"].values.astype(np.float64)
         self.target_mean_ = float(np.nanmean(cap))
         self.target_std_ = float(np.nanstd(cap))
@@ -313,9 +339,13 @@ class SegmentDataset(Dataset):
       direction  : scalar     +1.0 or -1.0 [float32]
       level      : scalar     0/1/2 int64  (ground truth for classifier loss)
       seg_idx    : scalar     0-5 int64
-      target     : scalar     normalised capacity_Ah [float32]
+      target     : scalar     SOH ratio = capacity_Ah / cap_init_Ah ∈ (0, 1] [float32]
       dataset_id : scalar     데이터셋 인덱스 (datasets 리스트 순서, 0-based) [float32]
-      cap_init   : scalar     정규화된 초기/정격 용량 [float32]
+      cap_init   : scalar     z-scored 초기/정격 용량 Ah (모델 conditioning용) [float32]
+
+    Attributes (not in __getitem__):
+      cap_init_raw  : (N,) float32 numpy — 초기/정격 용량 Ah (평가 시 SOH→Ah 변환용)
+      capacity_raw  : (N,) float32 numpy — 실측 capacity_Ah
     """
 
     def __init__(
@@ -329,14 +359,13 @@ class SegmentDataset(Dataset):
             normalizer.fit(df)
 
         x, mask = normalizer.transform_x(df)
-        cap_norm = normalizer.transform_target(df["capacity_Ah"].values)
+        cap_raw = df["capacity_Ah"].values.astype(np.float32)
 
         self.x_hi = torch.from_numpy(x)
         self.nan_mask = torch.from_numpy(mask)
         self.direction = torch.tensor(df["direction"].values, dtype=torch.float32)
         self.level = torch.tensor(df["level"].values, dtype=torch.long)
         self.seg_idx = torch.tensor(df["seg_idx"].values, dtype=torch.long)
-        self.target = torch.tensor(cap_norm, dtype=torch.float32)
 
         # ----------------------------------------------------------------
         # 메타 스칼라: dataset_id + cap_init
@@ -352,9 +381,8 @@ class SegmentDataset(Dataset):
             dtype=torch.float32,
         )
 
-        # cap_init: 초기/정격 용량 (target 정규화 기준 동일 적용)
+        # cap_init: 초기/정격 용량 raw Ah
         if cfg.get("use_initial_capacity", False):
-            # 셀별 최소 사이클의 capacity_Ah → 첫 사이클 실측 용량
             first_cap = (
                 df.sort_values("cycle")
                 .groupby("cell_id")["capacity_Ah"]
@@ -365,14 +393,20 @@ class SegmentDataset(Dataset):
             nominal = cfg.get("nominal_capacities", {})
             cap_init_raw = df["dataset"].map(nominal).fillna(1.0).values.astype(np.float32)
 
+        # target: SOH ratio (dataset-agnostic, 정규화 불필요)
+        soh = cap_raw / np.where(cap_init_raw > 0, cap_init_raw, 1.0)
+        self.target = torch.tensor(soh, dtype=torch.float32)
+
+        # cap_init 모델 입력: z-scored Ah → 셀 크기 conditioning (cross-dataset 시 구분 정보)
         cap_init_norm = normalizer.transform_target(cap_init_raw)
         self.cap_init = torch.tensor(cap_init_norm, dtype=torch.float32)
 
         # metadata (not returned by __getitem__, but useful for evaluation)
+        self.cap_init_raw = cap_init_raw                          # SOH→Ah 변환용
         self.cell_ids = df["cell_id"].values.tolist()
         self.cycles = df["cycle"].values.tolist()
         self.seg_names = df["seg_name"].values.tolist()
-        self.capacity_raw = df["capacity_Ah"].values.astype(np.float32)
+        self.capacity_raw = cap_raw
 
     def __len__(self) -> int:
         return len(self.target)
@@ -394,11 +428,39 @@ def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
     return {k: torch.stack([b[k] for b in batch]) for k in keys}
 
 
+def filter_dataset_by_cells(ds: "SegmentDataset", cell_ids: list[str]) -> "SegmentDataset":
+    """SegmentDataset에서 지정된 cell_id 행만 추출해 새 Dataset 반환."""
+    cell_set = set(cell_ids)
+    indices  = [i for i, c in enumerate(ds.cell_ids) if c in cell_set]
+    return _subset_dataset(ds, indices)
+
+
+def _subset_dataset(ds: "SegmentDataset", indices: list[int]) -> "SegmentDataset":
+    new_ds = object.__new__(SegmentDataset)
+    new_ds.x_hi        = ds.x_hi[indices]
+    new_ds.nan_mask     = ds.nan_mask[indices]
+    new_ds.direction    = ds.direction[indices]
+    new_ds.level        = ds.level[indices]
+    new_ds.seg_idx      = ds.seg_idx[indices]
+    new_ds.target       = ds.target[indices]
+    new_ds.cap_init     = ds.cap_init[indices]
+    new_ds.dataset_id   = ds.dataset_id[indices]
+    new_ds.cap_init_raw = ds.cap_init_raw[indices]
+    new_ds.cell_ids     = [ds.cell_ids[i] for i in indices]
+    new_ds.cycles       = [ds.cycles[i] for i in indices]
+    new_ds.seg_names    = [ds.seg_names[i] for i in indices]
+    new_ds.capacity_raw = ds.capacity_raw[indices]
+    return new_ds
+
+
 # ---------------------------------------------------------------------------
 # Top-level builder used by train_scr.py
 # ---------------------------------------------------------------------------
 
-def build_datasets(cfg: dict) -> tuple[SegmentDataset, SegmentDataset, SegmentDataset, SegmentNormalizer]:
+def build_datasets(
+    cfg: dict,
+    spec: ScenarioSpec | None = None,
+) -> tuple[SegmentDataset, SegmentDataset, SegmentDataset, SegmentNormalizer]:
     """
     Load data → split → build train/val/test SegmentDatasets.
 
@@ -420,7 +482,7 @@ def build_datasets(cfg: dict) -> tuple[SegmentDataset, SegmentDataset, SegmentDa
     # ------------------------------------------------------------------
     native_df = pd.DataFrame()
     if seg_dir.exists():
-        native_df = load_dataset_native_seg(seg_dir, datasets_list, wide_dir)
+        native_df = load_dataset_native_seg(seg_dir, datasets_list, wide_dir, spec=spec)
 
     if len(native_df) > 0:
         df = native_df
@@ -428,6 +490,7 @@ def build_datasets(cfg: dict) -> tuple[SegmentDataset, SegmentDataset, SegmentDa
         df = load_dataset_wide(
             wide_dir, datasets_list,
             min_cycles=data_cfg.get("min_cycles_per_cell", 10),
+            spec=spec,
         )
 
     # ------------------------------------------------------------------

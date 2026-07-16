@@ -37,7 +37,12 @@ from utils.io_utils import load_config
 from datasets.segment_dataset import build_datasets, SegmentNormalizer
 from models.scr_model import SCRModel
 from evaluation.scr_evaluator import SCREvaluator
-from utils.hi_schema import N_HI, N_SEGS, SEGMENTS
+from utils.hi_schema import N_HI, spec_from_qfrac
+
+_proj_root_c = Path(__file__).resolve().parent.parent
+if str(_proj_root_c) not in sys.path:
+    sys.path.insert(0, str(_proj_root_c))
+from common.scenario.base import ScenarioSpec
 
 
 def _parse_args() -> argparse.Namespace:
@@ -89,13 +94,13 @@ def main() -> None:
         if k in cfg.get("data", {}):
             cfg_saved.setdefault("data", {})[k] = cfg["data"][k]
 
-    train_ds, val_ds, test_ds, _ = build_datasets(cfg_saved)
-    norm = _build_normalizer_from_ckpt(ckpt)
-    for ds in (train_ds, val_ds, test_ds):
-        _reapply_norm(ds, norm)
+    # 데이터 경로: cfg_saved(학습 시 해결된 경로)를 현재 cfg에 전파 (null 대체)
+    for k in ("data_dir", "seg_data_dir"):
+        if not cfg.get("data", {}).get(k) and cfg_saved.get("data", {}).get(k):
+            cfg.setdefault("data", {})[k] = cfg_saved["data"][k]
 
     # ------------------------------------------------------------------
-    # run_dir 결정 + gate JSON 탐색
+    # run_dir 결정 + spec 로드 (build_datasets 전에 필요)
     # ------------------------------------------------------------------
     run_dir = ckpt_path.parent.parent
 
@@ -103,6 +108,20 @@ def main() -> None:
                                     "scenario_classification_HIs.json")
     scen_json  = _resolve_gate_json(run_dir, "regression_HIs.json",
                                     "scenario_regression_HIs.json")
+
+    # spec 로드 (run_dir/scenario_spec.json → 없으면 qfrac 기본값)
+    _spec_path = run_dir / "scenario_spec.json"
+    if _spec_path.exists():
+        spec = ScenarioSpec.load(_spec_path)
+        print(f"[test] spec loaded: {_spec_path}  axis={spec.axis}")
+    else:
+        spec = spec_from_qfrac()
+        print(f"[test] scenario_spec.json 없음 — qfrac 기본값 사용")
+
+    train_ds, val_ds, test_ds, _ = build_datasets(cfg_saved, spec=spec)
+    norm = _build_normalizer_from_ckpt(ckpt)
+    for ds in (train_ds, val_ds, test_ds):
+        _reapply_norm(ds, norm)
 
     # m / k
     cls_cfg     = cfg_saved.get("classifier", cfg.get("classifier", {}))
@@ -118,7 +137,7 @@ def main() -> None:
 
     # gate 마스크 로드
     ch_mask, dis_mask = _load_probe_masks(probe_json, charge_m, discharge_m, auto=auto_mk)
-    scen_masks        = _load_scen_masks(scen_json, N_SEGS, N_HI, scen_k, auto=auto_mk)
+    scen_masks        = _load_scen_masks(scen_json, spec.n_scenarios, N_HI, scen_k, auto=auto_mk)
 
     if probe_json: print(f"[test] probe gate JSON: {probe_json}")
     if scen_json:  print(f"[test] scen  gate JSON: {scen_json}")
@@ -141,6 +160,7 @@ def main() -> None:
         discharge_probe_mask=dis_mask,
         scen_masks=scen_masks,
         model_cfg=m_cfg,
+        spec=spec,
     )
     strict_load = not (ckpt_has_l0 and ch_mask is not None)
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=strict_load)
@@ -181,7 +201,7 @@ def main() -> None:
     # Routing heatmap
     probe_sel = _selected_from_masks(ch_mask, dis_mask)   # union for heatmap
     scen_sel  = ({s: scen_masks[s].nonzero(as_tuple=False).squeeze(1).tolist()
-                  for s in range(N_SEGS)} if scen_masks is not None else None)
+                  for s in range(spec.n_scenarios)} if scen_masks is not None else None)
     evaluator.plot_routing_heatmap(routing_dir,
                                    probe_sel=probe_sel,
                                    scen_sel=scen_sel)
@@ -202,11 +222,13 @@ def main() -> None:
     probe_his = model.get_selected_probe_his()
     scen_his  = model.get_selected_scen_his()
     avg_scen  = np.mean([len(v) for v in scen_his.values()])
+    _seg_names_test = model.spec.scenario_names
     print(f"\nActive charge probe HIs    : {len(probe_his['charge'])}/{N_HI}")
     print(f"Active discharge probe HIs : {len(probe_his['discharge'])}/{N_HI}")
     print(f"Avg scen HIs/seg           : {avg_scen:.1f}/{N_HI}")
     for s, idxs in scen_his.items():
-        print(f"  {SEGMENTS[s]:10s}: {len(idxs)} HIs selected")
+        seg_lbl = _seg_names_test[s] if s < len(_seg_names_test) else f"scen_{s}"
+        print(f"  {seg_lbl:12s}: {len(idxs)} HIs selected")
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +361,14 @@ def _pick_rep_cells(test_ds, cfg: dict, n_per_dataset: int = 1) -> list[str]:
 
 
 def _reapply_norm(ds, norm: SegmentNormalizer) -> None:
+    # target: SOH ratio = capacity_raw / cap_init_raw (dataset-agnostic, normalizer 불필요)
     ds.target = torch.tensor(
-        norm.transform_target(ds.capacity_raw), dtype=torch.float32
+        ds.capacity_raw / np.where(ds.cap_init_raw > 0, ds.cap_init_raw, 1.0),
+        dtype=torch.float32,
     )
-    # cap_init도 동일 normalizer로 재정규화 (build_datasets가 refitting한 normalizer와 다를 수 있음)
-    cap_init_raw = norm.inverse_target(ds.cap_init.numpy())
+    # cap_init: 체크포인트 normalizer로 재정규화 (셀 크기 conditioning)
     ds.cap_init = torch.tensor(
-        norm.transform_target(cap_init_raw), dtype=torch.float32
+        norm.transform_target(ds.cap_init_raw), dtype=torch.float32
     )
 
 

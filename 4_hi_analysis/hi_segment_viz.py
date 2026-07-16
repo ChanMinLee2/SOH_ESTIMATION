@@ -2,24 +2,27 @@
 hi_segment_viz.py
 
 출력 파일:
-  hi_segment_cuts.png           -V vs q_frac 세그먼트 경계 확인
+  hi_segment_cuts.png           -V vs q_frac 세그먼트 경계 확인 (qfrac 축 전용)
   hi_trend.png                  -Global HI 15종 열화 추이
-  hi_segment_trend_stat.png     -6구간 × 통계 HI 열화 추이 (카테고리 A)  [행=시나리오, 열=HI]
-  hi_segment_trend_diff.png     -6구간 × 미분 HI 열화 추이 (카테고리 B)
-  hi_segment_trend_lfp.png      -6구간 × LFP HI 열화 추이 (카테고리 C)
-  hi_segment_trend_morph.png    -6구간 × 형태학적 거리 HI 열화 추이 (카테고리 D)
-  hi_overlay_stat.png           -통계 HI 시나리오 오버레이 (카테고리 A)  [서브플랏=HI, 6시나리오 동시]
+  hi_segment_trend_stat.png     -N구간 × 통계 HI 열화 추이 (카테고리 A)  [행=시나리오, 열=HI]
+  hi_segment_trend_diff.png     -N구간 × 미분 HI 열화 추이 (카테고리 B)
+  hi_segment_trend_lfp.png      -N구간 × LFP HI 열화 추이 (카테고리 C)
+  hi_segment_trend_morph.png    -N구간 × 형태학적 거리 HI 열화 추이 (카테고리 D)
+  hi_overlay_stat.png           -통계 HI 시나리오 오버레이 (카테고리 A)
   hi_overlay_diff.png           -미분 HI 시나리오 오버레이 (카테고리 B)
   hi_overlay_lfp.png            -LFP HI 시나리오 오버레이 (카테고리 C)
   hi_overlay_morph.png          -형태학적 거리 HI 시나리오 오버레이 (카테고리 D)
 
 사용:
   python hi_segment_viz.py
-  python hi_segment_viz.py --workers 8 --n-cycles 4
+  python hi_segment_viz.py --seg-axis protocol --workers 8
+  python hi_segment_viz.py --seg-axis vwindow --axis-config '{"vwindow": {"n_windows": 4}}'
+  python hi_segment_viz.py --seg-axis rcs
 """
 
 import argparse
 import io
+import json
 import pickle
 import sys
 from datetime import date
@@ -39,7 +42,6 @@ from hi_correlation import (
     ALL_SEGS,
     GLOBAL_HI_KEYS,
     HI_GROUPS,
-    HI_LABELS,
     HUST_DIR,
     MIT_DIR,
     load_or_extract,
@@ -56,47 +58,14 @@ for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
         continue
 plt.rcParams["axes.unicode_minus"] = False
 
-# ── 세그먼트 경계선/색상 (hi_segment_cuts용) ──────────────────────────────────
+# ── 세그먼트 경계선/색상 (hi_segment_cuts용 — qfrac 전용) ──────────────────────
 SEG_BOUNDS     = [0.0, 0.4, 0.7, 1.0]
 DIS_SEG_COLORS = ["#aed6f1", "#a9dfbf", "#f9e79f"]
 DIS_SEG_LABELS = ["SoC 60~100%\n(초반·고전압)", "SoC 30~60%\n(플래토)", "SoC 0~30%\n(후반·저전압)"]
 CHG_SEG_COLORS = ["#f9e79f", "#a9dfbf", "#aed6f1"]
 CHG_SEG_LABELS = ["SoC 0~30%\n(초반·저전압)", "SoC 30~60%\n(플래토)", "SoC 60~100%\n(후반·CV)"]
 
-# ── 행 배경색 (충전=주황, 방전=파랑) -segment_id 시간 순서 반영 ───────────
-SEG_ROW_BG = ["#eaf4fb"] * 3 + ["#fef5eb"] * 3   # dis_hi/mid/lo, chg_lo/mid/hi
-SEG_ROW_LABEL = [
-    "dis_hi\n(SoC 60–100%)",
-    "dis_mid\n(SoC 30–60%)",
-    "dis_lo\n(SoC 0–30%)",
-    "chg_lo\n(SoC 0–40%)",
-    "chg_mid\n(SoC 40–70%)",
-    "chg_hi\n(SoC 70–100%)",
-]
-
 DS_COLOR = {"MIT": "#1f77b4", "HUST": "#d55e00"}
-
-# ── 시나리오 오버레이용 색상 ────────────────────────────────────────────────────
-# 충전(주황 계열): chg_lo → chg_mid → chg_hi  (연→진)
-# 방전(파란 계열): dis_hi → dis_mid → dis_lo  (연→진)
-_SCEN_COLORS = {
-    "chg_lo":  "#FDB863",   # 연한 주황 (SoC 0–40%)
-    "chg_mid": "#E08214",   # 중간 주황 (SoC 40–70%)
-    "chg_hi":  "#8E3B06",   # 짙은 갈색 (SoC 70–100%, CV 구간 포함)
-    "dis_hi":  "#6BAED6",   # 연한 파랑 (SoC 60–100%)
-    "dis_mid": "#2171B5",   # 중간 파랑 (SoC 30–60%)
-    "dis_lo":  "#08306B",   # 짙은 남색 (SoC 0–30%)
-}
-_SCEN_LABELS = {
-    "chg_lo":  "chg_lo  (0–40%)",
-    "chg_mid": "chg_mid (40–70%)",
-    "chg_hi":  "chg_hi  (70–100%)",
-    "dis_hi":  "dis_hi  (60–100%)",
-    "dis_mid": "dis_mid (30–60%)",
-    "dis_lo":  "dis_lo  (0–30%)",
-}
-# 시간 순 (충전 먼저 → 방전)
-_SCEN_ORDER = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
 
 # ── 카테고리 메타 ──────────────────────────────────────────────────────────────
 CATEGORIES = [
@@ -111,6 +80,71 @@ OVERLAY_CATEGORIES = [
     ("LFP",   "카테고리 C: LFP 특징 기반 (L01–L20)",    "hi_overlay_lfp.png"),
     ("Morph", "카테고리 D: 형태학적 거리 (M01–M06)",    "hi_overlay_morph.png"),
 ]
+
+# ── 방향별 색상 팔레트 (dis=파랑 계열, chg=주황 계열) ──────────────────────────
+_DIS_SHADES = ["#AED6F1", "#5DADE2", "#2471A3", "#1A5276", "#0E3460",
+               "#7FB3D3", "#3498DB", "#1F618D"]
+_CHG_SHADES = ["#FAD7A0", "#F0A500", "#E67E22", "#CA6F1E", "#7D3C98",
+               "#F5CBA7", "#DC7633", "#A04000"]
+
+_CAT_PREFIXES = ("stat_", "diff_", "lfp_", "morph_")
+
+
+def _plain_label(key: str) -> str:
+    """HI 컬럼 이름에서 직관적인 스네이크 표기 라벨 추출.
+
+    stat_v_mean_cw_dis_hi → v_mean_cw
+    lfp_inflect_v_chg_lo  → inflect_v
+    q_dis                 → q_dis   (글로벌 HI는 그대로)
+    """
+    for prefix in _CAT_PREFIXES:
+        if key.startswith(prefix):
+            without_prefix = key[len(prefix):]
+            parts = without_prefix.rsplit("_", 2)
+            return parts[0] if len(parts) == 3 else without_prefix
+    return key
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 세그먼트 메타 동적 생성 (축 독립)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_seg_meta(hi_groups: dict, category: str) -> tuple:
+    """HI_GROUPS에서 활성 세그먼트 목록과 시각화 메타(색상/레이블) 동적 생성.
+
+    qfrac(dis_hi/mid/lo, chg_lo/mid/hi)뿐 아니라 protocol(chg_step0, dis_step0 …),
+    vwindow(chg_win0, dis_win0 …), rcs 등 임의 축에 대해 작동.
+
+    Returns
+    -------
+    seg_order    : list[str]        활성 세그먼트 이름 목록 (dis 먼저, chg 다음)
+    seg_row_bg   : list[str]        행 배경색 (dis=청, chg=주황)
+    seg_row_label: list[str]        행 레이블 (세그먼트 이름 그대로)
+    scen_colors  : dict[str, str]   세그먼트별 색상 hex
+    scen_labels  : dict[str, str]   세그먼트별 범례 레이블
+    """
+    seg_order = list(dict.fromkeys(
+        g.split(" — ")[0] for g in hi_groups if f" — {category}" in g
+    ))
+    if not seg_order:
+        return [], [], [], {}, {}
+
+    dis_segs = [s for s in seg_order if s.startswith("dis")]
+    chg_segs = [s for s in seg_order if s.startswith("chg")]
+
+    seg_row_bg    = ["#eaf4fb" if s.startswith("dis") else "#fef5eb" for s in seg_order]
+    seg_row_label = seg_order[:]
+
+    scen_colors: dict[str, str] = {}
+    scen_labels: dict[str, str] = {}
+    for i, s in enumerate(dis_segs):
+        scen_colors[s] = _DIS_SHADES[i % len(_DIS_SHADES)]
+        scen_labels[s] = s
+    for i, s in enumerate(chg_segs):
+        scen_colors[s] = _CHG_SHADES[i % len(_CHG_SHADES)]
+        scen_labels[s] = s
+
+    return seg_order, seg_row_bg, seg_row_label, scen_colors, scen_labels
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,7 +166,6 @@ def _pick_cycles(cyc_series, n=4):
 
 
 def _vq_frac(cycle_df, phase):
-    # _4_data_hi/clean PKL에는 phase 컬럼이 없으므로 전류 부호로 판별
     if phase == "discharge":
         grp = cycle_df[cycle_df["current_A"] < -0.1]
     else:
@@ -178,7 +211,7 @@ def _draw_trend_cell(ax, df, hi_key):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 1: 세그먼트 분할 확인 (hi_segment_cuts.png)
+# Figure 1: 세그먼트 분할 확인 (hi_segment_cuts.png) — qfrac 전용
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _draw_seg_panel(ax, cell_df, cell_id, phase, seg_colors, seg_labels, n_cycles):
@@ -278,9 +311,8 @@ def plot_hi_trend(df: pd.DataFrame, out_path: Path):
                        color=color, s=1.2, alpha=0.28,
                        label=ds if not legend_done else None)
 
-        lbl = HI_LABELS.get(hi_key, hi_key)
         ax.set_xlabel("Capacity (Ah)", fontsize=8)
-        ax.set_ylabel(lbl, fontsize=8)
+        ax.set_ylabel(_plain_label(hi_key), fontsize=8)
         ax.set_title(hi_key, fontsize=8, fontweight="bold")
         ax.tick_params(labelsize=7)
         ax.grid(True, lw=0.3, alpha=0.4)
@@ -298,34 +330,33 @@ def plot_hi_trend(df: pd.DataFrame, out_path: Path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 3: 세그먼트별 HI 열화 추이 -카테고리별 (6 seg × 15 HI 그리드)
+# Figure 3: 세그먼트별 HI 열화 추이 -카테고리별
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
                           category: str, cat_title: str):
-    """6구간 × N HI 그리드 -한 카테고리(Stat/Diff/LFP/Morph).
+    """N구간 × M HI 그리드 -한 카테고리(Stat/Diff/LFP/Morph).
 
-    category : "Stat" | "Diff" | "LFP" | "Morph"
-    cat_title: 플롯 제목에 표시할 카테고리 이름
-    N        : 카테고리별 HI 수 (Stat/Diff/LFP=15, Morph=6)
+    세그먼트 이름은 HI_GROUPS에서 동적 추출하므로 qfrac/protocol/vwindow/rcs 모두 호환.
     """
     df = df.copy()
     df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
-
     is_morph = (category == "Morph")
 
-    # 세그먼트 순서: ALL_SEGS 그대로 (dis_hi/mid/lo, chg_lo/mid/hi)
+    seg_order, seg_row_bg, seg_row_label, _, _ = _build_seg_meta(HI_GROUPS, category)
     seg_keys_list = [
-        (seg, HI_GROUPS[f"{seg} — {category}"])
-        for _, _, seg, _ in ALL_SEGS
+        (seg, HI_GROUPS.get(f"{seg} — {category}", []))
+        for seg in seg_order
     ]
-    n_segs = len(seg_keys_list)        # 6
-    n_his  = len(seg_keys_list[0][1])  # Stat/Diff/LFP=15, Morph=6
+    seg_keys_list = [(s, ks) for s, ks in seg_keys_list if ks]
+    if not seg_keys_list:
+        print(f"  [trend] {category} 카테고리 HI 없음, 건너뜀")
+        return
 
-    # 열 헤더: 첫 번째 세그먼트(dis_hi) 기준 HI 레이블
-    col_labels = [HI_LABELS.get(k, k) for k in seg_keys_list[0][1]]
+    n_segs = len(seg_keys_list)
+    n_his  = len(seg_keys_list[0][1])
+    col_labels = [_plain_label(k) for k in seg_keys_list[0][1]]
 
-    # Morph는 피처 수가 적으므로 셀 크기 확대
     cell_w = 5.5 if is_morph else 3.2
     cell_h = 3.8 if is_morph else 3.0
     fig, axes = plt.subplots(
@@ -340,18 +371,17 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
     )
     fig.suptitle(
         f"세그먼트별 HI 열화 추이 -{cat_title}{morph_note}\n"
-        "( 행=SoC 구간,  열=HI 종류,  x=Capacity Ah )\n"
+        "( 행=세그먼트,  열=HI 종류,  x=Capacity Ah )\n"
         "■ 파란 계열=MIT   ■ 주황 계열=HUST",
         fontsize=13, fontweight="bold",
     )
 
-    # 열 헤더
     for ci, lbl in enumerate(col_labels):
         axes[0, ci].set_title(lbl, fontsize=10, fontweight="bold", pad=4)
 
     for ri, (seg, hi_keys) in enumerate(seg_keys_list):
-        bg = SEG_ROW_BG[ri]
-        row_lbl = SEG_ROW_LABEL[ri]
+        bg      = seg_row_bg[ri]    if ri < len(seg_row_bg)    else "#f0f0f0"
+        row_lbl = seg_row_label[ri] if ri < len(seg_row_label) else seg
 
         for ci, hi_key in enumerate(hi_keys):
             ax = axes[ri, ci]
@@ -359,23 +389,14 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
             _draw_trend_cell(ax, df, hi_key)
             ax.set_xlabel("Cap (Ah)", fontsize=8)
             if is_morph:
-                # 거리값은 항상 ≥0 (BOL=0, 열화→증가)
                 ax.set_ylim(bottom=0)
-                ax.axhline(0, color="gray", lw=0.8, ls="--",
-                           alpha=0.55, zorder=0)
+                ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.55, zorder=0)
 
-        # 행 레이블: 첫 번째 열 y축
-        y_unit = "dist." if is_morph else HI_LABELS.get(hi_keys[0], hi_keys[0])
-        axes[ri, 0].set_ylabel(
-            f"{row_lbl}\n{y_unit}",
-            fontsize=9, labelpad=4,
-        )
-        # 나머지 열: HI 레이블만
+        y_unit = "dist." if is_morph else _plain_label(hi_keys[0])
+        axes[ri, 0].set_ylabel(f"{row_lbl}\n{y_unit}", fontsize=9, labelpad=4)
         for ci in range(1, n_his):
-            axes[ri, ci].set_ylabel(
-                HI_LABELS.get(hi_keys[ci], hi_keys[ci]), fontsize=8)
+            axes[ri, ci].set_ylabel(_plain_label(hi_keys[ci]), fontsize=8)
 
-    # 공통 범례
     handles = [
         plt.Line2D([0], [0], color=c, lw=2, label=ds)
         for ds, c in DS_COLOR.items()
@@ -391,23 +412,26 @@ def plot_segment_hi_trend(df: pd.DataFrame, out_path: Path,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Figure 4: 시나리오 오버레이 -한 서브플랏에 1 HI × 6 시나리오
+# Figure 4: 시나리오 오버레이 -한 서브플랏에 1 HI × N 시나리오
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
                              category: str, cat_title: str) -> None:
-    """한 서브플랏에 1 HI의 6개 시나리오 열화 추이를 동시 표시.
+    """한 서브플랏에 1 HI의 N개 시나리오 열화 추이를 동시 표시.
 
-    - 충전(주황 계열): chg_lo(연) / chg_mid(중) / chg_hi(진)
-    - 방전(파란 계열): dis_hi(연) / dis_mid(중) / dis_lo(진)
-    - MIT = 실선,  HUST = 점선
-    - 셀별 궤적(얇고 반투명) + 데이터셋별 중앙값 추세선(굵음)
+    세그먼트 이름은 HI_GROUPS에서 동적 추출하므로 qfrac/protocol/vwindow/rcs 모두 호환.
+    dis 계열: 파란 계열 / chg 계열: 주황 계열 (팔레트 자동 배정)
+    MIT = 실선 / HUST = 점선
     """
     df = df.copy()
     df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
 
-    # ── 기준 세그먼트에서 HI base name 목록 추출 ─────────────────────────────
-    ref_seg   = ALL_SEGS[0][2]          # "dis_hi"
+    seg_order, _, _, scen_colors, scen_labels = _build_seg_meta(HI_GROUPS, category)
+    if not seg_order:
+        print(f"  [overlay] {category} 카테고리 세그먼트 없음, 건너뜀")
+        return
+
+    ref_seg   = seg_order[0]
     ref_group = HI_GROUPS.get(f"{ref_seg} — {category}", [])
     if not ref_group:
         print(f"  [overlay] {category} 그룹 키 없음, 건너뜀")
@@ -419,7 +443,6 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
     if n_his == 0:
         return
 
-    # ── 레이아웃 ─────────────────────────────────────────────────────────────
     is_morph = (category == "Morph")
     ncols    = 3 if is_morph else 5
     nrows    = (n_his + ncols - 1) // ncols
@@ -432,25 +455,23 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
     fig.patch.set_facecolor("#f5f5f5")
     fig.suptitle(
         f"시나리오 오버레이 -{cat_title}\n"
-        "서브플랏 = 1 HI,  6개 시나리오 동시 표시  (x = Capacity Ah)\n"
-        "충전: 주황 계열 ●  |  방전: 파란 계열 ●  |  실선 = MIT  /  점선 = HUST",
+        "서브플랏 = 1 HI,  N개 시나리오 동시 표시  (x = Capacity Ah)\n"
+        "dis: 파란 계열 ●  |  chg: 주황 계열 ●  |  실선 = MIT  /  점선 = HUST",
         fontsize=12, fontweight="bold",
     )
 
-    # ── 캔터 빈 Q 범위 계산 (capacity 축 통일) ───────────────────────────────
     cap_all = df["capacity_Ah"].dropna()
     cap_lo  = float(cap_all.quantile(0.01)) if len(cap_all) else 0.0
     cap_hi  = float(cap_all.quantile(0.99)) if len(cap_all) else 2.0
-    n_bins  = 40   # 중앙값 추세선 Q-빈 수
+    n_bins  = 40
 
     def _median_trend(sub_df, key):
-        """capacity_Ah를 n_bins 구간으로 나눠 HI 중앙값 반환 (x, y)."""
         sub = sub_df[["capacity_Ah", key]].dropna()
         if len(sub) < 5:
             return np.array([]), np.array([])
-        bins  = np.linspace(cap_lo, cap_hi, n_bins + 1)
-        mids  = (bins[:-1] + bins[1:]) / 2
-        meds  = []
+        bins = np.linspace(cap_lo, cap_hi, n_bins + 1)
+        mids = (bins[:-1] + bins[1:]) / 2
+        meds = []
         for lo, hi in zip(bins[:-1], bins[1:]):
             seg_vals = sub.loc[(sub["capacity_Ah"] >= lo) & (sub["capacity_Ah"] < hi), key]
             meds.append(np.nanmedian(seg_vals) if len(seg_vals) >= 3 else np.nan)
@@ -458,18 +479,17 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
         valid = np.isfinite(meds)
         return mids[valid], meds[valid]
 
-    # ── 서브플랏 그리기 ───────────────────────────────────────────────────────
     for ai, base in enumerate(base_names):
         ax = axes[ai // ncols][ai % ncols]
         ax.set_facecolor("white")
         has_data = False
 
-        for scen in _SCEN_ORDER:
+        for scen in seg_order:
             full_key = f"{base}_{scen}"
             if full_key not in df.columns:
                 continue
-            color = _SCEN_COLORS[scen]
-            scen_lbl = _SCEN_LABELS[scen]
+            color    = scen_colors.get(scen, "#888888")
+            scen_lbl = scen_labels.get(scen, scen)
 
             for ds, ls in [("MIT", "-"), ("HUST", "--")]:
                 sub = df[df["dataset"] == ds][
@@ -479,15 +499,11 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
                     continue
                 has_data = True
 
-                # 셀별 궤적 (얇고 반투명)
                 for _, grp in sub.groupby("cell_id"):
                     grp_s = grp.sort_values("capacity_Ah", ascending=False)
-                    ax.plot(
-                        grp_s["capacity_Ah"], grp_s[full_key],
-                        color=color, lw=0.7, alpha=0.18, ls=ls,
-                    )
+                    ax.plot(grp_s["capacity_Ah"], grp_s[full_key],
+                            color=color, lw=0.7, alpha=0.18, ls=ls)
 
-                # 데이터셋별 중앙값 추세선 (굵음, 범례 첫 MIT만 레이블)
                 mx, my = _median_trend(sub, full_key)
                 if len(mx) >= 2:
                     lbl = (f"{scen_lbl} / {ds}"
@@ -499,13 +515,10 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
             ax.text(0.5, 0.5, "N/A", ha="center", va="center",
                     transform=ax.transAxes, fontsize=9, color="gray")
 
-        # 서브플랏 장식
-        hi_lbl = HI_LABELS.get(f"{base}_{ref_seg}", base)
-        ax.set_title(base.replace("stat_", "").replace("diff_", "")
-                        .replace("lfp_", "").replace("morph_", ""),
-                     fontsize=8.5, fontweight="bold", pad=3)
+        plain = _plain_label(f"{base}_{ref_seg}")
+        ax.set_title(plain, fontsize=8.5, fontweight="bold", pad=3)
         ax.set_xlabel("Cap (Ah)", fontsize=7)
-        ax.set_ylabel(hi_lbl, fontsize=7)
+        ax.set_ylabel(plain, fontsize=7)
         ax.tick_params(labelsize=6.5)
         ax.grid(True, lw=0.3, alpha=0.35)
         ax.set_xlim(cap_lo, cap_hi)
@@ -514,31 +527,21 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
             ax.set_ylim(bottom=0)
             ax.axhline(0, color="gray", lw=0.8, ls="--", alpha=0.5, zorder=0)
 
-    # 빈 axes 숨기기
     for ai in range(n_his, nrows * ncols):
         axes[ai // ncols][ai % ncols].set_visible(False)
 
-    # ── 공통 범례 ─────────────────────────────────────────────────────────────
     handles = []
-    # 시나리오 색상 (실선 아이콘)
-    for scen in _SCEN_ORDER:
+    for scen in seg_order:
         handles.append(
-            plt.Line2D([0], [0], color=_SCEN_COLORS[scen], lw=2.2, ls="-",
-                       label=_SCEN_LABELS[scen])
+            plt.Line2D([0], [0], color=scen_colors.get(scen, "#888888"), lw=2.2, ls="-",
+                       label=scen_labels.get(scen, scen))
         )
-    # 데이터셋 구분 (굵은 선 vs 점선)
     handles += [
         plt.Line2D([0], [0], color="dimgray", lw=2.0, ls="-",  label="MIT (실선)"),
         plt.Line2D([0], [0], color="dimgray", lw=2.0, ls="--", label="HUST (점선)"),
     ]
-    fig.legend(
-        handles=handles,
-        loc="lower right",
-        fontsize=8.5,
-        framealpha=0.90,
-        bbox_to_anchor=(1.0, 0.0),
-        ncol=2,
-    )
+    fig.legend(handles=handles, loc="lower right", fontsize=8.5,
+               framealpha=0.90, bbox_to_anchor=(1.0, 0.0), ncol=2)
 
     plt.tight_layout(rect=[0, 0, 1, 0.93])
     plt.savefig(out_path, dpi=140, bbox_inches="tight")
@@ -552,42 +555,66 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="세그먼트 분할 시각화 + HI 열화 추이 (321-HI 전 카테고리 A–D)")
-    parser.add_argument("--workers",  type=int, default=4,
+        description="세그먼트 분할 시각화 + HI 열화 추이 (카테고리 A–D, 다축 호환)")
+    parser.add_argument("--workers",      type=int, default=4,
                         help="HI 추출 병렬 워커 수 (기본: 4)")
-    parser.add_argument("--n-cycles", type=int, default=4,
+    parser.add_argument("--n-cycles",     type=int, default=4,
                         help="세그먼트 cuts 플롯 대표 사이클 수 (기본: 4)")
-    parser.add_argument("--force",    action="store_true",
+    parser.add_argument("--force",        action="store_true",
                         help="캐시 무시하고 HI 재추출")
+    parser.add_argument("--seg-axis",     type=str, default="qfrac",
+                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster (기본: qfrac)")
+    parser.add_argument("--axis-config",  type=str, default="{}",
+                        help="축 파라미터 JSON (예: '{\"max_steps\": 3}')")
     args = parser.parse_args()
 
-    mit_pkls  = sorted(MIT_DIR.glob("*.pkl"))
-    hust_pkls = sorted(HUST_DIR.glob("*.pkl"))
+    _axis = args.seg_axis
+    try:
+        _axis_cfg: dict = json.loads(args.axis_config)
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] --axis-config JSON 파싱 실패: {e}"); return
 
-    hi_plot_dir = PROJECT_ROOT / "hi_plot" / date.today().strftime("%m%d")
+    # qfrac 이외 축은 HI_GROUPS 재빌드 (모듈 전역 갱신)
+    if _axis != "qfrac":
+        import sys as _sys
+        _sys.path.insert(0, str(PROJECT_ROOT.parent))
+        from common.scenario import get_segmenter as _get_seg
+        from hi_correlation import _build_hi_groups
+        _seg_names = _get_seg(_axis, {_axis: _axis_cfg}).get_spec().scenario_names
+        _new_groups, _, _ = _build_hi_groups(_seg_names)
+        global HI_GROUPS
+        HI_GROUPS = _new_groups
+        print(f"[hi_viz] HI_GROUPS 재빌드: {_seg_names}")
+
+    _dir_suffix = f"_{_axis}" if _axis != "qfrac" else ""
+    hi_plot_dir = PROJECT_ROOT / "hi_plot" / (date.today().strftime("%m%d") + _dir_suffix)
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Figure 1: 세그먼트 분할 확인 ─────────────────────────────────────
-    print("=== 세그먼트 분할 시각화 ===")
-    plot_segment_cuts(mit_pkls, hust_pkls,
-                      hi_plot_dir / "hi_segment_cuts.png",
-                      n_cycles=args.n_cycles)
+    # Figure 1: 세그먼트 분할 확인 (qfrac 전용 — 경계가 q_frac 기준)
+    if _axis == "qfrac":
+        print("=== 세그먼트 분할 시각화 ===")
+        mit_pkls  = sorted(MIT_DIR.glob("*.pkl"))
+        hust_pkls = sorted(HUST_DIR.glob("*.pkl"))
+        plot_segment_cuts(mit_pkls, hust_pkls,
+                          hi_plot_dir / "hi_segment_cuts.png",
+                          n_cycles=args.n_cycles)
 
-    # ── HI 로드 ───────────────────────────────────────────────────────────
+    # HI 로드
     print("\n=== HI 로드/추출 ===")
-    df = load_or_extract(n_workers=args.workers, force=args.force)
+    df = load_or_extract(n_workers=args.workers, force=args.force,
+                         axis=_axis, axis_cfg=_axis_cfg)
     print(f"  총 사이클: {len(df):,}")
 
-    # ── Figure 2: Global HI 열화 추이 ────────────────────────────────────
+    # Figure 2: Global HI 열화 추이
     print("\n=== Global HI 열화 추이 (15종) ===")
     plot_hi_trend(df, hi_plot_dir / "hi_trend.png")
 
-    # ── Figure 3-A/B/C/D: 카테고리별 세그먼트 HI 열화 추이 ───────────────
+    # Figure 3-A/B/C/D: 카테고리별 세그먼트 HI 열화 추이
     for cat, cat_title, fname in CATEGORIES:
         print(f"\n=== 세그먼트 HI 추이 -{cat_title} ===")
         plot_segment_hi_trend(df, hi_plot_dir / fname, cat, cat_title)
 
-    # ── Figure 4-A/B/C/D: 시나리오 오버레이 ─────────────────────────────
+    # Figure 4-A/B/C/D: 시나리오 오버레이
     for cat, cat_title, fname in OVERLAY_CATEGORIES:
         print(f"\n=== 시나리오 오버레이 -{cat_title} ===")
         plot_segment_hi_overlay(df, hi_plot_dir / fname, cat, cat_title)

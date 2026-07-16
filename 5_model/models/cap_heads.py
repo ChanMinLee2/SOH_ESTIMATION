@@ -8,6 +8,7 @@ Phase 1은 항상 MLPHead (build_cap_head 호출 시 model_cfg 미전달).
   mlp          : 기본 MLP 2-hidden-layer (기존 동작과 완전 동일)
   transformer  : Transformer Encoder — probe/scen/meta 3 semantic 토큰
   i_transformer: Inverted Transformer — 130개 피처 각각이 토큰 (feature-wise attention)
+  resnet_tab   : ResNet for tabular (Gorishniy et al., NeurIPS 2021) — skip-connection blocks
 """
 
 from __future__ import annotations
@@ -25,18 +26,32 @@ _HEAD_IN = N_HI + N_HI + 1 + 1  # 64+64+1+1 = 130
 # ---------------------------------------------------------------------------
 
 class MLPHead(nn.Module):
-    """기존 cap_head와 동일한 2-hidden-layer MLP."""
+    """
+    Configurable MLP head.
 
-    def __init__(self, d_head: int = 128, dropout: float = 0.1):
+    mlp_hidden_dims=None (default) → [d_head, d_head//2] (기존 동작과 동일)
+    mlp_hidden_dims=[256,128,64]   → 3-hidden-layer MLP
+    dropout은 hidden layers 사이에만 적용 (출력층 직전 제외).
+    """
+
+    def __init__(
+        self,
+        d_head: int = 128,
+        dropout: float = 0.1,
+        mlp_hidden_dims: list[int] | None = None,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(_HEAD_IN, d_head),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_head, d_head // 2),
-            nn.ReLU(),
-            nn.Linear(d_head // 2, 1),
-        )
+        hidden = mlp_hidden_dims if mlp_hidden_dims is not None else [d_head, d_head // 2]
+        layers: list[nn.Module] = []
+        in_d = _HEAD_IN
+        for i, h in enumerate(hidden):
+            layers.append(nn.Linear(in_d, h))
+            layers.append(nn.ReLU())
+            if i < len(hidden) - 1:   # hidden layers 사이에만 dropout
+                layers.append(nn.Dropout(dropout))
+            in_d = h
+        layers.append(nn.Linear(in_d, 1))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, 130)  →  (B,)
@@ -146,6 +161,69 @@ class ITransformerHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# 4. ResNet-Tab
+# ---------------------------------------------------------------------------
+
+class _ResBlock(nn.Module):
+    """Pre-activation residual block: LN → Linear → ReLU → Dropout → Linear → Dropout → +x"""
+
+    def __init__(self, d: int, d_hidden: int, dropout: float):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(d),
+            nn.Linear(d, d_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden, d),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.net(x)
+
+
+class ResNetTabHead(nn.Module):
+    """
+    ResNet for tabular data (Gorishniy et al., NeurIPS 2021).
+
+    Architecture:
+      Linear(_HEAD_IN → d) → [ResBlock × n_blocks] → LN → ReLU → Linear(d → 1)
+
+    L0 gate로 이미 피처 선택이 된 sparse 130-dim 입력에서
+    skip connection이 gradient 흐름을 안정화하고 depth를 높임.
+
+    yaml 설정:
+      regression_model: resnet_tab
+      resnet_n_blocks: 4          # 기본값
+      resnet_d_hidden_factor: 2.0 # d_hidden = d_head × factor
+    """
+
+    def __init__(
+        self,
+        d: int = 128,
+        d_hidden_factor: float = 2.0,
+        n_blocks: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        d_hidden = int(d * d_hidden_factor)
+        self.input_proj = nn.Linear(_HEAD_IN, d)
+        self.blocks = nn.ModuleList(
+            [_ResBlock(d, d_hidden, dropout) for _ in range(n_blocks)]
+        )
+        self.norm   = nn.LayerNorm(d)
+        self.output = nn.Linear(d, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 130)
+        x = self.input_proj(x)
+        for block in self.blocks:
+            x = block(x)
+        x = torch.relu(self.norm(x))
+        return self.output(x).squeeze(-1)  # (B,)
+
+
+# ---------------------------------------------------------------------------
 # 팩토리
 # ---------------------------------------------------------------------------
 
@@ -156,7 +234,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> 
 
     Args:
         model_cfg : cfg["model"] 딕셔너리 (scr.yaml의 model: 섹션)
-        d_head    : MLP hidden dim 또는 Transformer d_model (yaml model.d_head)
+        d_head    : MLP hidden dim 또는 Transformer d_model / ResNet block width
         dropout   : dropout rate (yaml model.dropout)
     """
     rtype = model_cfg.get("regression_model", "mlp").lower().replace("-", "_")
@@ -166,7 +244,8 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> 
     d_ff     = model_cfg.get("tr_d_ff",     d_head * 2)
 
     if rtype == "mlp":
-        return MLPHead(d_head=d_head, dropout=dropout)
+        return MLPHead(d_head=d_head, dropout=dropout,
+                       mlp_hidden_dims=model_cfg.get("mlp_hidden_dims"))
 
     if rtype == "transformer":
         return TransformerHead(
@@ -180,7 +259,15 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> 
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
         )
 
+    if rtype == "resnet_tab":
+        return ResNetTabHead(
+            d=d_head,
+            d_hidden_factor=model_cfg.get("resnet_d_hidden_factor", 2.0),
+            n_blocks=model_cfg.get("resnet_n_blocks", 4),
+            dropout=dropout,
+        )
+
     raise ValueError(
         f"Unknown regression_model: '{rtype}'. "
-        "Choose from: mlp / transformer / i_transformer"
+        "Choose from: mlp / transformer / i_transformer / resnet_tab"
     )
