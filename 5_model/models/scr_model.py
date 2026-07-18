@@ -1,16 +1,20 @@
 """
 SCR (Scenario-Conditioned Routing) model.
 
-Stage A — direction-aware probe gate (HI subset selection, regression only)
+Stage A — direction-aware probe gate (dual objective)
   1. Direction-aware HardConcreteGate:
        charge_probe_gate    (N_HI) — charging segments
        discharge_probe_gate (N_HI) — discharging segments
-     Each gate independently selects m HIs optimal for regression.
-  Note: probe_mlp (level classification) removed. CE 손실 비활성.
+     Phase 1 (with_probe_mlp=True):
+       probe_gate receives gradients from BOTH MSE (regression) and CE (classification)
+       → selects HIs useful for both tasks simultaneously
+     Phase 2 / inference: probe_gate frozen from Phase 1 JSON (regression utility only)
 
 Stage B — scenario-conditioned regression
-  2. Per-scenario HardConcreteGate (n_scenarios × N_HI) selects k additional HIs
-  3. Capacity head: [probe_x || scen_x || direction || cap_init] → capacity_Ah
+  2. Per-scenario HardConcreteGate (n_scenarios × N_HI) selects k HIs per scenario
+     MSE gradient only — regression-specialised subset per scenario
+
+  3. Capacity head: [probe_x || scen_x || direction || cap_init] → SOH ratio
 
 At inference JSON masks may replace the L0 gates (fixed binary vectors).
 """
@@ -48,6 +52,7 @@ class SCRModel(nn.Module):
         scen_masks: Optional[torch.Tensor] = None,           # (n_scenarios, N_HI) bool
         model_cfg: Optional[dict] = None,  # Phase 2 전용: regression_model 선택
         spec=None,   # ScenarioSpec | None  (None → qfrac default)
+        with_probe_mlp: bool = False,  # Phase 1 dual-objective: probe_gate에 CE 그래디언트 추가
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -96,9 +101,30 @@ class SCRModel(nn.Module):
         # input: probe_x (N_HI) || scen_x (N_HI) || direction (1) || cap_init (1)
         # = m active probe HIs + k active scen HIs + 2 scalars
         # Phase 1: 항상 MLP (model_cfg=None)
-        # Phase 2: model_cfg["regression_model"] 에 따라 MLP/Transformer/iTransformer
+        # Phase 2: model_cfg["regression_model"] 에 따라
+        #   mlp / transformer / i_transformer / resnet_tab / ft_transformer
         # ----------------------------------------------------------------
         self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout)
+
+        # ----------------------------------------------------------------
+        # probe_mlp — Phase 1 dual-objective CE head
+        # probe_x (N_HI, mostly zeros) → n_classes logits
+        # CE gradient flows through probe_mlp → probe_gate only
+        # MSE gradient flows through cap_head → probe_gate + scen_gates
+        # ----------------------------------------------------------------
+        if with_probe_mlp:
+            # 입력: probe_x (N_HI) + direction (1) → N_HI+1
+            # direction 추가로 충/방전 간 sparsity 패턴 구분
+            self.probe_mlp: Optional[nn.Sequential] = nn.Sequential(
+                nn.Linear(N_HI + 1, d_probe),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_probe, d_probe // 2),
+                nn.ReLU(),
+                nn.Linear(d_probe // 2, self.n_classes),
+            )
+        else:
+            self.probe_mlp = None
 
     # ------------------------------------------------------------------
     # Gate helpers
@@ -182,10 +208,11 @@ class SCRModel(nn.Module):
                     seg_idx (B,), cap_init (B,)
 
         Returns:
-          cap_pred     : (B,)      normalised capacity prediction
-          level_logits : (B,n_cls) zeros — CE 비활성, 로그 호환용
-          probe_z      : (B,N_HI)
-          scen_z       : (B,N_HI)
+          cap_pred     : (B,)      SOH ratio prediction
+          level_logits : (B,n_cls) class logits (real when probe_mlp active, else zeros)
+          probe_x      : (B,N_HI) direction-masked probe features (for Phase 3 classifier)
+          probe_z      : (B,N_HI) gate activation values
+          scen_z       : (B,N_HI) scenario gate activation values
         """
         x         = batch["x_hi"]                           # (B, N_HI)
         nan_mask  = batch["nan_mask"]                       # (B, N_HI)
@@ -194,10 +221,12 @@ class SCRModel(nn.Module):
 
         x = x * nan_mask  # NaN positions → 0
 
-        # Stage A: direction-aware probe gate (regression HI selection only)
+        # Stage A: direction-aware probe gate
+        # MSE gradient → probe_gate (regression signal)
+        # CE gradient  → probe_gate via probe_mlp (classification signal, Phase 1 only)
         probe_x, probe_z = self._apply_probe_gate(x, direction, seg_idx)
 
-        # Stage B: scenario-conditioned gate
+        # Stage B: scenario-conditioned gate (MSE gradient only)
         scen_x, scen_z = self._apply_scen_gate(x, seg_idx) # (B, N_HI)
 
         # Capacity head: probe_x + scen_x + direction + cap_init
@@ -209,14 +238,19 @@ class SCRModel(nn.Module):
         )                                                   # (B, 2*N_HI+2)
         cap_pred = self.cap_head(feat)                      # (B,)
 
-        # CE 비활성 — zeros 반환 (evaluator 로그 호환)
-        level_logits = torch.zeros(
-            x.size(0), self.n_classes, dtype=x.dtype, device=x.device
-        )
+        # CE head: [probe_x || direction] → class logits (Phase 1 dual-objective only)
+        if self.probe_mlp is not None:
+            probe_x_dir = torch.cat([probe_x, direction.unsqueeze(1)], dim=1)
+            level_logits = self.probe_mlp(probe_x_dir)
+        else:
+            level_logits = torch.zeros(
+                x.size(0), self.n_classes, dtype=x.dtype, device=x.device
+            )
 
         return {
             "cap_pred":     cap_pred,
             "level_logits": level_logits,
+            "probe_x":      probe_x,
             "probe_z":      probe_z,
             "scen_z":       scen_z,
         }
@@ -228,6 +262,17 @@ class SCRModel(nn.Module):
     def predict(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         self.eval()
         return self.forward(batch)
+
+    @torch.no_grad()
+    def get_probe_x(
+        self, x_hi: torch.Tensor, direction: torch.Tensor, seg_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Direction-aware probe masking for external use (e.g., classifier inference).
+        Returns probe_x (B, N_HI) — same shape as x_hi but only m active positions.
+        """
+        probe_x, _ = self._apply_probe_gate(x_hi, direction, seg_idx)
+        return probe_x
 
     @torch.no_grad()
     def get_selected_probe_his(self) -> dict[str, list[int]]:

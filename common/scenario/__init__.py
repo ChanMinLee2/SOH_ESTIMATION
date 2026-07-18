@@ -38,6 +38,12 @@ try:
 except Exception:
     pass
 
+try:
+    from .test_rs import TestRSSegmenter
+    REGISTRY["test_rs"] = TestRSSegmenter
+except Exception:
+    pass
+
 
 def get_segmenter(name: str, cfg: dict | None = None) -> Segmenter:
     """

@@ -281,8 +281,8 @@ class SegmentNormalizer:
     def __init__(self):
         self.mean_: np.ndarray | None = None  # (N_HI,)
         self.std_: np.ndarray | None = None   # (N_HI,)
-        self.target_mean_: float = 0.0
-        self.target_std_: float = 1.0
+        self.cap_init_mean_: float = 0.0   # cap_init z-score 전용 (SOH target과 무관)
+        self.cap_init_std_: float = 1.0
 
     @property
     def hi_cols(self) -> list[str]:
@@ -300,26 +300,27 @@ class SegmentNormalizer:
         self.std_[all_nan] = 1.0        # no-op 처리 (/ 1)
         self.std_[self.std_ < 1e-8] = 1.0  # constant columns → no-op
 
-        # target_mean_/target_std_: cap_init z-scoring 전용 (target은 SOH ratio, 정규화 불필요)
+        # cap_init_mean_/cap_init_std_: cap_init z-scoring 전용 (SOH target은 정규화 불필요)
         cap = df["capacity_Ah"].values.astype(np.float64)
-        self.target_mean_ = float(np.nanmean(cap))
-        self.target_std_ = float(np.nanstd(cap))
-        if self.target_std_ < 1e-8:
-            self.target_std_ = 1.0
+        self.cap_init_mean_ = float(np.nanmean(cap))
+        self.cap_init_std_ = float(np.nanstd(cap))
+        if self.cap_init_std_ < 1e-8:
+            self.cap_init_std_ = 1.0
         return self
 
-    def transform_x(self, df: pd.DataFrame) -> np.ndarray:
+    def transform_x(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         x = df[self.hi_cols].values.astype(np.float64)
         nan_mask = np.isnan(x)
         x = (x - self.mean_) / self.std_
         x[nan_mask] = 0.0
         return x.astype(np.float32), (~nan_mask).astype(np.float32)
 
-    def transform_target(self, cap: np.ndarray) -> np.ndarray:
-        return ((cap - self.target_mean_) / self.target_std_).astype(np.float32)
+    def transform_cap_init(self, cap: np.ndarray) -> np.ndarray:
+        """cap_init Ah → z-scored (모델 conditioning 입력용)."""
+        return ((cap - self.cap_init_mean_) / self.cap_init_std_).astype(np.float32)
 
-    def inverse_target(self, cap_norm: np.ndarray) -> np.ndarray:
-        return cap_norm * self.target_std_ + self.target_mean_
+    def inverse_cap_init(self, cap_norm: np.ndarray) -> np.ndarray:
+        return cap_norm * self.cap_init_std_ + self.cap_init_mean_
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +399,7 @@ class SegmentDataset(Dataset):
         self.target = torch.tensor(soh, dtype=torch.float32)
 
         # cap_init 모델 입력: z-scored Ah → 셀 크기 conditioning (cross-dataset 시 구분 정보)
-        cap_init_norm = normalizer.transform_target(cap_init_raw)
+        cap_init_norm = normalizer.transform_cap_init(cap_init_raw)
         self.cap_init = torch.tensor(cap_init_norm, dtype=torch.float32)
 
         # metadata (not returned by __getitem__, but useful for evaluation)
@@ -560,3 +561,30 @@ def build_datasets(
     print(f"[dataset] segs   train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
     return train_ds, val_ds, test_ds, norm
+
+
+def build_random_seg_dataset(
+    seg_data_dir: Path,
+    datasets: list[str],
+    normalizer: SegmentNormalizer,
+    data_cfg: dict,
+    spec: ScenarioSpec | None = None,
+) -> "SegmentDataset":
+    """
+    랜덤 세그먼트(test_rs 등) PKL을 로드해 SegmentDataset 반환.
+
+    normalizer: 반드시 학습 체크포인트에서 복원한 것을 전달 (refit 없음).
+    spec: 랜덤 세그먼트 데이터의 ScenarioSpec (test_rs → n_scenarios=2).
+          None 이면 load_dataset_native_seg 기본값 사용.
+    """
+    root = PROJECT_ROOT
+    seg_dir  = root / seg_data_dir
+    wide_dir = seg_dir.parent / "cycle"   # test_rs/cycle/{MIT,HUST}/*.pkl
+
+    df = load_dataset_native_seg(seg_dir, datasets, wide_dir, spec=spec)
+    if len(df) == 0:
+        raise RuntimeError(f"[build_random_seg_dataset] 데이터 없음: {seg_dir}")
+
+    print(f"[dataset] random_seg: {len(df):,} 세그먼트 로드 ({seg_data_dir})")
+    ds = SegmentDataset(df, normalizer, fit_normalizer=False, data_cfg=data_cfg)
+    return ds

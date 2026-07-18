@@ -792,8 +792,8 @@ def _seg_diff(vs, ims, dts, qcs, seg):
     if q_tot > 0.005 and fin18.sum() >= 3:
         qm_f18 = qm[fin18]
         dv_f18 = dvdq_sm[fin18]
-        out[f"diff_dvdq_peak_q_{seg}"] = float(qm_f18[int(np.argmax(np.abs(dv_f18)))])
-        out[f"diff_dvdq_flat_q_{seg}"] = float(qm_f18[int(np.argmin(np.abs(dv_f18)))])
+        out[f"diff_dvdq_peak_q_{seg}"] = float(qm_f18[int(np.argmax(np.abs(dv_f18)))]) / q_tot
+        out[f"diff_dvdq_flat_q_{seg}"] = float(qm_f18[int(np.argmin(np.abs(dv_f18)))]) / q_tot
 
     # D20: IC area asymmetry (left / right of peak)
     if len(vmids) >= 4:

@@ -1,11 +1,13 @@
 """
 SCR composite loss.
 
-L = MSE(cap_pred, cap_target)
-  + lambda_l0 * L0_penalty
+Phase 1 dual-objective:
+  L = MSE(cap_pred, cap_target)           ← probe_gate + scen_gates
+    + lambda_scen * CE(level_logits, level) ← probe_gate only (via probe_mlp)
+    + lambda_l0   * L0_penalty             ← sparsity on all gates
 
-CE(level_logits, level) 제거 — 회귀 전용 Phase 1/2.
-분류기 HI 탐색은 별도 단계에서 추가 예정.
+Phase 2 (probe_mlp=None):
+  L = MSE + lambda_l0 * L0_penalty
 
 L0_penalty: for each scenario, computes E[cost of active HIs].
   Charging scenarios: use charge_probe_gate + scen_gate[s]
@@ -26,11 +28,11 @@ class SCRLoss(nn.Module):
 
     def __init__(
         self,
-        lambda_scen: float = 0.0,   # 미사용 — 로그/config 호환용으로 유지
+        lambda_scen: float = 0.0,
         lambda_l0: float = 0.01,
     ):
         super().__init__()
-        self.lambda_scen = 0.0      # CE 비활성 고정
+        self.lambda_scen = lambda_scen  # > 0 → CE 활성 (Phase 1 with probe_mlp)
         self.lambda_l0 = lambda_l0
 
         costs = get_hi_cost_vector("dis_hi")
@@ -48,10 +50,12 @@ class SCRLoss(nn.Module):
         mse = F.mse_loss(cap_pred, target)
         l0  = self._l0_penalty(model)
 
-        total = mse + self.lambda_l0 * l0
-
-        # ce=0 반환 — trainer/evaluator 로그 호환
+        # CE: probe_mlp 존재 + lambda_scen > 0 일 때만 활성 (Phase 1 dual-objective)
         ce = torch.zeros(1, device=cap_pred.device).squeeze()
+        if self.lambda_scen > 0 and getattr(model, "probe_mlp", None) is not None:
+            ce = F.cross_entropy(outputs["level_logits"], batch["level"])
+
+        total = mse + self.lambda_scen * ce + self.lambda_l0 * l0
         return {"total": total, "mse": mse, "ce": ce, "l0": l0}
 
     def _l0_penalty(self, model: nn.Module) -> torch.Tensor:

@@ -100,10 +100,13 @@ def _resolve_device(device_str: str) -> torch.device:
 
 def _build_normalizer_from_ckpt(ckpt: dict) -> SegmentNormalizer:
     norm = SegmentNormalizer()
-    norm.mean_        = ckpt["norm_mean"]
-    norm.std_         = ckpt["norm_std"]
-    norm.target_mean_ = ckpt["norm_target_mean"]
-    norm.target_std_  = ckpt["norm_target_std"]
+    norm.mean_ = ckpt["norm_mean"]
+    norm.std_  = ckpt["norm_std"]
+    # 구버전 체크포인트(norm_target_*) 하위호환
+    norm.cap_init_mean_ = float(ckpt.get("norm_cap_init_mean",
+                                          ckpt.get("norm_target_mean", 0.0)))
+    norm.cap_init_std_  = float(ckpt.get("norm_cap_init_std",
+                                          ckpt.get("norm_target_std",  1.0)))
     return norm
 
 

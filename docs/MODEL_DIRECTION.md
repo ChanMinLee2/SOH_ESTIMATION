@@ -489,7 +489,67 @@ LFP는 NMC/NCA와 달리 평탄 전압 구간(Flat Plateau)이 약 3.2~3.4V에 �
 
 ---
 
-### 0. 참조 기준선 (현재 완료된 결과)
+### 핵심 평가 프레임 (3축 평가)
+
+이 계획서의 모든 실험은 아래 3가지 평가 축을 기준으로 결과를 수집한다.
+
+| 평가 축 | 데이터 | routing | 의미 |
+|---------|--------|---------|------|
+| **E1** qfrac → qfrac | 기존 test split | — | 이상적 조건 상한선 |
+| **E2** qfrac → random | test_rs 세그먼트 | none | 실제 배포 시나리오 성능 |
+| **E3** qfrac → random + routing | test_rs 세그먼트 | hard | 분류기의 기여도 |
+
+E1과 E2의 차이 = **distribution shift 손실**  
+E2와 E3의 차이 = **분류기 라우팅의 기여**  
+이 두 갭이 논문의 핵심 주장을 정량화한다.
+
+---
+
+### 0. 전제 조건 확인 (실험 시작 전)
+
+모든 실험을 수행하기 전에 아래 항목이 완료되어야 한다.
+
+#### 0-1. test_rs 데이터셋 생성
+
+랜덤 세그먼트 데이터셋(`_4_data_hi/test_rs/`)이 생성 완료되어야 E2/E3 평가를 수행할 수 있다.
+
+```bash
+# 백그라운드 실행 완료 확인
+python tmp_make_test_rs.py --n-samples 8 --workers 4
+
+# 생성 확인
+ls _4_data_hi/test_rs/seg/MIT/    # 셀별 PKL 존재 여부
+cat _4_data_hi/test_rs/test_rs_stats.txt   # 통계 요약
+```
+
+**정상 기준**: 총 세그먼트 수 ≈ 사이클 수 × 14~16개/사이클, MIT+HUST 모두 존재.
+
+#### 0-2. 분류기 재활성화
+
+E3(routing=hard) 실험을 위해 분류기(`lambda_scen > 0`)를 포함한 Phase 1을 재학습해야 한다.
+
+```yaml
+# scr.yaml — 분류기 활성화 설정
+loss:
+  lambda_scen: 0.5      # 현재 0.0 → 0.5로 변경 (CE 활성화)
+  lambda_l0: 0.01
+```
+
+분류기가 비활성화된 기존 체크포인트는 E1, E2에만 사용 가능하다. E3는 분류기 포함 재학습 체크포인트 필요.
+
+#### 0-3. 코드 수정 완료 확인
+
+| 항목 | 파일 | 상태 |
+|------|------|------|
+| `cap_init_mean_/std_` 이름 변경 | `segment_dataset.py` | ✅ 완료 |
+| `build_random_seg_dataset()` 추가 | `segment_dataset.py` | ✅ 완료 |
+| `_build_normalizer_from_ckpt` 하위호환 | `test_scr.py`, `finetune_scr.py` | ✅ 완료 |
+| `predict_dataset(routing_mode=)` | `scr_evaluator.py` | ✅ 완료 |
+| `test.random_segment_test` yaml 옵션 | `config/scr.yaml` | ✅ 완료 |
+
+---
+
+### 0-BIS. 참조 기준선 (현재 완료된 결과)
 
 모든 실험 결과의 비교 기준점.
 
@@ -525,6 +585,119 @@ training:
   early_stop_patience: 30
   run_overfit_test: false
 ```
+
+---
+
+### R-1. 3축 평가 — E1: qfrac → qfrac (기준선 재확인)
+
+**목적**: 기존 체크포인트로 이상적 조건 상한선을 측정. 이 결과가 E2, E3 비교의 분모가 된다.
+
+**실행** (코드 수정 없음, 현재 기본 동작):
+
+```bash
+python 5_model/test_scr.py --checkpoint _5_data_model_scr/0715_1340/checkpoints/best.pt
+# → test 분할(HUST) 세그먼트 평가, routing 없음
+```
+
+**scr.yaml**:
+```yaml
+test:
+  random_segment_test: false    # 기본값 — qfrac 분할 세그먼트로 평가
+```
+
+**수집 지표**: test RMSE, MAE, R², MAPE (HUST zero-shot + 10-shot fine-tune)
+
+---
+
+### R-2. 3축 평가 — E2: qfrac → random (distribution shift 측정)
+
+**목적**: test_rs 랜덤 세그먼트에서 동일 체크포인트(분류기 비활성)의 성능 측정.  
+**의미**: E1과의 차이 = distribution shift에 의한 성능 손실량.
+
+**전제**: test_rs 데이터 생성 완료 (0-1 확인).
+
+**실행**:
+```bash
+# E2 평가 — 기존 체크포인트, random_segment_test, routing=none
+python 5_model/test_scr.py \
+  --checkpoint _5_data_model_scr/0715_1340/checkpoints/best.pt \
+  --override test.random_segment_test=true \
+  --override test.random_seg_routing=none
+```
+
+또는 scr.yaml 수정 후 실행:
+```yaml
+test:
+  random_segment_test: true
+  random_seg_data_dir: "_4_data_hi/test_rs/seg"
+  random_seg_datasets: ["MIT", "HUST"]
+  random_seg_routing: "none"     # 방향(충/방전)으로만 헤드 선택
+```
+
+**출력 위치**: `{run_dir}/random_seg_test/metrics.json`, `random_seg_predictions.csv`
+
+**수집 지표**: 랜덤 세그먼트 RMSE, R² (E1과 동일 체크포인트, 비교를 위해 나란히 보고)
+
+---
+
+### R-3. 3축 평가 — E3: qfrac → random + routing (분류기 기여도 측정)
+
+**목적**: 분류기 라우팅이 distribution shift 손실을 얼마나 회복하는지 측정.  
+**의미**: E2와의 차이 = 분류기의 기여도. E1과 같아질수록 라우팅이 완벽.
+
+**전제**: 분류기 활성화 후 재학습한 체크포인트 필요 (0-2 완료).
+
+#### R-3-0. 분류기 활성화 Phase 1 재학습
+
+```yaml
+# config/scr_with_classifier.yaml 또는 scr.yaml 수정
+loss:
+  lambda_scen: 0.5              # CE 손실 활성화
+  lambda_l0: 0.01
+  lambda_l0_auto: true
+```
+
+```bash
+# Phase 1 재학습 (분류기 포함)
+python 5_model/train_scr.py --phase 1 --config 5_model/config/scr.yaml
+# → {run_id_cls}/gates/classification_HIs.json 생성
+
+# Phase 2 재학습
+python 5_model/train_scr.py --phase 2 \
+  --gates-from _5_data_model_scr/{run_id_cls}
+```
+
+#### R-3-1. E3 평가 (routing=hard)
+
+```bash
+python 5_model/test_scr.py \
+  --checkpoint _5_data_model_scr/{run_id_cls_p2}/checkpoints/best.pt \
+  --override test.random_segment_test=true \
+  --override test.random_seg_routing=hard
+```
+
+#### R-3-2. E3 평가 (routing=soft, 보조)
+
+```bash
+python 5_model/test_scr.py \
+  --checkpoint _5_data_model_scr/{run_id_cls_p2}/checkpoints/best.pt \
+  --override test.random_segment_test=true \
+  --override test.random_seg_routing=soft
+```
+
+#### 3축 비교 최종 요약표 (이 실험 완료 후 작성)
+
+| 실험 | 학습 데이터 | 테스트 데이터 | routing | RMSE | R² | 비고 |
+|------|-----------|------------|---------|------|-----|------|
+| E1 | qfrac segs | qfrac test split | — | TBD | TBD | 상한선 |
+| E2 | qfrac segs | test_rs (random) | none | TBD | TBD | 배포 시나리오 |
+| E3-hard | qfrac segs | test_rs (random) | hard | TBD | TBD | 라우팅 기여 |
+| E3-soft | qfrac segs | test_rs (random) | soft | TBD | TBD | 라우팅 기여(보조) |
+
+**해석 기준**:
+- E1 - E2 > E3 - E2 : 라우팅이 기여함 (논문 주장 성립)
+- E1 ≈ E2 : distribution shift가 애초에 작음 (문제 자체가 약함, 추가 분석 필요)
+- E3 > E1 : 라우팅이 부작용 발생 (잘못된 분류가 오히려 손해)
 
 ---
 
@@ -960,19 +1133,47 @@ data:
 
 ### 실험 실행 순서 및 소요 시간 추정
 
-| 단계 | 실험 ID | 코드 수정 | 실행 시간 추정 | 우선순위 |
-|:----:|---------|:--------:|:-------------:|:--------:|
-| 1 | **F-PROTO-P2, F-VWIN-P2** | 없음 | 각 ~30분 | ★★★ |
-| 2 | **A4-P1ONLY-RCS** | 없음 | ~5분 (평가만) | ★★★ |
-| 3 | **C4-NSHOT-RCS** (N=1,5,20) | 없음 | ~30분 | ★★★ |
-| 4 | **B3-LASSO-XGB** | 신규 스크립트 | ~2시간 | ★★☆ |
-| 5 | **E-STABILITY** (5 seeds) | 없음 | ~2.5시간 | ★★☆ |
-| 6 | **A2-UNIFORM** | hi_schema.py 1줄 | ~1시간 | ★★☆ |
-| 7 | **A1-SHARED** (게이트 공유) | scr_model.py 수정 | ~1시간 | ★★☆ |
-| 8 | **A3-SINGLE** (단일 scen gate) | scr_model.py 수정 | ~1시간 | ★☆☆ |
-| 9 | **B1-GLOBAL-MLP** | 신규 스크립트 | ~1시간 | ★★☆ |
-| 10 | **B2-INDEPENDENT** | 신규 스크립트 | ~3시간 | ★☆☆ |
-| 11 | F-PROTO/VWIN fine-tuning (C시리즈 보완) | 없음 | ~1시간 | ★☆☆ |
-| 12 | C3-JACCARD 분석 | 분석 스크립트 | ~30분 | ★☆☆ |
+#### Phase 0: 전제 조건 완료 (다른 실험 시작 전)
 
-> **코드 수정 없이 바로 실행 가능한 것**: 1, 2, 3, 5, 11, 12 → 우선 실행 후 수정이 필요한 ablation(A시리즈)으로 진행.
+| 단계 | 작업 | 명령/파일 | 소요 시간 | 상태 |
+|:----:|------|---------|:--------:|:----:|
+| 0-1 | test_rs 생성 완료 확인 | `cat _4_data_hi/test_rs/test_rs_stats.txt` | — | 진행 중 |
+| 0-2 | E1 기준선 평가 (qfrac→qfrac) | `test_scr.py --checkpoint 0715_1340/...` | ~5분 | ⬜ |
+| 0-3 | E2 배포 시나리오 평가 (qfrac→random, routing=none) | scr.yaml `random_segment_test: true` | ~5분 | ⬜ |
+
+#### Phase 1: 분류기 활성화 + E3 (핵심 실험)
+
+| 단계 | 실험 ID | 코드 수정 | 실행 시간 | 우선순위 |
+|:----:|---------|:--------:|:--------:|:--------:|
+| 1 | **R-3-0**: 분류기 활성화 Phase 1 재학습 | `lambda_scen: 0.5` | ~1시간 | ★★★ |
+| 2 | **R-3-0**: 분류기 포함 Phase 2 재학습 | `gates_from: {cls_run}` | ~30분 | ★★★ |
+| 3 | **E3-hard**: qfrac→random, routing=hard 평가 | yaml 변경 후 test_scr.py | ~5분 | ★★★ |
+| 4 | **E3-soft**: qfrac→random, routing=soft 평가 | yaml 변경 후 test_scr.py | ~5분 | ★★★ |
+
+> **단계 1~4 완료 후**: E1/E2/E3 비교표 작성 → 분류기 기여도 정량화
+
+#### Phase 2: 축 비교 실험 (코드 수정 불필요)
+
+| 단계 | 실험 ID | 코드 수정 | 실행 시간 | 우선순위 |
+|:----:|---------|:--------:|:--------:|:--------:|
+| 5 | **F-PROTO-P2, F-VWIN-P2** | 없음 | 각 ~30분 | ★★★ |
+| 6 | **A4-P1ONLY-RCS** | 없음 | ~5분 (평가만) | ★★★ |
+| 7 | **C4-NSHOT-RCS** (N=1,5,20) | 없음 | ~30분 | ★★★ |
+| 8 | 각 축별 E2/E3 평가 (protocol/vwindow) | yaml 변경 | ~20분 | ★★☆ |
+
+#### Phase 3: Ablation 및 Baseline (코드 수정 필요)
+
+| 단계 | 실험 ID | 코드 수정 | 실행 시간 | 우선순위 |
+|:----:|---------|:--------:|:--------:|:--------:|
+| 9 | **B3-LASSO-XGB** | 신규 스크립트 | ~2시간 | ★★☆ |
+| 10 | **E-STABILITY** (5 seeds) | 없음 | ~2.5시간 | ★★☆ |
+| 11 | **A2-UNIFORM** | hi_schema.py 1줄 | ~1시간 | ★★☆ |
+| 12 | **A1-SHARED** (게이트 공유) | scr_model.py 수정 | ~1시간 | ★★☆ |
+| 13 | **B1-GLOBAL-MLP** | 신규 스크립트 | ~1시간 | ★★☆ |
+| 14 | **A3-SINGLE** (단일 scen gate) | scr_model.py 수정 | ~1시간 | ★☆☆ |
+| 15 | **B2-INDEPENDENT** | 신규 스크립트 | ~3시간 | ★☆☆ |
+| 16 | F-PROTO/VWIN fine-tuning (C시리즈 보완) | 없음 | ~1시간 | ★☆☆ |
+| 17 | C3-JACCARD 분석 | 분석 스크립트 | ~30분 | ★☆☆ |
+
+> **즉시 실행 가능**: Phase 0 (0-1 완료 후 0-2, 0-3) → Phase 1 (1~4) → Phase 2 (5~8)  
+> 분류기 코드 활성화 외 코드 수정이 불필요한 작업들이 대부분이므로 Phase 0~2를 먼저 완주하고 논문 주장 검증 후 Phase 3 ablation으로 진행.

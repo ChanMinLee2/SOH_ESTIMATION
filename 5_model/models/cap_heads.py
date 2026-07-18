@@ -5,10 +5,11 @@ Phase 2에서 yaml의 model.regression_model 값에 따라 회귀 헤드를 교�
 Phase 1은 항상 MLPHead (build_cap_head 호출 시 model_cfg 미전달).
 
 지원 모델:
-  mlp          : 기본 MLP 2-hidden-layer (기존 동작과 완전 동일)
-  transformer  : Transformer Encoder — probe/scen/meta 3 semantic 토큰
-  i_transformer: Inverted Transformer — 130개 피처 각각이 토큰 (feature-wise attention)
-  resnet_tab   : ResNet for tabular (Gorishniy et al., NeurIPS 2021) — skip-connection blocks
+  mlp            : 기본 MLP 2-hidden-layer (기존 동작과 완전 동일)
+  transformer    : Transformer Encoder — probe/scen/meta 3 semantic 토큰
+  i_transformer  : Inverted Transformer — 130개 피처 각각이 토큰 (feature-wise attention)
+  resnet_tab     : ResNet for tabular (Gorishniy et al., NeurIPS 2021) — skip-connection blocks
+  ft_transformer : FT-Transformer + CLS 토큰 + Sparse Attention Mask (Gorishniy et al., NeurIPS 2021)
 """
 
 from __future__ import annotations
@@ -224,6 +225,86 @@ class ResNetTabHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# 5. FT-Transformer + CLS token + Sparse Attention Mask
+# ---------------------------------------------------------------------------
+
+class FTTransformerHead(nn.Module):
+    """
+    FT-Transformer (Feature Tokenizer + Transformer) with [CLS] aggregation
+    and sparse attention masking (Gorishniy et al., NeurIPS 2021).
+
+    iTransformerHead 대비 두 가지 핵심 차이:
+      1. 학습 가능한 [CLS] 토큰을 시퀀스 앞에 붙이고, out[:,0]으로 집약
+         (mean pool 대신 CLS가 전체 피처 정보를 선택적으로 수집)
+      2. src_key_padding_mask: L0 게이트로 0이 된 HI 위치를 어텐션에서 제외
+         → 어텐션 budget을 실제 활성 HI에만 집중
+
+    입력 구조 (130-dim):
+      x[:, :N_HI*2] = probe_x ∥ scen_x  — L0 게이트 후 0=비활성
+      x[:, -2:]     = direction + cap_init — 항상 유효 (마스킹 제외)
+
+    yaml 설정:
+      regression_model: ft_transformer
+      tr_n_heads  : 4
+      tr_n_layers : 2
+      tr_d_ff     : 256
+    """
+
+    def __init__(
+        self,
+        d_model: int = 128,
+        n_heads: int = 4,
+        n_layers: int = 2,
+        d_ff: int = 256,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.n_feat     = _HEAD_IN                                   # 130
+        self.n_hi       = N_HI * 2                                   # 128 (probe+scen)
+        self.value_proj = nn.Linear(1, d_model)                      # scalar → d_model
+        self.feat_emb   = nn.Embedding(_HEAD_IN, d_model)            # 피처 ID 임베딩
+        self.cls_token  = nn.Parameter(torch.zeros(1, 1, d_model))   # 학습 가능한 CLS
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=d_ff,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,    # Pre-LN: 학습 안정성
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        self.output  = nn.Linear(d_model, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 130)
+        B = x.size(0)
+        dev = x.device
+
+        # ── 피처 토크나이제이션 ──────────────────────────────────────────
+        vals   = self.value_proj(x.unsqueeze(-1))                    # (B, 130, d)
+        pos    = self.feat_emb(torch.arange(self.n_feat, device=dev))  # (130, d)
+        tokens = vals + pos.unsqueeze(0)                             # (B, 130, d)
+
+        # ── [CLS] 토큰 prepend ───────────────────────────────────────────
+        cls    = self.cls_token.expand(B, -1, -1)                    # (B, 1, d)
+        tokens = torch.cat([cls, tokens], dim=1)                     # (B, 131, d)
+
+        # ── Sparse attention mask ────────────────────────────────────────
+        # probe_x + scen_x (128-dim): 0 = L0 게이트 비활성 → 어텐션 제외
+        # direction + cap_init (2-dim): 항상 유효
+        # CLS (1-dim): 항상 유효
+        hi_pad   = (x[:, :self.n_hi] == 0)                          # (B, 128) bool
+        meta_pad = torch.zeros(B, 2, dtype=torch.bool, device=dev)  # (B, 2)  항상 False
+        cls_pad  = torch.zeros(B, 1, dtype=torch.bool, device=dev)  # (B, 1)  항상 False
+        pad_mask = torch.cat([cls_pad, hi_pad, meta_pad], dim=1)    # (B, 131)
+
+        # ── Encoder + CLS 집약 ───────────────────────────────────────────
+        out = self.encoder(tokens, src_key_padding_mask=pad_mask)    # (B, 131, d)
+        return self.output(out[:, 0]).squeeze(-1)                    # (B,)
+
+
+# ---------------------------------------------------------------------------
 # 팩토리
 # ---------------------------------------------------------------------------
 
@@ -267,7 +348,13 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> 
             dropout=dropout,
         )
 
+    if rtype in ("ft_transformer", "fttransformer"):
+        return FTTransformerHead(
+            d_model=d_head, n_heads=n_heads,
+            n_layers=n_layers, d_ff=d_ff, dropout=dropout,
+        )
+
     raise ValueError(
         f"Unknown regression_model: '{rtype}'. "
-        "Choose from: mlp / transformer / i_transformer / resnet_tab"
+        "Choose from: mlp / transformer / i_transformer / resnet_tab / ft_transformer"
     )

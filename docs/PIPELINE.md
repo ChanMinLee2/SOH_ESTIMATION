@@ -16,23 +16,54 @@ raw data
                         → _4_data_hi/{axis}/seg/{ds}/*.pkl    (native-seg)
                         → _4_data_hi/{axis}/scenario_spec.json
   ↓ [5_model]
-      Phase 1: L0 HardConcrete gate → probe/scen HI 선택 → gates/*.json
-      Phase 2: 고정 gate + 분류 + 회귀 → checkpoints/best.pt
-  ↓ [test_scr]        평가 → metrics/ + figures/ + routing/ + predictions/
+      Phase 1 : L0 HardConcrete gate → probe/scen HI 선택 → gates/*.json
+      Phase 2 : 고정 gate + 회귀 전용 → checkpoints/best.pt
+      Clf     : 독립 시나리오 분류기 학습 → classifier/clf_best.pt  ← B안 추가
+  ↓ [test_scr]   평가 3축:
+      E1 (qfrac→qfrac test)     : 이상적 상한선 (routing=none)
+      E2 (qfrac→random test)    : 배포 시나리오  (routing=none, random_segment_test=true)
+      E3 (qfrac→random+routing) : 분류기 기여도  (routing=hard|soft, clf 필요)
+                → metrics/ + figures/ + routing/ + predictions/
 ```
 
-오케스트레이터: **`run_pipeline.py`** (Step 1~5 순차 실행)
+오케스트레이터: **`run_pipeline.py`** (Step 1~9)
+
+| Step | 이름 | 스크립트 |
+|------|------|---------|
+| 1 | 데이터 변환 | `1_convert/convert_unified.py` |
+| 2 | 이상 사이클 제거 | `2_preprocess/preprocess.py` |
+| 3 | 무결성 검사 | `3_integrity/check_integrity.py` |
+| 4 | HI 상관 분석 | `4_hi_analysis/hi_correlation.py` |
+| 5 | HI 세그먼트 시각화 | `4_hi_analysis/hi_segment_viz.py` |
+| 6 | SCR Phase 1 학습 | `5_model/train_scr.py --phase 1` |
+| 7 | SCR Phase 2 학습 | `5_model/train_scr.py --phase 2` |
+| **8** | **시나리오 분류기 학습** | **`5_model/train_classifier.py`** |
+| 9 | SCR 평가 | `5_model/test_scr.py` |
 
 ```powershell
-# Step 1~5 전체 자동 실행
+# 전체 파이프라인 (Step 1~9)
 python run_pipeline.py
 
-# Step N부터 실행 (예: HI 추출(4)부터)
-python run_pipeline.py 4
+# 학습+평가만 (Step 6~9)
+python run_pipeline.py 6
 
-# 병렬 프로세스 수 지정
+# Phase 1~2만 (분류기·평가 제외)
+python run_pipeline.py 6 --to-step 7
+
+# 분류기 학습만
+python run_pipeline.py 8 --to-step 8
+
+# 평가만 (체크포인트 직접 지정)
+python run_pipeline.py 9 --checkpoint _5_data_model_scr/0716_1200_p2_mlp_prot/checkpoints/best.pt
+
+# 병렬 프로세스 수 지정 (Step 1~5 전용)
 python run_pipeline.py --workers 4
 ```
+
+**Phase 간 자동 핸드오프:**
+- Step 6 완료 → 신규 run dir 자동 감지 → Step 7에 `--gates-from` 주입
+- Step 7 완료 → 신규 run dir 자동 감지 → Step 8에 `--run-dir` 주입, Step 9에 `--checkpoint` 주입
+- **yaml의 `data.gates_from`보다 자동 감지된 CLI `--gates-from`이 우선**
 
 세그멘테이션 축 (`--seg-axis`): `qfrac` (기본) / `protocol` / `vwindow` / `rcs` / `cluster`  
 축 변경 시 Step 4와 Step 5 모두 동일한 `--seg-axis` 인수를 사용해야 함.
@@ -585,43 +616,59 @@ python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --no-plot --dataset HUST
 핵심 설정:
 ```yaml
 scenario:
-  axis: qfrac           # 세그멘테이션 축: qfrac | protocol | vwindow | rcs | cluster
+  axis: protocol        # 세그멘테이션 축: qfrac | protocol | vwindow | rcs | cluster
   axis_config: {}       # 축별 파라미터 (예: vwindow: {n_windows: 3})
 
 data:
   data_dir: null        # null → scenario.axis 기반 자동 결정 (_4_data_hi/{axis}/cycle)
   seg_data_dir: null    # null → scenario.axis 기반 자동 결정 (_4_data_hi/{axis}/seg)
-  datasets: ["HUST", "MIT"]
-  is_cross_dataset_evaluate: false  # false=셀 단위 split | true=datasets[0] train, [1] test
-  gates_from: null | "_5_data_model_scr/MMDD_HHMM"  # null=Phase1, 경로=Phase2
-  use_initial_capacity: true        # true=첫 사이클 실측 용량 | false=정격 용량
+  datasets: ["MIT", "HUST"]
+  is_cross_dataset_evaluate: false
+  gates_from: null | "_5_data_model_scr/MMDD_HHMM_p1_prot"  # Phase 2 시 지정
+  use_initial_capacity: true
 
-classifier:
-  charge_probe_m:   3     # 충전 probe HI 수
-  discharge_probe_m: 2    # 방전 probe HI 수
+classifier:             # ── Phase 1/2: SCRModel probe gate 설정 ──────────────
+  is_auto_mk_selection: false
+  charge_probe_m:   3   # Phase 2에서 probe JSON 상위 m개 사용 (분류기와 별개)
+  discharge_probe_m: 2
 
 regression:
-  scen_k_count: 55        # 시나리오별 regression HI 수
+  scen_k_count: 55      # 시나리오별 regression HI 수 (Phase 2) — 64→55: L0 sparsity 유효화
 
 model:
-  regression_model: "mlp" # mlp / transformer / i_transformer
+  regression_model: "mlp"       # mlp / transformer / i_transformer / resnet_tab
+  mlp_hidden_dims: [512, 256, 128, 64]
 
 loss:
-  lambda_scen: 0.0        # CE 비활성 (probe_mlp 제거, 회귀 전용)
-  lambda_l0_auto: true    # true=m/k 기반 자동 계산
+  lambda_scen: 0.01     # CE 손실 활성 (MSE 스케일과 균형; 0이면 CE 비활성)
+  lambda_l0_auto: true
+
+training:
+  run_overfit_test: false  # 별도 tmp_standalone_overfit.py 사용
+
+test:
+  random_segment_test: false    # true = E2/E3 실험 (test_rs 사용)
+  random_seg_data_dir: "_4_data_hi/test_rs/seg"
+  random_seg_datasets: ["MIT", "HUST"]
+  random_seg_routing: "none"    # none=E2 | hard=E3-hard | soft=E3-soft
+```
+
+**run dir 명명 규칙** (`train_scr.py` 자동 생성):
+```
+_5_data_model_scr/
+  MMDD_HHMM_p1_{axis}               ← Phase 1 (예: 0716_1149_p1_prot)
+  MMDD_HHMM_p2_{model}_{axis}       ← Phase 2 (예: 0716_1200_p2_mlp_prot)
+    ├── checkpoints/best.pt
+    ├── gates/classification_HIs.json  (Phase 1 출력)
+    ├── gates/regression_HIs.json      (Phase 1 출력)
+    ├── classifier/clf_best.pt         (Step 8 출력 — B안)
+    ├── scenario_spec.json
+    └── config.yaml
 ```
 
 > `data_dir` / `seg_data_dir` 는 `null` 로 두면 `scenario.axis` 기준으로 자동 결정된다.  
-> `--seg-axis` CLI 인수가 yaml보다 우선.
-
-```powershell
-# 설정 파일 직접 편집
-notepad 5_model/config/scr.yaml
-
-# Phase 2 전환: yaml gates_from 경로를 Phase 1 run_dir로 설정
-# data.gates_from: "_5_data_model_scr/0711_1538"
-# (또는 train_scr.py --phase 2 --gates-from 인수로 오버라이드)
-```
+> `--seg-axis` CLI 인수가 yaml보다 우선.  
+> `run_pipeline.py`로 실행 시 `gates_from` / `--run-dir` / `--checkpoint` 는 자동 주입된다.
 
 ---
 
@@ -764,10 +811,11 @@ cap_pred (B,)   — SOH ratio 예측값 [정규화 없음, 직접 SOH ratio 단�
 
 ```python
 {
-  "cap_pred":     Tensor (B,)          float32  # SOH ratio 예측 ∈ (0, ~1]
-  "level_logits": Tensor (B, n_classes) float32  # all-zero (CE 비활성, 호환용)
-  "probe_z":      Tensor (B, 64)       float32  # Stage A gate 확률
-  "scen_z":       Tensor (B, 64)       float32  # Stage B gate 확률
+  "cap_pred":     Tensor (B,)           float32  # SOH ratio 예측 ∈ (0, ~1]
+  "level_logits": Tensor (B, n_classes) float32  # probe_mlp 출력 (lambda_scen>0) or all-zero
+  "probe_x":      Tensor (B, 64)        float32  # Stage A gate 출력 (상위 m개 활성, 나머지 0)
+  "probe_z":      Tensor (B, 64)        float32  # Stage A gate 확률
+  "scen_z":       Tensor (B, 64)        float32  # Stage B gate 확률
 }
 ```
 
@@ -919,12 +967,15 @@ P(z>0) = sigmoid(log_alpha - β×log(-γ/ζ))  ← L0 패널티 계산에 사용
 ```
 입력: x_hi(64) + nan_mask(64) + direction(±1) + cap_init(z-scored Ah)
 
-Stage A — direction-aware probe gate (HI 서브셋 선택, 회귀 전용)
+Stage A — direction-aware probe gate (HI 서브셋 선택)
   direction 기반 라우팅:
     충전 → charge_probe_gate    (HardConcreteGate, 64→64)
     방전 → discharge_probe_gate (HardConcreteGate, 64→64)
-  ※ probe_mlp (분류 헤드) 제거 — CE 손실 비활성.
-     level_logits = zeros(B, n_classes)  (evaluator 로그 호환용)
+  probe_x (B, 64)  — 게이트 적용 결과 (상위 m개 활성)
+  ※ lambda_scen > 0 시 probe_mlp 활성:
+       probe_x_dir = [probe_x | direction]  (B, 65)
+       level_logits = probe_mlp(probe_x_dir)  → CE 손실 입력
+     lambda_scen = 0 시: level_logits = zeros(B, n_classes)  (호환용)
 
 Stage B — scenario-conditioned regression
   scen_gates[n_scenarios]: 각 시나리오별 HardConcreteGate (64→64)
@@ -973,45 +1024,50 @@ model = SCRModel(
 
 `ScenarioClassifier` ABC: `classify(probe_x, batch) → (B, n_classes) logits`
 
-| 클래스 | CE 손실 | 레이블 필요 | 용도 |
+| 클래스 | 학습 방식 | 레이블 필요 | 용도 |
 |---|---|---|---|
-| `MLPProbeClassifier` | ✓ | ✗ | probe_mlp 동작 래퍼 (d_hidden=64) |
-| `RuleClassifier` | ✓ | ✗ | `spec.scenario_to_dir_class(seg_idx)`로 결정론적 배정 |
-| `CentroidClassifier` | ✓ | fit 단계 | L2 최근접 센트로이드 (`update()+finalize()` 또는 `fit()`) |
-| `OracleClassifier` | ~0 | ✓ | `batch["level"]` 직접 사용 → 상한선 측정 |
-| `NoneClassifier` | ✗ | ✗ | 전-0 로짓 반환, `disables_ce=True` (`lambda_scen=0`과 함께 사용) |
+| `MLPProbeClassifier` | CE (독립) | ✗ | **B안 기본 분류기** — `train_classifier.py`로 별도 학습 |
+| `RuleClassifier` | 없음 (규칙) | ✗ | `spec.scenario_to_dir_class(seg_idx)` 결정론적 배정 |
+| `CentroidClassifier` | fit 단계 | ✗ | L2 최근접 센트로이드 (`update()+finalize()` 또는 `fit()`) |
+| `OracleClassifier` | 없음 (GT) | ✓ | `batch["level"]` 직접 사용 → 상한선 측정 |
+| `NoneClassifier` | 없음 | ✗ | 전-0 로짓 반환 (routing=none 동작) |
 
 ```python
 from models.scenario_classifier import build_classifier
-clf = build_classifier("rule",    n_hi=64, n_classes=3, spec=spec)
-clf = build_classifier("mlp",     n_hi=64, n_classes=3, d_hidden=64)
-clf = build_classifier("oracle",  n_hi=64, n_classes=3)
-clf = build_classifier("none",    n_hi=64, n_classes=3)
+clf = build_classifier("mlp",  n_hi=64, n_classes=3, d_hidden=64)  # B안
+clf = build_classifier("rule", n_hi=64, n_classes=3, spec=spec)    # 규칙 기반
 ```
 
-> 현재 `SCRModel.probe_mlp`는 내장 MLP이며 이 플러그인과 직접 연결되지 않는다.  
-> 향후 `SCRModel(classifier=build_classifier(...))` 형태로 통합 가능한 인터페이스를 제공한다.
+> **B안 설계 원칙**: 분류기는 회귀 모델(SCRModel)과 완전히 분리.  
+> 배터리 운영 레짐(CC1/CC2/CV 등)은 물리적으로 실재하는 상태이므로 독립 분류가 타당하며,  
+> 분류 정확도를 회귀 성능과 별도로 평가할 수 있어 논문 방어에 유리하다.  
+> `SCRModel`에는 분류기가 없다 — `level_logits = zeros` 반환 (evaluator 호환용).
 
 ---
 
 ### 5-6. 손실 — `5_model/training/scr_loss.py`
 
 ```
-L = MSE(cap_pred, target)   ← target은 SOH ratio ∈ (0,1]
-  + λ_l0 × L0_penalty
+SCRLoss (이중 목적, Phase 1 전용):
+  L = MSE(cap_pred, target)                         ← target = SOH ratio ∈ (0,1]
+    + λ_scen × CE(level_logits, batch["level"])     ← lambda_scen > 0 시 활성
+    + λ_l0 × L0_penalty
 
-# CE 항 완전 제거 (λ_scen 파라미터는 호환성 유지용이지만 내부에서 0.0 강제)
-# 이유: qfrac/protocol/vwindow 등 구조적 축에서 seg_idx → level이 1:1 결정론적
-#       → CE가 probe_gate를 "level-discriminative" HI로 편향시켜 회귀 성능 저하
+  # CE 항 (lambda_scen): probe_gate를 분류에 유리한 HI로 유도 (이중 목적 Phase 1)
+  #   λ_scen = 0.01  (MSE ~0.001-0.005 vs CE ~0.3-0.8 → λ≈0.01로 균형)
+  #   lambda_scen = 0 시 CE 항 완전 비활성
+  # Phase 2 / Fine-tune: gate가 buffer → L0_penalty = 0 자동, λ_scen = 0 강제
 
 L0_penalty = (1 / model.n_scenarios) × Σ_s Σ_i cost_i × P(z_i≠0 in scenario s)
   P(z_i≠0) = 1 - (1 - p_probe_i)(1 - p_scen_i)
-  충전 시나리오 (model.spec.charge_scenario_ids): charge_probe_gate 사용
-  방전 시나리오 (model.spec.discharge_scenario_ids): discharge_probe_gate 사용
+  Phase 2 / Fine-tune: gate가 buffer → L0_penalty = 0 자동
 ```
 
-- `model.spec.charge_scenario_ids` / `discharge_scenario_ids`: 하드코딩 제거, ScenarioSpec에서 동적 결정
-- Phase 2 / Fine-tune: gate가 buffer → L0_penalty = 0 자동
+```
+ClfLoss (분류기 전용, train_classifier.py):
+  L = CrossEntropyLoss(logits, batch["level"])
+  scr_loss.py와 완전히 분리된 독립 손실
+```
 
 ---
 
@@ -1075,15 +1131,78 @@ python 5_model/train_scr.py --phase 2 --charge-m 3 --discharge-m 1 --scen-k 10
 python 5_model/train_scr.py --phase 1 --seed 42
 ```
 
-run_dir 자동 생성: `_5_data_model_scr/MMDD_HHMM/`
+run_dir 자동 생성 규칙:
+```
+Phase 1: MMDD_HHMM_p1_{axis}          (예: 0716_1149_p1_prot)
+Phase 2: MMDD_HHMM_p2_{model}_{axis}  (예: 0716_1200_p2_mlp_prot)
+  axis 약어 : qfrac→qfr / protocol→prot / vwindow→vwin / rcs→rcs / cluster→clst
+  model 약어: mlp→mlp / transformer→tr / i_transformer→itr / resnet_tab→res
+```
 
 ---
 
-### 5-9. 평가 진입점 — `5_model/test_scr.py`
+### 5-9. 시나리오 분류기 학습 (B안) — `5_model/train_classifier.py`
+
+SCRModel Phase 1/2와 완전히 독립적으로 HI 특성만으로 시나리오 레짐(level)을 학습한다.
+
+**학습 구조:**
+```
+마스크 : classification_HIs.json 로드 → charge/discharge 방향별 상위 m개 probe HI 마스크
+입력   : probe_x (N_HI=64, — 마스크 적용) + direction (1) = 65차원
+         (마스크 없으면 x_hi 전체 fallback)
+타겟   : batch["level"]  (latent_class: lo=0 / mid=1 / hi=2)
+모델   : MLPProbeClassifier  Linear(65→d_hidden)→ReLU→Dropout→Linear(d_hidden→d_hidden//2)→ReLU→Linear(→n_classes)
+손실   : CrossEntropyLoss  (regression과 완전 분리)
+정규화 : 동일 config로 build_datasets 호출 → Phase 2와 동일 정규화기 자동 재현
+저장   : {run_dir}/classifier/clf_best.pt
+```
 
 ```bash
+# Phase 2 run_dir 지정 (분류기를 해당 run_dir 내에 저장)
+python 5_model/train_classifier.py --run-dir _5_data_model_scr/0716_1200_p2_mlp_prot
+
+# 하이퍼파라미터 오버라이드
+python 5_model/train_classifier.py \
+    --run-dir _5_data_model_scr/0716_1200_p2_mlp_prot \
+    --epochs 300 --lr 5e-4 --d-hidden 128
+
+# run_pipeline.py Step 8로 자동 실행 (--run-dir 자동 주입)
+python run_pipeline.py 8 --to-step 8
+```
+
+**저장 포맷:**
+```python
+{
+  "clf_state": ...,     # MLPProbeClassifier state_dict
+  "n_hi":      65,      # 입력 차원 = N_HI(64) + direction(1)
+  "n_classes": 3,       # 출력 클래스 수
+  "d_hidden":  64,      # 히든 차원
+  "val_acc":   0.xxx,   # 최고 검증 정확도
+  "epoch":     int,     # 저장 시점 에폭
+  "axis":      "prot",  # 학습 축
+}
+```
+
+---
+
+### 5-10. 평가 진입점 — `5_model/test_scr.py`
+
+```bash
+# E1: qfrac→qfrac test (기본, 분류기 불필요)
 python 5_model/test_scr.py
-python 5_model/test_scr.py --checkpoint _5_data_model_scr/0711_1538/checkpoints/best.pt
+
+# E2: qfrac→random test (random_segment_test: true, routing: none in yaml)
+python 5_model/test_scr.py --checkpoint .../best.pt
+
+# E3-hard: 분류기 routing (classifier 자동 탐색 — run_dir/classifier/clf_best.pt)
+python 5_model/test_scr.py --checkpoint .../best.pt
+# (yaml: random_seg_routing: hard)
+
+# E3-hard: 분류기 체크포인트 직접 지정
+python 5_model/test_scr.py \
+    --checkpoint _5_data_model_scr/0716_1200_p2_mlp_prot/checkpoints/best.pt \
+    --classifier-ckpt _5_data_model_scr/0716_1200_p2_mlp_prot/classifier/clf_best.pt
+
 python 5_model/test_scr.py --rep-cells b1c0 b1c1 1-1
 ```
 
@@ -1099,19 +1218,43 @@ spec = ScenarioSpec.load(_spec_path) if _spec_path.exists() else spec_from_qfrac
 
 ---
 
-### 5-10. 평가 모듈 — `5_model/evaluation/scr_evaluator.py`
+### 5-11. 평가 모듈 — `5_model/evaluation/scr_evaluator.py`
 
 **SCREvaluator 생성 시 spec 정보 추출:**
 ```python
-self._n_scenarios = model.n_scenarios       # spec.n_scenarios
-self._n_classes   = model.n_classes         # spec.n_classes
+self._n_scenarios = model.n_scenarios
+self._n_classes   = model.n_classes
 self._seg_names   = model.spec.scenario_names
-self._class_names = model.spec.class_names  # ["lo", "mid", "hi"] (qfrac)
-                                             # ["win0","win1","win2","cv"] (vwindow)
+self._class_names = model.spec.class_names
+self._spec        = model.spec          # routing table 접근용 (B안 라우팅)
+self._classifier  = None               # set_classifier()로 주입
 ```
 
-하드코딩 제거: `N_SEGS`, `N_LEVELS`, `SEGMENTS`, `_LEVEL_NAMES` 상수 없음.  
-`_compute_breakdown()` 내 level 루프는 `self._class_names` 을 사용 (`_LEVEL_NAMES` 참조 버그 수정).
+**B안 라우팅 지원:**
+```python
+evaluator.set_classifier(clf)           # MLPProbeClassifier 주입
+# predict_dataset(ds, routing_mode="hard")  → 분류기 argmax → seg_idx 오버라이드
+# predict_dataset(ds, routing_mode="soft")  → 분류기 확률 가중 평균
+# predict_dataset(ds, routing_mode="none")  → 기존 동작 (seg_idx 그대로)
+
+# 분류기 입력 구성 (train_classifier.py와 동일):
+#   probe_x_clf = model.get_probe_x(x_hi, direction, seg_idx)  # (B, 64) probe 마스크 적용
+#   clf_inp     = [probe_x_clf | direction]                     # (B, 65)
+#   clf_logits  = classifier(clf_inp)
+
+# routing table (spec.routing)이 jagged list일 경우 padding 후 수동 채움:
+#   _routing_t = zeros(n_dir, max_n_cls)  ← torch.tensor() 대신 안전한 방식
+```
+
+**데이터셋별 플롯 저장 (random_seg_test):**
+```python
+evaluator.plot_for_dataset(rs_pred, out_dir, rep_cells, tag="random_seg")
+# → out_dir/scatter_random_seg.png  (pred vs true SOH 산포도)
+# → out_dir/capacity_curve_{cell}.png  (대표 셀 용량 곡선)
+# → out_dir/confusion_matrix_random_seg.png  (level 혼동 행렬)
+```
+
+하드코딩 제거: `N_SEGS`, `N_LEVELS`, `SEGMENTS`, `_LEVEL_NAMES` 상수 없음.
 
 **predict_dataset 반환 dict:**
 ```python
@@ -1137,7 +1280,7 @@ self._class_names = model.spec.class_names  # ["lo", "mid", "hi"] (qfrac)
 
 ---
 
-### 5-11. Few-shot Fine-tuning — `5_model/finetune_scr.py`
+### 5-12. Few-shot Fine-tuning — `5_model/finetune_scr.py`
 
 Phase 2 checkpoint를 소수의 target dataset 셀로 재학습하는 도메인 적응 스크립트.
 
@@ -1180,7 +1323,7 @@ _5_data_model_scr/{run_id}/ft_{dataset}_{N}shot_{timestamp}/
 
 ---
 
-### 5-12. HI 클러스터링 분석 — `5_model/clustering.py`
+### 5-13. HI 클러스터링 분석 — `5_model/clustering.py`
 
 Phase 1 학습 전 probe HI 수(m) 결정 보조 도구:
 

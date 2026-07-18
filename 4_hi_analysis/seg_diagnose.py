@@ -23,7 +23,8 @@ seg_diagnose.py
   --mode all : segment + ic 둘 다 생성
 
 사용 예시:
-  python 4_hi_analysis/seg_diagnose.py --seg-axis protocol
+  python 4_hi_analysis/seg_diagnose.py                        # 자동: 모든 hi_features*.pkl 축
+  python 4_hi_analysis/seg_diagnose.py --seg-axis protocol    # 특정 축 지정
   python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --dataset HUST
   python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --mode ic
   python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --mode ic --n-cycles 8
@@ -708,44 +709,30 @@ def plot_ic_windows(
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main():
+def _discover_axes() -> list[str]:
+    """4_hi_analysis/hi_features*.pkl 파일을 스캔해 축 이름 목록 반환.
+
+    hi_features.pkl        → "qfrac"
+    hi_features_rcs.pkl    → "rcs"
+    hi_features_protocol.pkl → "protocol"
+    hi_features_vwindow.pkl  → "vwindow"
+    """
+    axes = []
+    for pkl in sorted(STEP_DIR.glob("hi_features*.pkl")):
+        suffix = pkl.stem.replace("hi_features", "").lstrip("_")
+        axes.append(suffix if suffix else "qfrac")
+    return axes
+
+
+def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
     from common.scenario import get_segmenter
 
-    parser = argparse.ArgumentParser(description="시나리오 세그먼트 진단 (통계 + 시각화)")
-    parser.add_argument("--seg-axis",    type=str, default="qfrac",
-                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster  (기본: qfrac)")
-    parser.add_argument("--axis-config", type=str, default="{}",
-                        help="축 파라미터 JSON 문자열 (예: '{\"assign\": \"none\"}')")
-    parser.add_argument("--dataset",     type=str, default="MIT",
-                        choices=["MIT", "HUST", "mit", "hust"],
-                        help="통계 스캔 대상 데이터셋 (기본: MIT)")
-    parser.add_argument("--cell",        type=str, default="",
-                        help="사이클 플롯 대상 셀 ID (미지정 시 첫 번째 셀 사용)")
-    parser.add_argument("--cycle",       type=int, default=0,
-                        help="사이클 플롯 대상 사이클 번호 (0이면 첫 번째 유효 사이클)")
-    parser.add_argument("--mode",         type=str, default="segment",
-                        choices=["segment", "ic", "all"],
-                        help="시각화 모드: segment(기본)|ic|all")
-    parser.add_argument("--n-cycles",    type=int, default=6,
-                        help="IC 모드에서 표시할 대표 사이클 수 (기본: 6)")
-    parser.add_argument("--n-random",    type=int, default=10,
-                        help="--cell 미지정 시 segment 시각화에 사용할 랜덤 셀 수 (기본: 10)")
-    parser.add_argument("--seed",        type=int, default=42,
-                        help="랜덤 셀/사이클 선택 재현성 seed (기본: 42)")
-    parser.add_argument("--no-stats",    action="store_true",
-                        help="통계 수집·출력 생략")
-    parser.add_argument("--no-plot",     action="store_true",
-                        help="사이클 시각화 생략")
-    args = parser.parse_args()
-
-    axis = args.seg_axis
     try:
-        axis_cfg: dict = json.loads(args.axis_config)
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] --axis-config JSON 파싱 실패: {e}")
+        seg = get_segmenter(axis, {axis: axis_cfg})
+    except Exception as e:
+        print(f"[경고] 축 '{axis}' segmenter 로드 실패: {e}")
         return
 
-    seg   = get_segmenter(axis, {axis: axis_cfg})
     spec  = seg.get_spec()
     names = spec.scenario_names
     print(f"\n축: {axis}  |  시나리오 ({len(names)}개): {names}")
@@ -835,7 +822,59 @@ def main():
                 plot_ic_windows(cell_pkl, seg, names, axis, ic_path,
                                 n_cycles=args.n_cycles)
 
-    print("완료!")
+
+def main():
+    parser = argparse.ArgumentParser(description="시나리오 세그먼트 진단 (통계 + 시각화)")
+    parser.add_argument("--seg-axis",    type=str, default=None,
+                        help="세그멘테이션 축 (미지정 시 hi_features*.pkl 자동 탐색)")
+    parser.add_argument("--axis-config", type=str, default="{}",
+                        help="축 파라미터 JSON 문자열 (예: '{\"assign\": \"none\"}')")
+    parser.add_argument("--dataset",     type=str, default="MIT",
+                        choices=["MIT", "HUST", "mit", "hust"],
+                        help="통계 스캔 대상 데이터셋 (기본: MIT)")
+    parser.add_argument("--cell",        type=str, default="",
+                        help="사이클 플롯 대상 셀 ID (미지정 시 첫 번째 셀 사용)")
+    parser.add_argument("--cycle",       type=int, default=0,
+                        help="사이클 플롯 대상 사이클 번호 (0이면 첫 번째 유효 사이클)")
+    parser.add_argument("--mode",         type=str, default="segment",
+                        choices=["segment", "ic", "all"],
+                        help="시각화 모드: segment(기본)|ic|all")
+    parser.add_argument("--n-cycles",    type=int, default=6,
+                        help="IC 모드에서 표시할 대표 사이클 수 (기본: 6)")
+    parser.add_argument("--n-random",    type=int, default=10,
+                        help="--cell 미지정 시 segment 시각화에 사용할 랜덤 셀 수 (기본: 10)")
+    parser.add_argument("--seed",        type=int, default=42,
+                        help="랜덤 셀/사이클 선택 재현성 seed (기본: 42)")
+    parser.add_argument("--no-stats",    action="store_true",
+                        help="통계 수집·출력 생략")
+    parser.add_argument("--no-plot",     action="store_true",
+                        help="사이클 시각화 생략")
+    args = parser.parse_args()
+
+    try:
+        axis_cfg: dict = json.loads(args.axis_config)
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] --axis-config JSON 파싱 실패: {e}")
+        return
+
+    if args.seg_axis is not None:
+        # ── 단일 축 모드 (기존 동작) ──────────────────────────────────────
+        _run_for_axis(args.seg_axis, axis_cfg, args)
+    else:
+        # ── 자동 탐색 모드: hi_features*.pkl → 모든 축 순회 ──────────────
+        axes = _discover_axes()
+        if not axes:
+            print("[ERROR] 4_hi_analysis/ 에서 hi_features*.pkl 파일을 찾을 수 없습니다.")
+            print("  --seg-axis 로 축을 직접 지정하거나 hi_correlation.py를 먼저 실행하세요.")
+            return
+        print(f"\n[자동 발견] hi_features*.pkl → 축: {axes}")
+        for axis in axes:
+            print(f"\n{'=' * 60}")
+            print(f"  처리 중: {axis}")
+            print(f"{'=' * 60}")
+            _run_for_axis(axis, axis_cfg, args)
+
+    print("\n완료!")
 
 
 if __name__ == "__main__":

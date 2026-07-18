@@ -64,12 +64,36 @@ class SCREvaluator:
         self._n_classes   = model.n_classes
         self._seg_names   = model.spec.scenario_names
         self._class_names = model.spec.class_names
+        self._spec        = model.spec   # routing table 접근용
+        self._classifier  = None         # B안: set_classifier()로 주입
+
+    def set_classifier(self, clf: torch.nn.Module) -> None:
+        """B안: 독립 학습된 시나리오 분류기를 주입한다 (routing=hard/soft 시 사용)."""
+        self._classifier = clf.to(self.device)
+        self._classifier.eval()
 
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def predict_dataset(self, ds: SegmentDataset, batch_size: int = 512) -> dict:
+    def predict_dataset(
+        self,
+        ds: SegmentDataset,
+        batch_size: int = 512,
+        routing_mode: str = "none",
+        direction_routing: bool = False,
+    ) -> dict:
+        """
+        routing_mode:
+          "none" — 방향(direction)만으로 헤드 선택, 분류기 우회 (기본)
+          "hard" — 분류기 argmax → 단일 시나리오 헤드 (분류기 활성화 필요)
+          "soft" — 분류기 확률 가중 평균 (분류기 활성화 필요)
+
+        direction_routing:
+          True  — routing_mode="none"일 때 방향별 첫 번째 시나리오로 seg_idx 보정
+                  (test_rs처럼 seg_idx 0/1만 있어 모델 시나리오 ID와 불일치할 때 사용)
+          False — seg_idx 그대로 사용 (qfrac 정규 테스트 기본값)
+        """
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=_collate)
         self.model.eval()
 
@@ -78,15 +102,81 @@ class SCREvaluator:
         seg_idxs, directions = [], []
         probe_zs, scen_zs = [], []
 
+        # routing table: (n_dir, n_classes) — hard/soft 라우팅용
+        _use_clf = (routing_mode != "none" and self._classifier is not None)
+        _routing_t = None
+        if _use_clf and hasattr(self._spec, "routing"):
+            # spec.routing은 jagged list일 수 있으므로 padding 후 수동 채움
+            _r = self._spec.routing
+            _n_dir = len(_r)
+            _n_cls = max(len(row) for row in _r)
+            _routing_t = torch.zeros(_n_dir, _n_cls, dtype=torch.long, device=self.device)
+            for _d, _row in enumerate(_r):
+                for _c, _sid in enumerate(_row):
+                    _routing_t[_d, _c] = _sid
+
+        # direction-only fallback: routing_mode="none"일 때 방향별 첫 시나리오로 보정
+        # (test_rs: seg_idx 0/1 → 모델 시나리오 ID 불일치 해소)
+        _dir_t = None
+        if direction_routing and routing_mode == "none" and hasattr(self._spec, "routing"):
+            _dir_t = torch.tensor(
+                [row[0] for row in self._spec.routing],
+                dtype=torch.long, device=self.device,
+            )  # (n_dir,): charge→routing[0][0], discharge→routing[1][0]
+
         for batch in loader:
             batch_d = {k: v.to(self.device) for k, v in batch.items()}
-            out = self.model(batch_d)
+            B = batch_d["x_hi"].size(0)
+
+            if _dir_t is not None:
+                # direction_routing 보정: 방향에 맞는 첫 번째 모델 시나리오로 재매핑
+                dir_idx = (batch_d["direction"] <= 0).long()   # 0=charge, 1=discharge
+                batch_d["seg_idx"] = _dir_t[dir_idx]
+
+            if _use_clf and _routing_t is not None:
+                x_hi    = batch_d["x_hi"]
+                dir_t   = batch_d["direction"]
+                dir_idx = (dir_t <= 0).long()              # 0=charge, 1=discharge
+
+                # Phase 1 probe mask 적용 + direction concat — train_classifier.py와 동일한 입력
+                probe_x_clf = self.model.get_probe_x(x_hi, dir_t, batch_d["seg_idx"])
+                clf_inp     = torch.cat([probe_x_clf, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
+                clf_logits  = self._classifier(clf_inp)    # (B, n_classes)
+
+                if routing_mode == "hard":
+                    class_pred = clf_logits.argmax(1)                     # (B,)
+                    batch_d["seg_idx"] = _routing_t[dir_idx, class_pred]  # (B,)
+                    out = self.model(batch_d)
+                    lv_pred = class_pred.cpu().numpy()
+
+                else:  # soft
+                    clf_probs = torch.softmax(clf_logits, dim=1)  # (B, n_classes)
+                    cap_cls   = []
+                    for c in range(self._n_classes):
+                        b_c = dict(batch_d)
+                        b_c["seg_idx"] = _routing_t[dir_idx, c]   # (B,)
+                        out_c = self.model(b_c)
+                        cap_cls.append(out_c["cap_pred"])
+                    cap_stack = torch.stack(cap_cls, dim=1)        # (B, n_classes)
+                    cap_merged = (clf_probs * cap_stack).sum(1)    # (B,)
+                    # argmax for reporting
+                    class_pred = clf_logits.argmax(1)
+                    lv_pred = class_pred.cpu().numpy()
+                    out = {
+                        "cap_pred": cap_merged,
+                        "level_logits": clf_logits,
+                        "probe_z": torch.zeros(B, N_HI, device=self.device),
+                        "scen_z":  torch.zeros(B, N_HI, device=self.device),
+                    }
+            else:
+                out = self.model(batch_d)
+                lv_pred = out["level_logits"].argmax(1).cpu().numpy()
 
             preds_norm.append(out["cap_pred"].cpu().numpy())
             trues_norm.append(batch["target"].numpy())
-            level_preds.append(out["level_logits"].argmax(1).cpu().numpy())
+            level_preds.append(lv_pred)
             level_trues.append(batch["level"].numpy())
-            seg_idxs.append(batch["seg_idx"].numpy())
+            seg_idxs.append(batch_d["seg_idx"].cpu().numpy())   # 라우팅 후 수정된 값 저장
             directions.append(batch["direction"].numpy())
             probe_zs.append(out["probe_z"].cpu().numpy())   # (B, N_HI)
             scen_zs.append(out["scen_z"].cpu().numpy())     # (B, N_HI)
@@ -125,6 +215,28 @@ class SCREvaluator:
     # ------------------------------------------------------------------
     # Full evaluation
     # ------------------------------------------------------------------
+    def plot_for_dataset(
+        self,
+        pred_dict: dict,
+        out_dir: Path,
+        rep_cells: list[str],
+        tag: str = "random_seg",
+    ) -> None:
+        """
+        pred_dict에 대한 scatter + 용량 곡선 + confusion matrix를 out_dir에 저장.
+        self.figures_dir / self.rep_cells를 임시 교체하여 기존 메서드를 재활용한다.
+        """
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _orig_figs = self.figures_dir
+        _orig_rep  = self.rep_cells
+        self.figures_dir = out_dir
+        self.rep_cells   = rep_cells
+        self._plot_scatter(pred_dict, tag=tag)
+        self._plot_capacity_curves(pred_dict)
+        self._plot_confusion_matrix(pred_dict, tag=tag)
+        self.figures_dir = _orig_figs
+        self.rep_cells   = _orig_rep
+
     def evaluate(
         self,
         train_ds: SegmentDataset,
@@ -233,11 +345,73 @@ class SCREvaluator:
         }
 
     # ------------------------------------------------------------------
+    # UQ predict + plot
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def predict_dataset_uq(self, ds, uq, batch_size: int = 512) -> dict:
+        """
+        LaplaceUQ를 사용해 (mean, std) 예측을 수행한다.
+
+        Returns:
+            predict_dataset()과 동일한 dict에 'cap_std_raw' 키 추가.
+        """
+        from torch.utils.data import DataLoader
+
+        pred = self.predict_dataset(ds, batch_size)
+
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                            collate_fn=_collate)
+        all_stds = []
+        for batch in loader:
+            _, std = uq.predict(batch)   # (B,)
+            all_stds.append(std.numpy())
+        pred["cap_std_raw"] = np.concatenate(all_stds)
+        return pred
+
+    def save_uq_metrics(self, pred_dict: dict, metrics_dir: Path) -> None:
+        """UQ 캘리브레이션 지표를 metrics/uq_metrics.json 에 저장한다."""
+        from utils.uncertainty import calibration_metrics
+
+        stds = pred_dict.get("cap_std_raw")
+        if stds is None:
+            return
+        m = calibration_metrics(
+            means=pred_dict["cap_pred_raw"],
+            stds=stds,
+            targets=pred_dict["cap_true_raw"],
+        )
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        path = metrics_dir / "uq_metrics.json"
+        import json as _json
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(m, f, indent=2)
+        print(f"[eval] saved {path}")
+        print(f"[eval] UQ — picp_90={m['picp_90']:.3f}  mpiw_90={m['mpiw_90']:.5f}"
+              f"  nll={m['nll']:.4f}  mean_σ={m['mean_std']:.5f}")
+
+    def plot_uq(self, pred_dict: dict, figures_dir: Path) -> None:
+        """캘리브레이션 곡선 + σ 분포 히스토그램을 figures/calibration.png 에 저장한다."""
+        from utils.uncertainty import plot_calibration
+
+        stds = pred_dict.get("cap_std_raw")
+        if stds is None:
+            return
+        plot_calibration(
+            means=pred_dict["cap_pred_raw"],
+            stds=stds,
+            targets=pred_dict["cap_true_raw"],
+            path=figures_dir / "calibration.png",
+        )
+
+    # ------------------------------------------------------------------
     # Save predictions CSV
     # ------------------------------------------------------------------
-    def save_predictions(self, pred_dict: dict, predictions_dir: Path) -> None:
+    def save_predictions(
+        self, pred_dict: dict, predictions_dir: Path, tag: str = "test"
+    ) -> None:
         predictions_dir.mkdir(parents=True, exist_ok=True)
-        path = predictions_dir / "test_predictions.csv"
+        path = predictions_dir / f"{tag}_predictions.csv"
 
         probe_active_n = (pred_dict["probe_z"] > 0).sum(axis=1)
         scen_active_n  = (pred_dict["scen_z"]  > 0).sum(axis=1)
@@ -247,6 +421,9 @@ class SCREvaluator:
         soh_pred = pred_dict["cap_pred_raw"]
         cap_true_ah = soh_true * cap_init_ah
         cap_pred_ah = soh_pred * cap_init_ah
+
+        has_uq = "cap_std_raw" in pred_dict
+        std_col = pred_dict["cap_std_raw"].tolist() if has_uq else None
 
         rows = zip(
             pred_dict["cell_ids"],
@@ -261,23 +438,30 @@ class SCREvaluator:
             pred_dict["level_pred"].tolist(),
             probe_active_n.tolist(),
             scen_active_n.tolist(),
+            std_col if has_uq else [None] * len(soh_true),
         )
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow([
+            header = [
                 "cell_id", "cycle", "seg_name",
                 "soh_true", "soh_pred", "soh_error",
                 "cap_true_Ah", "cap_pred_Ah", "cap_init_Ah",
                 "level_true", "level_pred",
                 "probe_active_n", "scen_active_n",
-            ])
-            for cell, cyc, seg, st, sp, ct, cp, ci, lt, lp, pa, sa in rows:
-                w.writerow([
+            ]
+            if has_uq:
+                header.append("soh_std")
+            w.writerow(header)
+            for cell, cyc, seg, st, sp, ct, cp, ci, lt, lp, pa, sa, sg in rows:
+                row = [
                     cell, cyc, seg,
                     f"{st:.6f}", f"{sp:.6f}", f"{sp - st:.6f}",
                     f"{ct:.6f}", f"{cp:.6f}", f"{ci:.6f}",
                     lt, lp, pa, sa,
-                ])
+                ]
+                if has_uq:
+                    row.append(f"{sg:.6f}")
+                w.writerow(row)
         print(f"[eval] saved {path}")
 
     # ------------------------------------------------------------------

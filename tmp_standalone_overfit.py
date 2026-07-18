@@ -2,12 +2,16 @@
 standalone_overfit_test.py
 지정한 시나리오 축별 gate 경로 + 모델 변형(variant) 목록으로 과적합 테스트 실행.
 
-사용법:  python tmp_standalone_overfit.py
+사용법:
+  python tmp_standalone_overfit.py                           # 기본 (S-size 변형만)
+  python tmp_standalone_overfit.py --model-size-variant true # S+M+L 전체
+
 결과:    OUTPUT_DIR/{axis}_{variant_name}.csv  +  overfit_comparison.png
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import csv
 import json
@@ -34,18 +38,49 @@ AXES: dict[str, str | None] = {
     "cluster":  None,                          # Phase 1 완료 후 경로 입력
 }
 
-# 테스트할 모델 변형 목록
-# - family  : "mlp" | "transformer" | "i_transformer"
-# - d_head  : MLP hidden dim 기준 / Transformer d_model
-# - model_cfg : 추가 파라미터
-#     MLP         → mlp_hidden_dims: [h1, h2, ...]  (None = [d_head, d_head//2])
-#     Transformer → tr_n_heads, tr_n_layers, tr_d_ff
-VARIANTS: list[dict] = [
+# ── 기본 변형 (항상 실행) — 각 family의 S-size 1개 ────────────────────────
+# family: "mlp" | "transformer" | "i_transformer" | "resnet_tab" | "ft_transformer"
+# model_cfg 키:
+#   MLP            → mlp_hidden_dims
+#   Transformer    → tr_n_heads, tr_n_layers, tr_d_ff
+#   iTransformer   → tr_n_heads, tr_n_layers, tr_d_ff
+#   ResNet-Tab     → resnet_n_blocks, resnet_d_hidden_factor
+#   FT-Transformer → tr_n_heads, tr_n_layers, tr_d_ff
+VARIANTS_BASE: list[dict] = [
     # ── MLP ──────────────────────────────────────────────────────────────────
     {   # S (default): 130→128→64→1  (~25K params)
         "name": "MLP-S", "family": "mlp", "d_head": 128,
         "model_cfg": {},
     },
+
+    # ── Transformer ──────────────────────────────────────────────────────────
+    {   # S: d_model=128, 2-layer, 4-head  (~282K params)
+        "name": "Tr-S", "family": "transformer", "d_head": 128,
+        "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 2, "tr_d_ff": 256},
+    },
+
+    # ── iTransformer ─────────────────────────────────────────────────────────
+    {
+        "name": "iTr-S", "family": "i_transformer", "d_head": 128,
+        "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 2, "tr_d_ff": 256},
+    },
+
+    # ── ResNet-Tab (Gorishniy et al., NeurIPS 2021) ───────────────────────────
+    {   # S: d=128, 3 blocks  (~75K params)
+        "name": "ResNet-S", "family": "resnet_tab", "d_head": 128,
+        "model_cfg": {"resnet_n_blocks": 3, "resnet_d_hidden_factor": 2.0},
+    },
+
+    # ── FT-Transformer (Gorishniy et al., NeurIPS 2021) ──────────────────────
+    {   # S: d_model=64, 2-layer, 4-head  (~130 tokens)
+        "name": "FTTr-S", "family": "ft_transformer", "d_head": 64,
+        "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 2, "tr_d_ff": 128},
+    },
+]
+
+# ── 사이즈 변형 (--model-size-variant true 시에만 실행) ──────────────────────
+VARIANTS_SIZE: list[dict] = [
+    # ── MLP ──────────────────────────────────────────────────────────────────
     {   # M: 130→256→128→64→1  (~74K params)
         "name": "MLP-M", "family": "mlp", "d_head": 256,
         "model_cfg": {"mlp_hidden_dims": [256, 128, 64]},
@@ -56,10 +91,6 @@ VARIANTS: list[dict] = [
     },
 
     # ── Transformer ──────────────────────────────────────────────────────────
-    {   # S: d_model=128, 2-layer, 4-head  (~282K params)
-        "name": "Tr-S", "family": "transformer", "d_head": 128,
-        "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 2, "tr_d_ff": 256},
-    },
     {   # M: d_model=256, 3-layer, 8-head  (~1.1M params)
         "name": "Tr-M", "family": "transformer", "d_head": 256,
         "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 3, "tr_d_ff": 512},
@@ -69,13 +100,35 @@ VARIANTS: list[dict] = [
         "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 4, "tr_d_ff": 1024},
     },
 
-    # ── iTransformer (주석 해제로 활성화) ────────────────────────────────────
-    # {"name": "iTr-S", "family": "i_transformer", "d_head": 128,
-    #  "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 2, "tr_d_ff": 256}},
-    # {"name": "iTr-M", "family": "i_transformer", "d_head": 256,
-    #  "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 3, "tr_d_ff": 512}},
-    # {"name": "iTr-L", "family": "i_transformer", "d_head": 512,
-    #  "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 4, "tr_d_ff": 1024}},
+    # ── iTransformer ─────────────────────────────────────────────────────────
+    {
+        "name": "iTr-M", "family": "i_transformer", "d_head": 256,
+        "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 3, "tr_d_ff": 512},
+    },
+    {
+        "name": "iTr-L", "family": "i_transformer", "d_head": 512,
+        "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 4, "tr_d_ff": 1024},
+    },
+
+    # ── ResNet-Tab ────────────────────────────────────────────────────────────
+    {   # M: d=256, 4 blocks  (~261K params)
+        "name": "ResNet-M", "family": "resnet_tab", "d_head": 256,
+        "model_cfg": {"resnet_n_blocks": 4, "resnet_d_hidden_factor": 2.0},
+    },
+    {   # L: d=512, 6 blocks  (~1.6M params)
+        "name": "ResNet-L", "family": "resnet_tab", "d_head": 512,
+        "model_cfg": {"resnet_n_blocks": 6, "resnet_d_hidden_factor": 2.0},
+    },
+
+    # ── FT-Transformer ────────────────────────────────────────────────────────
+    {   # M: d_model=128, 3-layer, 4-head
+        "name": "FTTr-M", "family": "ft_transformer", "d_head": 128,
+        "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 3, "tr_d_ff": 256},
+    },
+    {   # L: d_model=256, 4-layer, 8-head
+        "name": "FTTr-L", "family": "ft_transformer", "d_head": 256,
+        "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 4, "tr_d_ff": 512},
+    },
 ]
 
 N_SAMPLES  = 2048
@@ -110,9 +163,11 @@ DATA_CFG_BASE = {
 # 시각화 스타일 (family × size 인덱스)
 # ─────────────────────────────────────────────────────────────────────────────
 _FAMILY_COLORS = {
-    "mlp":           ["#1a4b8c", "#3a7fd5", "#89b8f5"],   # 파랑 (S→M→L 밝아짐)
-    "transformer":   ["#8b2500", "#d95f00", "#f5a06e"],   # 주황
-    "i_transformer": ["#1b5e20", "#388e3c", "#81c784"],   # 초록
+    "mlp":            ["#1a4b8c", "#3a7fd5", "#89b8f5"],   # 파랑  (S→M→L 밝아짐)
+    "transformer":    ["#8b2500", "#d95f00", "#f5a06e"],   # 주황
+    "i_transformer":  ["#1b5e20", "#388e3c", "#81c784"],   # 초록
+    "resnet_tab":     ["#4a0080", "#8e24aa", "#ce93d8"],   # 보라
+    "ft_transformer": ["#795548", "#a1887f", "#d7ccc8"],   # 갈색
 }
 _SIZE_LINESTYLES = ["solid", "dashed", "dotted"]
 _SIZE_MARKERS    = ["o", "s", "^"]
@@ -356,7 +411,7 @@ def make_plots(
     ax_txt.axis("off")
 
     col_w  = 8
-    header = f"{'Variant':<10}" + "".join(f"{a:>{col_w}}" for a in active_axes) + f"{'avg':>{col_w}}"
+    header = f"{'Variant':<12}" + "".join(f"{a:>{col_w}}" for a in active_axes) + f"{'avg':>{col_w}}"
     lines  = [f"Max R2  (ep={MAX_EPOCHS})", "=" * len(header), header, "-" * len(header)]
 
     prev_fam = None
@@ -365,7 +420,7 @@ def make_plots(
             lines.append("")
         prev_fam = v["family"]
         vals = [results[(ax_n, v["name"])]["max_r2"] for ax_n in active_axes]
-        row  = f"{v['name']:<10}" + "".join(f"{val:>{col_w}.4f}" for val in vals)
+        row  = f"{v['name']:<12}" + "".join(f"{val:>{col_w}.4f}" for val in vals)
         row += f"{np.mean(vals):>{col_w}.4f}"
         lines.append(row)
 
@@ -396,13 +451,30 @@ def make_plots(
 # ─────────────────────────────────────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────────────────────────────────────
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Standalone overfit test for SCR model variants")
+    parser.add_argument(
+        "--model-size-variant",
+        type=lambda x: x.lower() == "true",
+        default=False,
+        metavar="true|false",
+        help="사이즈 변형(M/L) 포함 여부 (default: false — S-size만 실행)",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
+
+    active_variants = VARIANTS_BASE + (VARIANTS_SIZE if args.model_size_variant else [])
+
     device = _resolve_device()
     active_axes = [ax for ax, p in AXES.items() if p is not None]
 
     print(f"Device: {device}")
+    print(f"Model size variants: {'enabled (S+M+L)' if args.model_size_variant else 'disabled (S only)'}")
     print(f"Axes    ({len(active_axes)}/{len(AXES)}): {active_axes}")
-    print(f"Variants ({len(VARIANTS)}): {[v['name'] for v in VARIANTS]}")
+    print(f"Variants ({len(active_variants)}): {[v['name'] for v in active_variants]}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     all_dfs: dict[tuple, pd.DataFrame] = {}
@@ -446,7 +518,7 @@ def main() -> None:
         t_std = tiny_dev["target"].std().item()
         print(f"  Tiny batch: {N_SAMPLES} samples | target std={t_std:.5f}")
 
-        for v in VARIANTS:
+        for v in active_variants:
             print(f"\n  [{v['name']}]  family={v['family']}  d_head={v['d_head']}")
             model_cfg = {**v["model_cfg"], "regression_model": v["family"]}
             model = SCRModel(
@@ -467,7 +539,7 @@ def main() -> None:
     print(f"{'Variant':<12} {'Axis':<10} {'MaxR2':>7} {'FinalR2':>8} {'ep@max':>7}")
     print(f"{'-'*65}")
     prev_fam = None
-    for v in VARIANTS:
+    for v in active_variants:
         if v["family"] != prev_fam and prev_fam is not None:
             print()
         prev_fam = v["family"]
@@ -475,7 +547,7 @@ def main() -> None:
             r = results[(axis, v["name"])]
             print(f"{v['name']:<12} {axis:<10} {r['max_r2']:>7.4f} {r['final_r2']:>8.4f} {r['ep_max']:>7}")
 
-    make_plots(results, all_dfs, active_axes, VARIANTS, OUTPUT_DIR)
+    make_plots(results, all_dfs, active_axes, active_variants, OUTPUT_DIR)
     print(f"\nDone. Results in: {OUTPUT_DIR.resolve()}")
 
 

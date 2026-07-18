@@ -416,7 +416,16 @@ def main() -> None:
     if args.seed is not None:
         cfg.setdefault("training", {})["seed"] = args.seed
 
-    timestamp  = datetime.now().strftime("%m%d_%H%M")
+    _AXIS_SHORT  = {"qfrac": "qfr", "protocol": "prot", "vwindow": "vwin",
+                    "rcs": "rcs", "cluster": "clst"}
+    _MODEL_SHORT = {"mlp": "mlp", "transformer": "tr", "i_transformer": "itr",
+                    "resnet_tab": "res", "ft_transformer": "ftt"}
+    _axis_short  = _AXIS_SHORT.get(_axis_name, _axis_name[:4])
+    _reg_model   = cfg.get("model", {}).get("regression_model", "mlp")
+    _model_short = _MODEL_SHORT.get(_reg_model, _reg_model[:3])
+    _phase_tag   = f"p{args.phase}" if args.phase else "p?"
+    _suffix      = f"_{_phase_tag}_{_model_short}_{_axis_short}" if args.phase == 2 else f"_{_phase_tag}_{_axis_short}"
+    timestamp  = datetime.now().strftime("%m%d_%H%M") + _suffix
     output_dir = PROJECT_ROOT / cfg["data"]["output_dir"] / timestamp
     (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (output_dir / "gates").mkdir(parents=True, exist_ok=True)
@@ -453,11 +462,19 @@ def main() -> None:
         print(f"[train] Phase 1: charge_m={charge_m}, discharge_m={discharge_m}, scen_k={scen_k}")
         print("[train] L0 게이트 학습 — charge/discharge probe + 6 scen gates 독립 탐색")
 
+        _lambda_scen = cfg.get("loss", {}).get("lambda_scen", 0.0)
+        _with_probe_mlp = _lambda_scen > 0
+        if _with_probe_mlp:
+            print(f"[train] dual-objective: MSE + CE(lambda_scen={_lambda_scen}) — probe_mlp 활성화")
+        else:
+            print("[train] single-objective: MSE only — probe_mlp 비활성화")
+
         model = SCRModel(
             d_probe=cfg["model"]["d_probe"],
             d_head=cfg["model"]["d_head"],
             dropout=cfg["model"]["dropout"],
             spec=spec,
+            with_probe_mlp=_with_probe_mlp,
             # 마스크 없음 → HardConcreteGate 활성화
         )
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -559,6 +576,16 @@ def main() -> None:
         shutil.copy(probe_json_in, probe_json_out)
         shutil.copy(scen_json_in,  scen_json_out)
         print(f"[train] Copied gate JSONs → {output_dir / 'gates'}/")
+
+    # ------------------------------------------------------------------
+    # Laplace UQ (Phase 2 전용, uq.enabled=true 시)
+    # ------------------------------------------------------------------
+    uq_cfg = cfg.get("uq", {})
+    uq = None
+    if phase == 2 and uq_cfg.get("enabled", False):
+        print("[train] ── Laplace UQ 적합 시작 ──")
+        uq = trainer.fit_laplace(train_loader, val_loader, uq_cfg)
+        uq.save(output_dir / "checkpoints" / "laplace_uq.pt")
 
     # ------------------------------------------------------------------
     # Final checkpoint

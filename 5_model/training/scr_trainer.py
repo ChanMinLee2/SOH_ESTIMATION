@@ -284,6 +284,39 @@ class SCRTrainer:
         return self.model
 
     # ------------------------------------------------------------------
+    # Laplace UQ fitting
+    # ------------------------------------------------------------------
+
+    def fit_laplace(
+        self,
+        train_loader,
+        val_loader,
+        uq_cfg: dict,
+    ):
+        """
+        학습 완료된 모델에 Last-Layer Laplace Approximation을 적합한다.
+
+        Args:
+            train_loader : 학습 DataLoader (H 추정용)
+            val_loader   : 검증 DataLoader (prior_precision 최적화용)
+            uq_cfg       : yaml uq: 섹션 딕셔너리
+
+        Returns:
+            LaplaceUQ 인스턴스 (fitted)
+        """
+        from utils.uncertainty import LaplaceUQ
+
+        prior_precision = uq_cfg.get("prior_precision", 1.0)
+        noise_std       = uq_cfg.get("noise_std", None)       # None → 잔차 자동 추정
+        optimize_prior  = uq_cfg.get("optimize_prior", True)
+
+        uq = LaplaceUQ(self.model, self.device, prior_precision=prior_precision)
+        uq.fit(train_loader, noise_std=noise_std)
+        if optimize_prior:
+            uq.optimize_prior_precision(val_loader)
+        return uq
+
+    # ------------------------------------------------------------------
     # Overfit test utilities
     # ------------------------------------------------------------------
 
@@ -372,10 +405,10 @@ def _save_model(model: nn.Module, path: Path, cfg=None, normalizer=None) -> None
     if cfg is not None:
         ckpt["cfg"] = cfg
     if normalizer is not None:
-        ckpt["norm_mean"]        = normalizer.mean_
-        ckpt["norm_std"]         = normalizer.std_
-        ckpt["norm_target_mean"] = normalizer.target_mean_
-        ckpt["norm_target_std"]  = normalizer.target_std_
+        ckpt["norm_mean"]           = normalizer.mean_
+        ckpt["norm_std"]            = normalizer.std_
+        ckpt["norm_cap_init_mean"]  = normalizer.cap_init_mean_
+        ckpt["norm_cap_init_std"]   = normalizer.cap_init_std_
     torch.save(ckpt, path)
 
 
