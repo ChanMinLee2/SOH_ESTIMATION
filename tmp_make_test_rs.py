@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -57,7 +58,9 @@ _LFP_KEYS = [
     "phase_entry_dvdq", "v_q_pearson", "ica_peak_cnt",
     "plateau_v_slope", "v_gradient_exit", "plateau_q_onset", "dv_dt_plateau", "v_ent_plateau",
 ]  # 20개
-_MORPH_KEYS = ["vt_dtw", "vq_dtw", "ve_dtw", "vt_frec", "vq_frec", "ve_frec"]  # 6개 (NaN)
+_MORPH_KEYS  = ["vt_dtw", "vq_dtw", "ve_dtw", "vt_frec", "vq_frec", "ve_frec"]  # 6개
+_MORPH_GRID  = 50   # _seg_morph_curves 와 동일
+_DTW_BAND    = 5    # Sakoe-Chiba band
 
 _NATIVE_HI_COLS = (
     [f"stat_{k}" for k in _STAT_KEYS]
@@ -65,6 +68,98 @@ _NATIVE_HI_COLS = (
     + [f"lfp_{k}"  for k in _LFP_KEYS]
     + [f"morph_{k}" for k in _MORPH_KEYS]
 )  # 64 columns
+
+
+def _load_ref_curves(pkl_path_str: str) -> dict:
+    """clean PKL에서 cycle 1 (최초 유효) morph 기준 곡선 로드.
+
+    Returns {"discharge": (vt, vq, ve), "charge": (vt, vq, ve)}
+    각 tuple 원소는 _MORPH_GRID(=50)점 array 또는 None.
+    """
+    hic   = _WORKER_HIC
+    none3 = (None, None, None)
+    result = {"discharge": none3, "charge": none3}
+    try:
+        with open(pkl_path_str, "rb") as f:
+            raw = pickle.load(f)
+        df_all = raw.get("cycles")
+        if df_all is None or not isinstance(df_all, pd.DataFrame):
+            return result
+        if "phase" not in df_all.columns:
+            df_all = hic._add_phase(df_all)
+        for direction, phase_name in [("discharge", "discharge"), ("charge", "charge")]:
+            phase_df = df_all[df_all["phase"] == phase_name]
+            for cyc in sorted(phase_df["cycle"].unique()):
+                if int(cyc) == 0:
+                    continue
+                grp = phase_df[phase_df["cycle"] == cyc].sort_values("time_s")
+                if len(grp) < 8:
+                    continue
+                vs  = grp["voltage_V"].values.astype(float)
+                ims = np.abs(grp["current_A"].values.astype(float))
+                t   = grp["time_s"].values.astype(float)
+                dts = np.clip(np.diff(t, prepend=t[0]), 0, None)
+                if phase_name == "charge":
+                    cv    = _cv_start(vs, ims)
+                    q_tmp = np.cumsum(ims * dts) / 3600.0
+                    q_cc  = float(q_tmp[cv - 1]) if cv > 0 else 0.0
+                    if cv < 8 or q_cc < 0.05:
+                        cv = len(vs)
+                    vs = vs[:cv]; ims = ims[:cv]; dts = dts[:cv]
+                if len(vs) < 8:
+                    continue
+                curves = hic._seg_morph_curves(vs, ims, dts)
+                if any(c is not None for c in curves):
+                    result[direction] = curves
+                    break
+    except Exception:
+        pass
+    return result
+
+
+def _compute_morph(
+    v: np.ndarray, i: np.ndarray, dt: np.ndarray,
+    ref_tuple: tuple, start_qf: float, end_qf: float,
+) -> dict:
+    """현재 세그먼트 vs cycle-1 기준 곡선 → morph 6개 계산.
+
+    실패·fastdtw 없을 시 NaN dict 반환.
+    """
+    nan_dict = {f"morph_{mk}": float("nan") for mk in _MORPH_KEYS}
+    if all(c is None for c in ref_tuple):
+        return nan_dict
+    try:
+        from fastdtw import fastdtw as _fdt  # worker re-import 안정성
+        hic = _WORKER_HIC
+        if hic is None:
+            return nan_dict
+        seg_curves = hic._seg_morph_curves(v, i, dt)
+        names = ["vt", "vq", "ve"]
+        out = {}
+        for name, seg_arr, ref_arr in zip(names, seg_curves, ref_tuple):
+            if seg_arr is None or ref_arr is None:
+                out[f"morph_{name}_dtw"]  = float("nan")
+                out[f"morph_{name}_frec"] = float("nan")
+                continue
+            # ref에서 [start_qf, end_qf] 구간 추출 → MORPH_GRID점 재보간
+            i_lo = max(0, int(start_qf * _MORPH_GRID))
+            i_hi = min(_MORPH_GRID, max(i_lo + 2, int(end_qf * _MORPH_GRID)))
+            ref_sub = ref_arr[i_lo:i_hi]
+            if len(ref_sub) < 2:
+                out[f"morph_{name}_dtw"]  = float("nan")
+                out[f"morph_{name}_frec"] = float("nan")
+                continue
+            ref_interp = np.interp(
+                np.linspace(0.0, 1.0, _MORPH_GRID),
+                np.linspace(0.0, 1.0, len(ref_sub)),
+                ref_sub,
+            )
+            dtw_dist, _ = _fdt(seg_arr, ref_interp, radius=_DTW_BAND)
+            out[f"morph_{name}_dtw"]  = float(dtw_dist) / _MORPH_GRID
+            out[f"morph_{name}_frec"] = float(np.max(np.abs(seg_arr - ref_interp)))
+        return out
+    except Exception:
+        return nan_dict
 
 
 def _cv_start(v: np.ndarray, i: np.ndarray,
@@ -162,6 +257,9 @@ def _extract_cell(args: tuple):
     except Exception as e:
         return path.stem, "", [], []
 
+    # cycle 1 기준 morph 곡선 (같은 clean PKL에서 로드)
+    ref_curves = _load_ref_curves(pkl_path_str)
+
     meta   = raw.get("meta", {})
     df_all = raw.get("cycles")
     if df_all is None or not isinstance(df_all, pd.DataFrame):
@@ -213,6 +311,9 @@ def _extract_cell(args: tuple):
                     if int(m.sum()) < min_pts:
                         continue
                     hi_dict = _extract_segment_hi(v[m], i[m], dt[m], q[m])
+                    hi_dict.update(_compute_morph(
+                        v[m], i[m], dt[m], ref_curves["discharge"], start_qf, end_qf,
+                    ))
                     seg_rows.append({
                         "cell_id":    cell_id,
                         "dataset":    dataset,
@@ -251,6 +352,9 @@ def _extract_cell(args: tuple):
                     if int(m.sum()) < min_pts:
                         continue
                     hi_dict = _extract_segment_hi(vc[m], ic[m], dtc[m], qc[m])
+                    hi_dict.update(_compute_morph(
+                        vc[m], ic[m], dtc[m], ref_curves["charge"], start_qf, end_qf,
+                    ))
                     seg_rows.append({
                         "cell_id":    cell_id,
                         "dataset":    dataset,
@@ -683,8 +787,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--n-samples", type=int,   default=8,
                    help="방향당 사이클당 샘플 수 (default: 8 → 총 ~16/사이클)")
-    p.add_argument("--min-len",   type=float, default=0.05,
-                   help="최소 창 폭 q_frac (default: 0.05 = 5%%)")
+    p.add_argument("--min-len",   type=float, default=0.15,
+                   help="최소 창 폭 q_frac (default: 0.15 = 15%%)")
     p.add_argument("--max-len",   type=float, default=0.40,
                    help="최대 창 폭 q_frac (default: 0.40 = 40%%)")
     p.add_argument("--seed",      type=int,   default=42,

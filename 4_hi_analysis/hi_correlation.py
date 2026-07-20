@@ -497,6 +497,11 @@ def _peak_fwhm_asym(arr, pk_idx, x_arr):
             right_idx = j
             break
     if left_idx == pk_idx or right_idx == pk_idx:
+        # 피크가 배열 끝에 있어 한 쪽 반폭만 측정 가능 → 2×단측 추정
+        if left_idx != pk_idx:
+            return 2.0 * float(x_arr[pk_idx] - x_arr[left_idx]), np.nan
+        if right_idx != pk_idx:
+            return 2.0 * float(x_arr[right_idx] - x_arr[pk_idx]), np.nan
         return np.nan, np.nan
     fwhm     = float(x_arr[right_idx] - x_arr[left_idx])
     x_peak   = float(x_arr[pk_idx])
@@ -644,9 +649,13 @@ def _seg_stat(vs, ims, dts, qcs, seg):
     # S09 corr_qi
     if np.std(q_rel) > 1e-9 and np.std(ims) > 1e-9:
         out[f"stat_corr_qi_{seg}"] = float(np.corrcoef(q_rel, ims)[0, 1])
+    else:
+        out[f"stat_corr_qi_{seg}"] = 0.0
     # S10 corr_vi
     if np.std(vs) > 1e-6 and np.std(ims) > 1e-9:
         out[f"stat_corr_vi_{seg}"] = float(np.corrcoef(vs, ims)[0, 1])
+    else:
+        out[f"stat_corr_vi_{seg}"] = 0.0
     # S11–S12
     out[f"stat_q_abs_{seg}"]      = float(np.sum(ims * dts) / 3600.0)
     out[f"stat_energy_seg_{seg}"] = float(np.sum(vs * ims * dts) / 3600.0)
@@ -662,7 +671,7 @@ def _seg_stat(vs, ims, dts, qcs, seg):
     if n >= 10:
         r_tol = 0.2 * float(np.std(vs))
         if r_tol > 0:
-            xs = vs[::max(1, n // 200)] if n > 200 else vs
+            xs = vs[::max(1, (n + 199) // 200)]  # ceil-div: ns ≤ 200
             ns = len(xs)
             if ns >= 10:
                 w2 = np.column_stack([xs[:-1], xs[1:]])
@@ -752,7 +761,7 @@ def _seg_diff(vs, ims, dts, qcs, seg):
     if dt_tot >= 1.0:
         out[f"diff_v_trend_slope_{seg}"] = float(vs[-1] - vs[0]) / dt_tot
 
-    # D15 dv_di_seg: |ΔV/ΔI| 비율 (연속 샘플, ΔI≠0, Δt<2s)
+    # D15 dv_di_seg: |ΔV/ΔI| 비율 (연속 샘플, ΔI≠0, Δt<2s); CC 구간(ΔI≈0) → 0.0
     if n > 1:
         dv_a = np.diff(vs); di_a = np.diff(ims); dt_a = dts[1:]
         valid = (np.abs(di_a) > 0.01) & (dt_a < 2.0) & (dt_a > 0)
@@ -761,11 +770,15 @@ def _seg_diff(vs, ims, dts, qcs, seg):
             r_dyn = r_dyn[r_dyn < 1000.0]
             if len(r_dyn) > 0:
                 out[f"diff_dv_di_seg_{seg}"] = float(np.mean(r_dyn))
+        else:
+            out[f"diff_dv_di_seg_{seg}"] = 0.0
 
     # D16–D17: IC curve valley (min of dQ/dV, relative to peak — uses ICA vmids/dqdv_sm)
+    # 밸리 미발견 시 0.0 폴백 (단일 피크 또는 짧은 세그먼트)
     if len(vmids) >= 6:
         pk16 = int(np.argmax(dqdv_sm))
         pk16_h = float(dqdv_sm[pk16])
+        _valley_found = False
         if pk16_h > 0 and pk16 >= 2 and pk16 <= len(dqdv_sm) - 3:
             li = int(np.argmin(dqdv_sm[:pk16]))
             ri = pk16 + 1 + int(np.argmin(dqdv_sm[pk16 + 1:]))
@@ -786,6 +799,10 @@ def _seg_diff(vs, ims, dts, qcs, seg):
                     vh, vv = rh, rv
                 out[f"diff_dqdv_valley_h_{seg}"] = vh
                 out[f"diff_dqdv_valley_v_{seg}"] = vv
+                _valley_found = True
+        if not _valley_found:
+            out[f"diff_dqdv_valley_h_{seg}"] = 0.0
+            out[f"diff_dqdv_valley_v_{seg}"] = 0.0
 
     # D18–D19: V-Q curve peak/flat Q positions
     fin18 = np.isfinite(dvdq_sm)
@@ -916,7 +933,7 @@ def _seg_lfp(vs, ims, dts, qcs, seg):
             pass
 
     # L16 plateau_v_slope (OLS slope of V vs Q_cum within plateau mask)
-    if plt_mask.sum() >= 5:
+    if plt_mask.sum() >= 3:
         qp16 = qm[plt_mask]
         vp16 = v_sm[plt_mask]
         if float(qp16[-1] - qp16[0]) > 1e-9:
@@ -952,7 +969,7 @@ def _seg_lfp(vs, ims, dts, qcs, seg):
                 out[f"lfp_dv_dt_plateau_{seg}"] = float(np.mean(dvdt_p)) * 1000.0
 
     # L20 v_ent_plateau (Shannon entropy of V within plateau mask, 10-bin PMF)
-    if plt_mask.sum() >= 10:
+    if plt_mask.sum() >= 3:
         _cnt20 = np.histogram(v_sm[plt_mask], bins=10)[0].astype(float)
         _tot20 = _cnt20.sum()
         if _tot20 > 0:

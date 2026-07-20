@@ -23,3 +23,7 @@
 | 2026-07-18 | random_seg_test 플랏 빈 시나리오 원인 수정 | ①batch["seg_idx"]→batch_d["seg_idx"] 저장버그 수정 ②routing=none시 test_rs seg_idx(0/1)↔모델 시나리오 ID 불일치→direction_routing으로 방향별 첫 시나리오로 보정 |
 | 2026-07-18 | 3축 비교 스크립트 작성 + 성능 평가 | compare_runs.py: E1/E2 성능표·HI Jaccard/τ·달성률 리포트, 그래프 2종 저장. 현 달성률 prot36%·vwin26%·rcs-80%; E2 R²<0이 최우선 해결 과제 |
 | 2026-07-18 | demo_segments.png 충전 미표시 원인 수정 + 3셀/데이터셋 표시 | _cv_start: median→argmax(전반50%피크)로 ramp-up 오감지 제거; q_cc<0.05 폴백 추가; _plot_demo_cycle: n_cells_per_ds=3, 3행×4열 레이아웃. MIT충전=RNG(캐시 없음·--force 필요), HUST=캐시 |
+| 2026-07-18 | NaN 감소 수정 구현 (morph+fallback) | tmp_make_test_rs: fastdtw+_load_ref_curves+_compute_morph 추가(cycle1 기준 morph 6개), min_len 0.05→0.15; hi_correlation: dv_di_seg·corr_vi/qi→0 폴백, valley→0 폴백, peak_w 단측추정, plateau_v_slope/v_ent_plateau 임계 5·10→3 |
+| 2026-07-19 | morph 100% NaN 원인 수정 | Windows spawn 멀티프로세스에서 모듈레벨 _fastdtw 바인딩이 worker globals에 미등록 → _compute_morph 내부에서 local import(from fastdtw import fastdtw as _fdt)로 변경; dist lambda 제거(기본 Euclidean, 동일결과+빠름) |
+| 2026-07-20 | 4논문 vs 프로젝트 차별성 + 강화 아이디어 | Shi:충전만/NMC, iMOE:이완30분필수/궤적예측, Su:완전사이클/전이학습, Ke:전압클러스터링; 차별점=LFP특화·충방전임의세그·CE+MSE공동라우팅·E3평가 |
+| 2026-07-20 | rcs 축 세그먼트 분리 방식 설명 | n_samples=6·window=0.3; 중심q_frac 1/3등분→lo/mid/hi; routing[[0,1,2],[5,4,3]]→6시나리오; 방전전체·충전CC만; 결정론적seed |

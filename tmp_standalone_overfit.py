@@ -72,10 +72,10 @@ VARIANTS_BASE: list[dict] = [
     },
 
     # ── FT-Transformer (Gorishniy et al., NeurIPS 2021) ──────────────────────
-    {   # S: d_model=64, 2-layer, 4-head  (~130 tokens)
-        "name": "FTTr-S", "family": "ft_transformer", "d_head": 64,
-        "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 2, "tr_d_ff": 128},
-    },
+    # {   # S: d_model=64, 2-layer, 4-head  (~130 tokens)
+    #     "name": "FTTr-S", "family": "ft_transformer", "d_head": 64,
+    #     "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 2, "tr_d_ff": 128},
+    # },
 ]
 
 # ── 사이즈 변형 (--model-size-variant true 시에만 실행) ──────────────────────
@@ -120,19 +120,19 @@ VARIANTS_SIZE: list[dict] = [
         "model_cfg": {"resnet_n_blocks": 6, "resnet_d_hidden_factor": 2.0},
     },
 
-    # ── FT-Transformer ────────────────────────────────────────────────────────
-    {   # M: d_model=128, 3-layer, 4-head
-        "name": "FTTr-M", "family": "ft_transformer", "d_head": 128,
-        "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 3, "tr_d_ff": 256},
-    },
-    {   # L: d_model=256, 4-layer, 8-head
-        "name": "FTTr-L", "family": "ft_transformer", "d_head": 256,
-        "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 4, "tr_d_ff": 512},
-    },
+    # # ── FT-Transformer ────────────────────────────────────────────────────────
+    # {   # M: d_model=128, 3-layer, 4-head
+    #     "name": "FTTr-M", "family": "ft_transformer", "d_head": 128,
+    #     "model_cfg": {"tr_n_heads": 4, "tr_n_layers": 3, "tr_d_ff": 256},
+    # },
+    # {   # L: d_model=256, 4-layer, 8-head
+    #     "name": "FTTr-L", "family": "ft_transformer", "d_head": 256,
+    #     "model_cfg": {"tr_n_heads": 8, "tr_n_layers": 4, "tr_d_ff": 512},
+    # },
 ]
 
 N_SAMPLES  = 2048
-MAX_EPOCHS = 2000
+MAX_EPOCHS = 3000
 LR         = 1e-3
 LOG_EVERY  = 20
 
