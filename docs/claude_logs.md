@@ -27,3 +27,5 @@
 | 2026-07-19 | morph 100% NaN 원인 수정 | Windows spawn 멀티프로세스에서 모듈레벨 _fastdtw 바인딩이 worker globals에 미등록 → _compute_morph 내부에서 local import(from fastdtw import fastdtw as _fdt)로 변경; dist lambda 제거(기본 Euclidean, 동일결과+빠름) |
 | 2026-07-20 | 4논문 vs 프로젝트 차별성 + 강화 아이디어 | Shi:충전만/NMC, iMOE:이완30분필수/궤적예측, Su:완전사이클/전이학습, Ke:전압클러스터링; 차별점=LFP특화·충방전임의세그·CE+MSE공동라우팅·E3평가 |
 | 2026-07-20 | rcs 축 세그먼트 분리 방식 설명 | n_samples=6·window=0.3; 중심q_frac 1/3등분→lo/mid/hi; routing[[0,1,2],[5,4,3]]→6시나리오; 방전전체·충전CC만; 결정론적seed |
+| 2026-07-21 | hi_compute.py 신설 + hi_correlation 위임 | 5_model/hi_compute.py: @hi레지스트리+W캐시클래스+66HI(현재이름 유지); hi_correlation.py 말미에 from hi_compute import _seg_* 덮어쓰기; 66개 이름·순서 hi_schema.py 완전일치 확인 |
+| 2026-07-21 | q_frac_wide 시나리오 축 신설 + 문서 추가 | common/scenario/q_frac_wide.py: 3구간(hi/mid/lo)×방향=6시나리오, linspace 균등격자, n1/n2/n_samples 파라미터; __init__.py 등록, train_scr.py _AXIS_SHORT 추가; SCENARIO_STRATEGY.md 섹션4·5·6 갱신 |

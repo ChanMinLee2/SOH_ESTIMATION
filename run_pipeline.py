@@ -154,6 +154,14 @@ def main():
         "--checkpoint", default=None, metavar="PATH",
         help="SCR 평가 체크포인트 직접 지정 (미지정 시 Phase 2 출력 자동 탐색)",
     )
+    parser.add_argument(
+        "--seg-axis", default=None, metavar="AXIS",
+        help="세그멘테이션 축 (Step 4~7에 전달). 예: qfrac, q_frac_wide",
+    )
+    parser.add_argument(
+        "--axis-config", default=None, metavar="JSON",
+        help="축 파라미터 JSON (Step 4~7에 전달). 예: '{\"n1\": 0.4, \"n2\": 0.2, \"n_samples\": 4}'",
+    )
     args = parser.parse_args()
 
     to_step = args.to_step if args.to_step is not None else len(STEPS)
@@ -173,6 +181,10 @@ def main():
     print(f"  스텝 범위   : {args.from_step} → {to_step}")
     print(f"  병렬 워커   : {args.workers}  (데이터 스텝 전용)")
     print(f"  모델 설정   : {args.model_config}")
+    if args.seg_axis:
+        print(f"  seg-axis    : {args.seg_axis}")
+    if args.axis_config:
+        print(f"  axis-config : {args.axis_config}")
     if args.gates_from:
         print(f"  gates-from  : {args.gates_from}")
     if args.checkpoint:
@@ -192,6 +204,13 @@ def main():
 
     for num, name, script, extra, use_workers in selected:
         step_extra = list(extra)
+
+        # ── 축 정보 주입 (Step 4~7) ─────────────────────────────────────────
+        if num in (4, 5, 6, 7):
+            if args.seg_axis:
+                step_extra += ["--seg-axis", args.seg_axis]
+            if args.axis_config:
+                step_extra += ["--axis-config", args.axis_config]
 
         # ── Phase 1 전: 스냅샷 ──────────────────────────────────────────────
         if num == 6:

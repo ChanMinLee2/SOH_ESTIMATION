@@ -19,7 +19,7 @@ q_frac 기반 분할은 학습 시점에 ground truth capacity를 사용해 `q_f
 
 **현재 기본값**: `qfrac` 축, 경계 `[0.0, 0.4, 0.7, 1.0]`
 
-이 문서는 기본 qfrac 분할과 함께 제공되는 4가지 대체 축(protocol / vwindow / rcs / cluster)의 설계 근거와 실행 방법을 정리한다.
+이 문서는 기본 qfrac 분할과 함께 제공되는 5가지 대체 축(protocol / vwindow / rcs / cluster / q_frac_wide)의 설계 근거와 실행 방법을 정리한다.
 
 ---
 
@@ -109,7 +109,7 @@ A123 APR18650M1A 셀 기준 (공칭 용량 1.1–1.2Ah, 5mAh bin):
 
 ---
 
-## 4. 구현된 5가지 축
+## 4. 구현된 6가지 축
 
 모든 축은 `common/scenario/` 패키지 내 `Segmenter` ABC를 구현한다.
 
@@ -119,10 +119,11 @@ A123 APR18650M1A 셀 기준 (공칭 용량 1.1–1.2Ah, 5mAh bin):
 from common.scenario import get_segmenter
 
 seg = get_segmenter("qfrac")                        # 기본값
-seg = get_segmenter("protocol", cfg={"protocol": {"max_steps": 3}})
-seg = get_segmenter("vwindow",  cfg={"vwindow":  {"n_windows": 3}})
-seg = get_segmenter("rcs",      cfg={"rcs":      {"n_samples": 6, "window": 0.3}})
-seg = get_segmenter("cluster",  cfg={"cluster":  {"n_fine": 10, "k_range": [2, 8]}})
+seg = get_segmenter("protocol",     cfg={"protocol":     {"max_steps": 3}})
+seg = get_segmenter("vwindow",      cfg={"vwindow":      {"n_windows": 3}})
+seg = get_segmenter("rcs",          cfg={"rcs":          {"n_samples": 6, "window": 0.3}})
+seg = get_segmenter("cluster",      cfg={"cluster":      {"n_fine": 10, "k_range": [2, 8]}})
+seg = get_segmenter("q_frac_wide",  cfg={"q_frac_wide":  {"n1": 0.4, "n2": 0.2, "n_samples": 4}})
 
 spec: ScenarioSpec = seg.get_spec()   # ScenarioSpec 반환
 ```
@@ -131,7 +132,7 @@ spec: ScenarioSpec = seg.get_spec()   # ScenarioSpec 반환
 ```python
 @dataclass
 class ScenarioSpec:
-    axis: str               # "qfrac" | "protocol" | "vwindow" | "rcs" | "cluster"
+    axis: str               # "qfrac" | "protocol" | "vwindow" | "rcs" | "cluster" | "q_frac_wide"
     n_scenarios: int        # Stage B gate 개수
     scenario_names: list    # 길이 = n_scenarios
     n_classes: int          # Stage A 분류 클래스 수
@@ -439,6 +440,186 @@ python 5_model/train_scr.py --phase 1 --seg-axis cluster
 
 ---
 
+### 축 5: `q_frac_wide` — 파라미터 구간 균등격자 세그멘터
+
+> 구현 파일: `common/scenario/q_frac_wide.py`
+
+rcs처럼 폭 기반 윈도우를 사용하지만, **세 고정 구간(hi/mid/lo)**을 사전 정의하고 그 내부에서 균등 격자 시작점을 배치한다. 구간 크기(n1)와 세그먼트 길이(n2)를 각각 파라미터로 지정할 수 있으며, n1을 크게 설정하면 구간 간 겹침이 발생한다.
+
+#### 구간 정의
+
+`n1` = 구간 크기 (q_frac 비율), `n2` = 세그먼트 길이 (q_frac 비율)
+
+| 구간명 | q_frac 절대 범위 | 설명 |
+|--------|----------------|------|
+| `hi`  | `[0.0, n1]` | 0% 끝점 → 50% 방향 |
+| `mid` | `[0.5 - n1/2, 0.5 + n1/2]` | 50% 중심 → 양방향 |
+| `lo`  | `[1.0 - n1, 1.0]` | 100% 끝점 → 50% 방향 |
+
+세그먼트 배치 규칙:
+- 유효 시작 범위: `[zone_start, zone_end - n2]` (세그먼트가 구간을 벗어나지 않음)
+- 균등 격자: `np.linspace(zone_start, zone_end - n2, n_samples)` 로 `n_samples`개 시작점 배치
+- `n_samples = 1` → 유효 범위 중앙점 1개
+
+#### 구간 커버리지 및 겹침 특성
+
+**n1 × 3 < 100% (n1 < 1/3 ≈ 33.3%) — 겹침 없음, 구간 사이 gap 존재:**
+
+```
+n1=0.20:
+  hi  : [0.00──0.20]
+  mid :              [0.40──0.60]
+  lo  :                           [0.80──1.00]
+         ←── gap 0.20 ──→ ←── gap 0.20 ──→
+  커버리지: 3 × 0.20 = 60%  |  레이블 충돌: 없음
+```
+
+**n1 × 3 = 100% (n1 = 1/3 ≈ 33.3%) — 겹침 없음, gap 없음 (최소 전체 커버):**
+
+```
+n1=0.33:
+  hi  : [0.00──────0.33]
+  mid :             [0.33──────0.67]
+  lo  :                          [0.67──────1.00]
+  커버리지: 3 × 0.33 = 100%  |  레이블 충돌: 없음
+```
+
+**n1 × 3 > 100% (n1 > 1/3 ≈ 33.3%) — 겹침 있음, 레이블 충돌 발생:**
+
+```
+n1=0.40:
+  hi  : [0.00────────────0.40]
+  mid :       [0.30────────────0.70]   ← hi∩mid = [0.30, 0.40] (10% 중복)
+  lo  :             [0.60────────────1.00]   ← mid∩lo = [0.60, 0.70] (10% 중복)
+  커버리지: 3 × 0.40 = 120%  |  레이블 충돌: 있음
+```
+
+겹침 구간에서 생성된 세그먼트는 두 구간 모두에서 추출되어 **서로 다른 scenario_id로 훈련 데이터에 중복 포함**된다. 동일 입력 HI에 상충되는 레이블이 붙어 학습 노이즈로 작용한다.
+
+- 겹침 폭 공식 (n1 > 1/3일 때): `1.5·n1 − 0.5`
+  - n1=0.35 → 겹침 2.5%,  n1=0.40 → 겹침 10.0%,  n1=0.44 → 겹침 16.0%
+
+각 세그먼트는 자기 구간 내에서만 생성 (`s + n2 ≤ zone_end` 보장).
+
+**구간 내 세그먼트 간격** = `(n1 − n2) / (n_samples − 1)`:
+
+| 조건 | 구간 내 상태 |
+|------|------------|
+| 간격 > n2  즉  `n2 < n1 / n_samples` | 세그먼트 사이 gap 존재 (구간 일부 미커버) |
+| 간격 = n2  즉  `n2 = n1 / n_samples` | 갭·겹침 없이 구간 전체를 정확히 타일링 |
+| 간격 < n2  즉  `n2 > n1 / n_samples` | 세그먼트끼리 겹침, 구간 전체 커버 (중복 있음) |
+
+예시 (n1=0.35, n_samples=4, 경계 n2 = 0.35/4 ≈ 0.088):
+- n2=0.05 → 간격 0.10 > n2 → gap O, 커버리지 57% (4×0.05 / 0.35)
+- n2=0.20 → 간격 0.05 < n2 → 세그먼트 내 겹침 O, 커버리지 100%
+
+#### 파라미터 유효 범위
+
+| 파라미터 | 코드 허용 범위 | 권장 실험 범위 | 핵심 제약 |
+|---------|-------------|-------------|---------|
+| **n1** | `[0.05, 0.45)` | `[0.10, 0.40]` | 현재 코드 최솟값 `0.35` — n1 민감도 실험 전 완화 필요 |
+| **n2** | `(0, n1)` | `[0.05, 0.30]` | `n2 ≥ n1`이면 해당 구간 세그먼트 생성 불가(skip) |
+| **n_samples** | `≥ 1` | `2 ~ 6` | `1`이면 유효 범위 중앙점 1개만 배치 |
+
+**n1 구조 분류 (n_samples, n2 무관):**
+
+| 조건 | 커버리지 | 레이블 충돌 | 비고 |
+|------|---------|-----------|------|
+| `n1 × 3 < 100%`  (n1 < 33.3%) | 부분 (gap 존재) | 없음 | 구간 민감도 분석에 적합 |
+| `n1 × 3 = 100%`  (n1 = 1/3)   | 완전 (gap 없음) | 없음 | 최소 충돌 전체 커버 |
+| `n1 × 3 > 100%`  (n1 > 33.3%) | 초과 (overlap)  | 있음 | 고밀도 커버, 충돌 감안 |
+
+> **코드 제약 주의**: 현재 `q_frac_wide.py`의 n1 하한이 `0.35`로 설정되어 있어 n1 < 33.3% 실험이 불가하다. n1 민감도 실험(Phase B) 전에 `0.05 ≤ n1 < 0.45`로 완화해야 한다.
+
+#### 시나리오 매핑 (qfrac/rcs와 동일 컨벤션)
+
+| 세그먼트 | 방향 | 구간 | scenario_id | latent_class |
+|---------|------|------|-------------|-------------|
+| `chg_lo`  | 충전 | lo zone | 0 | lo(0) |
+| `chg_mid` | 충전 | mid zone | 1 | mid(1) |
+| `chg_hi`  | 충전 | hi zone | 2 | hi(2) |
+| `dis_hi`  | 방전 | hi zone | 3 | hi(2) |
+| `dis_mid` | 방전 | mid zone | 4 | mid(1) |
+| `dis_lo`  | 방전 | lo zone | 5 | lo(0) |
+
+라우팅 테이블: `routing = [[0, 1, 2], [5, 4, 3]]` — qfrac/rcs 와 동일
+
+#### rcs와의 차이점
+
+| 항목 | `rcs` | `q_frac_wide` |
+|-----|-------|--------------|
+| 시작점 선정 | 완전 랜덤 (`rng.uniform`) | 균등 격자 (`linspace`) |
+| 구간 경계 | 없음 (전체 [0, 1-window]) | 3구간 고정 (hi/mid/lo) |
+| 시나리오 판별 | 사후 중심 binning | 사전 구간 배정 |
+| 구간 내 침범 | 없음 (단순 윈도우) | 수학적으로 보장 없음 |
+| 세그먼트 수 | 사이클당 n_samples개 | 사이클당 3 × n_samples개 |
+
+#### 실행 방법
+
+```powershell
+# ── Step 4: HI 추출 ────────────────────────────────────────────────────────
+# 기본값 (n1=0.4, n2=0.2, n_samples=4) — 사이클당 12개 세그먼트
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide
+
+# 파라미터 지정 (--axis-config 는 축 이름 없이 flat dict 로 전달)
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --axis-config '{"n1": 0.4, "n2": 0.2, "n_samples": 4}'
+
+# 구간 겹침 활성화 (n1=0.45 미만 제약 있음)
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --axis-config '{"n1": 0.44, "n2": 0.2, "n_samples": 6}'
+
+# ── Step 5: 학습 (--axis-config 불필요) ──────────────────────────────────
+# n1/n2/n_samples는 모델 구조(n_scenarios=6, routing)에 영향을 주지 않으므로
+# --seg-axis 만 지정하면 PKL에서 데이터를 자동 로드한다.
+python 5_model/train_scr.py --phase 1 --seg-axis q_frac_wide
+```
+
+> **`--axis-config` 형식 주의 (`hi_correlation.py`)**:  
+> - 스크립트 내부에서 `{axis: cfg}` 로 자동 래핑하므로, 축 이름 없이 flat dict 를 넘겨야 한다.  
+>   `'{"n1": 0.4}'` ✓ / `'{"q_frac_wide": {"n1": 0.4}}'` ✗  
+> - **PowerShell에서 `{"..."}` 는 스크립트블록으로 해석**되어 JSON이 잘린다.  
+>   변수로 먼저 받은 뒤 전달할 것:  
+>   ```powershell
+>   $cfg = '{"n1": 0.4, "n2": 0.2, "n_samples": 4}'
+>   python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --axis-config $cfg
+>   ```
+
+#### ScenarioSpec 예시
+
+```json
+{
+  "axis": "q_frac_wide",
+  "n_scenarios": 6,
+  "scenario_names": ["chg_lo","chg_mid","chg_hi","dis_hi","dis_mid","dis_lo"],
+  "n_classes": 3,
+  "class_names": ["lo","mid","hi"],
+  "routing": [[0,1,2],[5,4,3]],
+  "classifier_default": "mlp_probe",
+  "params": {"n1": 0.4, "n2": 0.2, "n_samples": 4}
+}
+```
+
+#### 파라미터 설정 가이드
+
+| 목적 | 권장 설정 | 비고 |
+|------|---------|------|
+| qfrac과 동일 경계 (비교 기준) | n1=1/3≈0.333, n2=0.133, n_samples=1 | 구간당 1개, 경계 일치 |
+| rcs 대체 (균등 커버) | n1=0.4, n2=0.2, n_samples=4 | 구간당 4개, 겹침 없음 |
+| 고밀도 데이터 수집 | n1=0.6, n2=0.15, n_samples=8 | 구간 겹침 + 세밀 격자 |
+| 세그먼트 최소화 (빠른 실험) | n1=0.4, n2=0.3, n_samples=2 | 구간당 2개 |
+
+> **n2 ≥ n1이면 해당 구간에서 세그먼트 생성 불가.** `_start_positions()`가 빈 배열 반환 → 해당 구간 skip.
+
+#### 장단점
+
+| 장점 | 단점 |
+|------|------|
+| 세그먼트가 구간을 벗어나지 않아 레이블 일관성 보장 | n1, n2, n_samples 조합 탐색 필요 |
+| 균등 격자로 각 구간 내 q_frac 분포를 고르게 커버 | n2 ≥ n1이면 해당 구간 세그먼트 생성 불가 |
+| qfrac/rcs와 동일 n_scenarios=6, 교차 비교 가능 | 구간 겹침 시 동일 q_frac에 다중 시나리오 세그먼트 공존 |
+| n1 크기로 구간 겹침을 연속적으로 조절 가능 | 물리적 해석은 rcs와 마찬가지로 제한적 |
+
+---
+
 ## 5. 축 선택 및 실행 방법
 
 ### CLI 인터페이스
@@ -446,10 +627,10 @@ python 5_model/train_scr.py --phase 1 --seg-axis cluster
 Step 4와 Step 5에 동일한 `--seg-axis`를 지정해야 한다.
 
 ```powershell
-# Step 4: HI 추출
+# Step 4: HI 추출 (--axis-config 로 세그먼터 파라미터 지정)
 python 4_hi_analysis/hi_correlation.py --seg-axis <axis> [--axis-config '<JSON>']
 
-# Step 5 Phase 1
+# Step 5 Phase 1 (학습은 PKL 파일을 읽으므로 --axis-config 는 대부분 불필요)
 python 5_model/train_scr.py --phase 1 --seg-axis <axis> [--seed N]
 
 # Step 5 Phase 2
@@ -459,6 +640,19 @@ python 5_model/train_scr.py --phase 2 --seg-axis <axis> \
 # 평가 (spec은 run_dir/scenario_spec.json에서 자동 로드)
 python 5_model/test_scr.py
 ```
+
+> **`--axis-config`가 학습 시에도 필요한 경우**: 축 파라미터가 모델 구조(n_scenarios·routing)를 바꿀 때만.  
+> - `protocol --axis-config '{"max_steps":2}'` → n_scenarios 변경  
+> - `vwindow --axis-config '{"n_windows":4}'` → n_scenarios 변경  
+> - `rcs --axis-config '{"assign":"none"}'` → n_scenarios 6→2  
+> - `qfrac`, `q_frac_wide`, `cluster` → 구조 파라미터 고정, 학습 시 불필요
+>
+> **PowerShell 주의**: `--axis-config '{"key": val}'` 에서 `{...}` 가 스크립트블록으로 해석될 수 있음.  
+> 변수로 분리해서 전달하면 안전하다:  
+> ```powershell
+> $cfg = '{"max_steps": 2}'
+> python 5_model/train_scr.py --phase 1 --seg-axis protocol --axis-config $cfg
+> ```
 
 ### `scr.yaml` 경로 동기화
 
@@ -486,22 +680,26 @@ _4_data_hi/
     cycle/ seg/ scenario_spec.json
   cluster/
     cycle/ seg/ scenario_spec.json
+  q_frac_wide/
+    cycle/ seg/ scenario_spec.json
 ```
 
 ---
 
 ## 6. 축 비교 요약
 
-| 항목 | `qfrac` | `protocol` | `vwindow` | `rcs` | `cluster` |
-|------|---------|------------|-----------|-------|-----------|
-| 경계 근거 | 임의 q_frac 분할 | 논문 프로토콜 CC 전환 | IC 전압 상전이 | 랜덤 샘플링 | K-means 클러스터 |
-| n_scenarios | 6 | 6 (max_steps=3) | **7** (n_windows=3+cv) | 6 또는 2 | 가변 (k_range) |
-| 분류기 기본 | mlp_probe | rule | rule | mlp_probe | centroid |
-| `fit()` 필요 | ✗ | ✗ | ✗ (LFP 고정 경계) | ✗ | ✓ |
-| 열화 불변 경계 | ✗ | ✓ (프로토콜 고정) | ✓ (전압 고정) | ✓ | △ |
-| MIT/HUST 경계 동일 | ✓ | 방향별 상이¹ | ✓ (동일 V범위) | ✓ | 데이터 의존 |
-| 리뷰어 설득력 | 기준선 | 높음 (논문 인용) | 높음 (물리 해석) | 중간 (Deng 재현) | 높음 (if 일치) |
-| 구현 리스크 | **완료** | **완료** | **완료** | **완료** | **완료** |
+| 항목 | `qfrac` | `protocol` | `vwindow` | `rcs` | `cluster` | `q_frac_wide` |
+|------|---------|------------|-----------|-------|-----------|--------------|
+| 경계 근거 | 임의 q_frac 분할 | 논문 프로토콜 CC 전환 | IC 전압 상전이 | 랜덤 샘플링 | K-means 클러스터 | 파라미터 구간 균등격자 |
+| n_scenarios | 6 | 6 (max_steps=3) | **7** (n_windows=3+cv) | 6 또는 2 | 가변 (k_range) | 6 |
+| 분류기 기본 | mlp_probe | rule | rule | mlp_probe | centroid | mlp_probe |
+| `fit()` 필요 | ✗ | ✗ | ✗ (LFP 고정 경계) | ✗ | ✓ | ✗ |
+| 열화 불변 경계 | ✗ | ✓ (프로토콜 고정) | ✓ (전압 고정) | ✓ | △ | ✓ |
+| MIT/HUST 경계 동일 | ✓ | 방향별 상이¹ | ✓ (동일 V범위) | ✓ | 데이터 의존 | ✓ (n1,n2 동일) |
+| 구간 겹침 | ✗ | ✗ | ✗ | △ (중심 binning) | — | ✓ (n1>0.5 시) |
+| 세그먼트 수/사이클 | 3–6 | max_steps×2 | (2n+1)×1 | n_samples | n_fine | 3×n_samples |
+| 리뷰어 설득력 | 기준선 | 높음 (논문 인용) | 높음 (물리 해석) | 중간 (Deng 재현) | 높음 (if 일치) | 중간 (rcs 개선) |
+| 구현 리스크 | **완료** | **완료** | **완료** | **완료** | **완료** | **완료** |
 
 > ¹ protocol 축: MIT는 chg_step1이 있고 dis_step2는 1개, HUST는 chg_step2=0. 두 데이터셋에서 시나리오 인덱스가 가리키는 물리 체계가 달라 크로스 DS 학습 시 step 레이블 혼선 위험.
 
@@ -616,3 +814,117 @@ vwindow 분류기의 시나리오 레이블은 **전압 윈도우 위치**로 �
 
 각 디렉토리 내 `hi_trend.png` (SOH vs HI scatter), `hi_segment_trend_*.png` (시나리오별 HI 추이),  
 `hi_correlation.png` (HI 간 상관), `stats_*.txt` (세그먼트 수·크기 통계) 포함.
+
+---
+
+## 10. q_frac_wide 파라미터 민감도 실험 계획
+
+### 실험 목적
+
+"LFP 배터리에서 SOH 정보가 어느 SOC 구간(n1)에, 어느 해상도(n2)로 측정할 때 가장 잘 나타나는가"를 체계적으로 정량화한다. 결과는 단순 성능 숫자에 그치지 않고 **어느 구간이 왜 중요한가**에 대한 물리적 근거를 제공한다.
+
+n_samples=4, split_seed=42 고정 — 모델 구조(n_scenarios=6, routing)와 데이터 분할이 동일하므로 실험 간 공정한 비교가 가능하다.
+
+---
+
+### Phase A — n2 민감도 (1순위, n1=0.35 고정)
+
+**n1=0.35를 선택한 이유**: n1×3 = 105% (전체 용량 커버 보장) + 겹침 폭 2.5% (레이블 충돌 최소).  
+n1×3 ≥ 100% 조건을 만족하는 최솟값으로, 최소한의 충돌로 전체 구간을 커버한다.
+
+| 실험 | n1 | n2 | n2/n1 | 특성 |
+|------|----|----|-------|------|
+| A1 | 0.35 | 0.05 | 0.14 | 매우 짧은 윈도우 — 국소 정보 최대화 |
+| A2 | 0.35 | 0.10 | 0.29 | — |
+| A3 | 0.35 | 0.15 | 0.43 | — |
+| A4 | 0.35 | 0.20 | 0.57 | — |
+| A5 | 0.35 | 0.25 | 0.71 | — |
+| A6 | 0.35 | 0.30 | 0.86 | 구간 거의 전체 커버 |
+
+**예상 결과 패턴별 해석:**
+
+| 패턴 | 물리적 의미 |
+|------|-----------|
+| n2 작을수록 성능 증가 | 국소 열화 신호가 지배적 — 짧은 측정으로도 SOH 추정 가능 |
+| n2 중간값에서 최적 (U자형) | 국소 신호 + 통계 안정성 균형점 존재 |
+| n2 클수록 성능 증가 | 긴 윈도우의 통계적 안정성이 국소 정보보다 우위 |
+
+---
+
+### Phase B — n1 민감도 (2순위, best_n2 고정)
+
+**선행 조건**: `common/scenario/q_frac_wide.py` n1 하한을 `0.35 → 0.05`로 완화해야 한다.
+
+| 실험 | n1 | n1×3 | 커버리지 구조 | 특성 |
+|------|----|----|------------|------|
+| B1 | 0.10 | 30% | gap 40% (중간 구간 미커버) | 극단부만 측정 |
+| B2 | 0.20 | 60% | gap 20% | — |
+| B3 | 0.30 | 90% | gap 5% (거의 전체) | — |
+| B4 | 0.35 | 105% | overlap 2.5% (Phase A 기준) | 기준점 |
+| B5 | 0.40 | 120% | overlap 10% (현재 기본값) | — |
+
+**gap이 있는 구간(B1~B3)의 해석**: hi/mid/lo 사이의 gap 영역(예: B1에서 [0.10, 0.40])은 모델이 활용하지 못한다. n1이 작아도 성능이 유지되면 gap 구간이 SOH에 기여하지 않는다는 증거가 된다.
+
+**예상 결과 패턴별 해석:**
+
+| 패턴 | 물리적 의미 |
+|------|-----------|
+| n1 클수록 성능 증가 (B1→B5 단조) | 넓은 커버리지 자체가 유리 — gap 구간도 정보 기여 |
+| 특정 n1에서 최적 | 해당 폭이 열화 신호와 가장 잘 매칭 |
+| n1 무관 (B1≈B5) | gap 구간이 SOH 예측에 무의미 — 극단부(hi/lo zone)만으로 충분 |
+
+---
+
+### 베이스라인
+
+| 실험 | 축 | 목적 |
+|------|---|------|
+| `baseline-qfrac` | qfrac | 전체 비교 기준 (동일 n_scenarios=6) |
+| `baseline-qfw-A4` | q_frac_wide (n1=0.35, n2=0.20) | Phase A 중간값 — 기존 기본값과 유사 |
+
+---
+
+### 실행 명령어
+
+```powershell
+# ── Phase A (n2 민감도, 코드 수정 불필요) ────────────────────────────────────
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.35 --n2 0.05 --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.35 --n2 0.10 --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.35 --n2 0.15 --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.35 --n2 0.20 --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.35 --n2 0.25 --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.35 --n2 0.30 --n-samples 4
+
+# 각 A* 실험에 대해 학습 (scr.yaml: axis: q_frac_wide, axis_config: {n1: 0.35, n2: X})
+python run_pipeline.py 6 --seg-axis q_frac_wide --n2 0.05   # Phase A1
+python run_pipeline.py 6 --seg-axis q_frac_wide --n2 0.10   # Phase A2
+# ... 동일 패턴
+
+# ── Phase B (n1 민감도, q_frac_wide.py n1 하한 0.05로 완화 후) ──────────────
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.10 --n2 <best_n2> --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.20 --n2 <best_n2> --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.30 --n2 <best_n2> --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.35 --n2 <best_n2> --n-samples 4
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --n1 0.40 --n2 <best_n2> --n-samples 4
+```
+
+> `run_pipeline.py`에 `--n1 / --n2 / --n-samples` 인자가 없으므로, `scr.yaml`의 `axis_config`를 실험별로 갱신하거나 `--axis-config $cfg` 형태를 사용한다. (§5 CLI 주의사항 참조)
+
+---
+
+### 결과 기록 양식
+
+| 실험 ID | n1 | n2 | n2/n1 | n1×3 | test RMSE | test R² | 비고 |
+|--------|----|----|-------|------|-----------|---------|------|
+| A1 | 0.35 | 0.05 | 0.14 | 105% | — | — | — |
+| A2 | 0.35 | 0.10 | 0.29 | 105% | — | — | — |
+| A3 | 0.35 | 0.15 | 0.43 | 105% | — | — | — |
+| A4 | 0.35 | 0.20 | 0.57 | 105% | — | — | — |
+| A5 | 0.35 | 0.25 | 0.71 | 105% | — | — | — |
+| A6 | 0.35 | 0.30 | 0.86 | 105% | — | — | — |
+| B1 | 0.10 | best | — | 30% | — | — | — |
+| B2 | 0.20 | best | — | 60% | — | — | — |
+| B3 | 0.30 | best | — | 90% | — | — | — |
+| B4 | 0.35 | best | — | 105% | — | — | = A best |
+| B5 | 0.40 | best | — | 120% | — | — | overlap 10% |
+| baseline-qfrac | — | — | — | — | — | — | 비교 기준 |

@@ -403,12 +403,21 @@ def main() -> None:
     spec = _segmenter.get_spec()
     print(f"[train] seg-axis={_axis_name}  n_scenarios={spec.n_scenarios}  n_classes={spec.n_classes}")
 
+    # q_frac_wide: n1/n2/n_samples 별 하위 디렉터리 결정
+    if _axis_name == "q_frac_wide":
+        _n1 = int(round(_axis_cfg.get("n1", 0.4) * 100))
+        _n2 = int(round(_axis_cfg.get("n2", 0.2) * 100))
+        _ns = int(_axis_cfg.get("n_samples", 4))
+        _axis_dir = f"q_frac_wide/n1-{_n1}%_n2-{_n2}%_N-{_ns}"
+    else:
+        _axis_dir = _axis_name
+
     # 데이터 경로: null → scenario.axis 기반 자동 결정
     _data_cfg = cfg["data"]
     if not _data_cfg.get("seg_data_dir"):
-        _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_name}/seg"
+        _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
     if not _data_cfg.get("data_dir"):
-        _data_cfg["data_dir"] = f"_4_data_hi/{_axis_name}/cycle"
+        _data_cfg["data_dir"] = f"_4_data_hi/{_axis_dir}/cycle"
     print(f"[train] data_dir={_data_cfg['data_dir']}")
     print(f"[train] seg_data_dir={_data_cfg['seg_data_dir']}")
 
@@ -417,7 +426,7 @@ def main() -> None:
         cfg.setdefault("training", {})["seed"] = args.seed
 
     _AXIS_SHORT  = {"qfrac": "qfr", "protocol": "prot", "vwindow": "vwin",
-                    "rcs": "rcs", "cluster": "clst"}
+                    "rcs": "rcs", "cluster": "clst", "q_frac_wide": "qfw"}
     _MODEL_SHORT = {"mlp": "mlp", "transformer": "tr", "i_transformer": "itr",
                     "resnet_tab": "res", "ft_transformer": "ftt"}
     _axis_short  = _AXIS_SHORT.get(_axis_name, _axis_name[:4])

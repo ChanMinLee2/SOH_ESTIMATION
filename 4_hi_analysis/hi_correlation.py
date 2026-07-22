@@ -2230,6 +2230,14 @@ def _save_per_cell_hi(
     return df_cycle, df_seg
 
 
+def _qfw_tag(axis_cfg: dict) -> str:
+    """q_frac_wide 파라미터 → 파일/디렉터리 식별 태그."""
+    n1 = int(round(axis_cfg.get("n1", 0.4) * 100))
+    n2 = int(round(axis_cfg.get("n2", 0.2) * 100))
+    ns = int(axis_cfg.get("n_samples", 4))
+    return f"n1-{n1}%_n2-{n2}%_N-{ns}"
+
+
 def load_or_extract(
     cache_path: Path = CACHE_PATH,
     n_workers: int = 4,
@@ -2238,17 +2246,23 @@ def load_or_extract(
     axis_cfg: dict | None = None,
 ) -> pd.DataFrame:
     """캐시가 있으면 로드, 없으면 전체 추출 후 저장."""
-    # axis별 캐시 경로 (qfrac은 기존 경로 유지)
-    _cache = (
-        cache_path
-        if axis == "qfrac"
-        else cache_path.parent / f"hi_features_{axis}.pkl"
-    )
+    axis_cfg = dict(axis_cfg or {})
+
+    # q_frac_wide: 파라미터별 고유 경로 사용
+    if axis == "q_frac_wide":
+        _tag      = _qfw_tag(axis_cfg)
+        _cache    = cache_path.parent / f"hi_features_{_tag}.pkl"
+        _axis_dir = f"q_frac_wide/{_tag}"
+    elif axis == "qfrac":
+        _cache    = cache_path
+        _axis_dir = axis
+    else:
+        _cache    = cache_path.parent / f"hi_features_{axis}.pkl"
+        _axis_dir = axis
+
     if not force and _cache.exists():
         print(f"  캐시 로드: {_cache}")
         return pd.read_pickle(_cache)
-
-    axis_cfg = dict(axis_cfg or {})
 
     # vwindow: dis_edges/chg_edges 없으면 LFP 물리 기반 고정 경계 사용
     if axis == "vwindow" and "dis_edges" not in axis_cfg:
@@ -2267,14 +2281,14 @@ def load_or_extract(
 
     print(f"=== MIT HI 추출 (axis={axis}) ===")
     df_mit  = load_all(MIT_DIR,  n_workers=n_workers, axis=axis, axis_cfg=axis_cfg)
-    dc_mit,  ds_mit  = _save_per_cell_hi(df_mit,  "MIT",  axis=axis)
+    dc_mit,  ds_mit  = _save_per_cell_hi(df_mit,  "MIT",  axis=_axis_dir)
     print(f"=== HUST HI 추출 (axis={axis}) ===")
     df_hust = load_all(HUST_DIR, n_workers=n_workers, axis=axis, axis_cfg=axis_cfg)
-    dc_hust, ds_hust = _save_per_cell_hi(df_hust, "HUST", axis=axis)
+    dc_hust, ds_hust = _save_per_cell_hi(df_hust, "HUST", axis=_axis_dir)
     _save_sample_csvs(df_mit, df_hust)
 
     # ScenarioSpec 저장
-    _spec_dir = HI_ROOT / axis
+    _spec_dir = HI_ROOT / _axis_dir
     _spec_dir.mkdir(parents=True, exist_ok=True)
     _segmenter.save_artifacts(_spec_dir)
     print(f"  ScenarioSpec 저장: {_spec_dir / 'scenario_spec.json'}")
@@ -2523,10 +2537,26 @@ def main():
                         help="curve-debug 자동 선택 사이클 수 (기본: 5)")
     # ── 시나리오 축 ──────────────────────────────────────────────────────────
     parser.add_argument("--seg-axis", type=str, default="qfrac",
-                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster (기본: qfrac)")
+                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster|q_frac_wide (기본: qfrac)")
     parser.add_argument("--axis-config", type=str, default="{}",
-                        help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}')")
+                        help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}'). "
+                             "PowerShell에서는 --axis-config=$cfg 형태 또는 --n1/--n2/--n-samples 사용")
+    # q_frac_wide 전용 단축 인자 — JSON 없이 파라미터 직접 지정 (PowerShell 호환)
+    parser.add_argument("--n1",       type=float, default=None,
+                        help="q_frac_wide: 구간 크기 (기본 0.4). --axis-config 대체")
+    parser.add_argument("--n2",       type=float, default=None,
+                        help="q_frac_wide: 세그먼트 길이 (기본 0.2). --axis-config 대체")
+    parser.add_argument("--n-samples", type=int, default=None, dest="n_samples",
+                        help="q_frac_wide: 구간당 세그먼트 수 (기본 4). --axis-config 대체")
     args = parser.parse_args()
+
+    # --n1 / --n2 / --n-samples → axis_config 자동 구성 (PowerShell JSON 우회)
+    if args.n1 is not None or args.n2 is not None or args.n_samples is not None:
+        _quick: dict = {}
+        if args.n1        is not None: _quick["n1"]        = args.n1
+        if args.n2        is not None: _quick["n2"]        = args.n2
+        if args.n_samples is not None: _quick["n_samples"] = args.n_samples
+        args.axis_config = json.dumps(_quick)
 
     _axis = args.seg_axis
     try:
@@ -2595,7 +2625,12 @@ def main():
         print(f"\n── {gname} ──")
         print(sub.to_string(float_format=lambda x: f"{x:+.3f}"))
 
-    _dir_suffix = f"_{_axis}" if _axis != "qfrac" else ""
+    if _axis == "q_frac_wide":
+        _dir_suffix = f"_{_qfw_tag(_axis_cfg)}"
+    elif _axis != "qfrac":
+        _dir_suffix = f"_{_axis}"
+    else:
+        _dir_suffix = ""
     hi_plot_dir = STEP_DIR / "hi_plot" / (date.today().strftime("%m%d") + _dir_suffix)
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
     out = hi_plot_dir / "hi_correlation.png"
@@ -2625,6 +2660,27 @@ def main():
 
     print("완료!")
 
+
+# ── hi_compute 위임 ──────────────────────────────────────────────────────────
+# HI 계산 로직의 단일 소스는 5_model/hi_compute.py.
+# 아래 import가 이 파일 내 동명 함수 정의를 덮어써, 새 @hi 함수가
+# _seg_stat/_seg_diff/_seg_lfp 를 통해 자동으로 포함된다.
+import sys as _hc_sys
+from pathlib import Path as _HCPath
+_hc_root = str(_HCPath(__file__).resolve().parent.parent / "5_model")
+if _hc_root not in _hc_sys.path:
+    _hc_sys.path.insert(0, _hc_root)
+from hi_compute import (    # noqa: E402
+    _seg_stat,
+    _seg_diff,
+    _seg_lfp,
+    _build_vq_curve,
+    _build_ica_seg,
+    _peak_fwhm_asym,
+    _seg_morph_curves,
+    _dtw_distance,
+    _frechet_distance,
+)
 
 if __name__ == "__main__":
     main()

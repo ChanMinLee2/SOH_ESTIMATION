@@ -44,6 +44,12 @@ try:
 except Exception:
     pass
 
+try:
+    from .q_frac_wide import QFracWideSegmenter
+    REGISTRY["q_frac_wide"] = QFracWideSegmenter
+except Exception:
+    pass
+
 
 def get_segmenter(name: str, cfg: dict | None = None) -> Segmenter:
     """
@@ -67,6 +73,7 @@ __all__ = [
     "SegmentRecord",
     "Segmenter",
     "QFracSegmenter",
+    "QFracWideSegmenter",
     "REGISTRY",
     "get_segmenter",
 ]

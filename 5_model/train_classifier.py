@@ -74,6 +74,17 @@ def _find_latest_run_dir(output_dir: Path) -> Path | None:
     return dirs[-1] if dirs else None
 
 
+def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
+    """spec.axis + spec.params → _4_data_hi 하위 경로 문자열."""
+    if spec.axis == "q_frac_wide":
+        p  = spec.params or {}
+        n1 = int(round(p.get("n1", 0.4) * 100))
+        n2 = int(round(p.get("n2", 0.2) * 100))
+        ns = int(p.get("n_samples", 4))
+        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}"
+    return spec.axis
+
+
 
 def _load_probe_masks(
     run_dir: Path, cfg: dict, device: torch.device
@@ -152,19 +163,25 @@ def main() -> None:
         spec = spec_from_qfrac()
         print(f"[clf] scenario_spec.json 없음 — qfrac 기본값 사용")
 
-    # 저장된 config에서 데이터 경로 복원
-    saved_cfg_path = run_dir / "config.yaml"
-    if saved_cfg_path.exists():
-        saved_cfg = load_config(str(saved_cfg_path))
-        for k in ("data_dir", "seg_data_dir"):
-            if saved_cfg.get("data", {}).get(k):
-                cfg.setdefault("data", {})[k] = saved_cfg["data"][k]
-
     _data_cfg = cfg.setdefault("data", {})
-    if not _data_cfg.get("seg_data_dir"):
-        _data_cfg["seg_data_dir"] = f"_4_data_hi/{spec.axis}/seg"
-    if not _data_cfg.get("data_dir"):
-        _data_cfg["data_dir"] = f"_4_data_hi/{spec.axis}/cycle"
+    _axis_dir = _axis_dir_from_spec(spec)
+
+    if spec.axis == "q_frac_wide":
+        # spec.params에서 태그 재구성 — 저장된 config 경로(구버전)보다 항상 우선
+        _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
+        _data_cfg["data_dir"]     = f"_4_data_hi/{_axis_dir}/cycle"
+    else:
+        # 저장된 config에서 경로 복원 시도, 없으면 spec.axis 기반 fallback
+        saved_cfg_path = run_dir / "config.yaml"
+        if saved_cfg_path.exists():
+            saved_cfg = load_config(str(saved_cfg_path))
+            for k in ("data_dir", "seg_data_dir"):
+                if saved_cfg.get("data", {}).get(k):
+                    _data_cfg[k] = saved_cfg["data"][k]
+        if not _data_cfg.get("seg_data_dir"):
+            _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
+        if not _data_cfg.get("data_dir"):
+            _data_cfg["data_dir"] = f"_4_data_hi/{_axis_dir}/cycle"
 
     # 데이터 로드 (같은 config → Phase 2와 동일한 split/정규화)
     train_ds, val_ds, _, norm = build_datasets(cfg, spec=spec)
