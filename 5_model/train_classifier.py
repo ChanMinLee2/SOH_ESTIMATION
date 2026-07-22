@@ -36,7 +36,7 @@ from torch.utils.data import DataLoader
 
 from utils.io_utils import load_config
 from datasets.segment_dataset import build_datasets
-from models.scenario_classifier import MLPProbeClassifier
+from models.scenario_classifier import MLPProbeClassifier, CNNProbeClassifier
 from utils.hi_schema import N_HI, spec_from_qfrac
 from common.scenario.base import ScenarioSpec
 
@@ -203,11 +203,21 @@ def main() -> None:
     batch_sz = train_cfg.get("batch_size", 2048)
     d_hidden = args.d_hidden
 
-    print(f"[clf] n_classes={spec.n_classes}  d_hidden={d_hidden}  "
+    # 분류기 타입: mlp(기본) | cnn (원시 V/I 곡선 CNN + HI probe 융합)
+    clf_type = cfg.get("classifier", {}).get("type", "mlp").lower()
+
+    print(f"[clf] type={clf_type}  n_classes={spec.n_classes}  d_hidden={d_hidden}  "
           f"lr={lr}  epochs={epochs}  patience={patience}")
     print(f"[clf] train={len(train_ds):,}  val={len(val_ds):,} segments")
 
-    clf       = MLPProbeClassifier(N_HI + 1, spec.n_classes, d_hidden=d_hidden).to(device)
+    if clf_type == "cnn":
+        # CNNProbeClassifier: probe_x(N_HI) + CNN(x_raw) + direction 내부 융합
+        clf     = CNNProbeClassifier(N_HI, spec.n_classes, d_hidden=d_hidden).to(device)
+        clf_n_hi = N_HI
+    else:
+        # MLPProbeClassifier: [probe_x || direction] = N_HI+1 입력 (기존 동작 유지)
+        clf     = MLPProbeClassifier(N_HI + 1, spec.n_classes, d_hidden=d_hidden).to(device)
+        clf_n_hi = N_HI + 1
     opt       = torch.optim.AdamW(clf.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
 
@@ -232,8 +242,12 @@ def main() -> None:
             dir_t = batch["direction"].to(device)
             lbl   = batch["level"].to(device)
             probe = _apply_probe_mask(x, dir_t, ch_mask, dis_mask)
-            inp   = torch.cat([probe, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
-            logits = clf(inp)
+            if clf_type == "cnn":
+                binp   = {"x_raw": batch["x_raw"].to(device), "direction": dir_t}
+                logits = clf.classify(probe, binp)               # (B, n_classes)
+            else:
+                inp    = torch.cat([probe, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
+                logits = clf(inp)
             loss   = criterion(logits, lbl)
             opt.zero_grad(); loss.backward(); opt.step()
             tr_loss    += loss.item() * x.size(0)
@@ -251,8 +265,12 @@ def main() -> None:
                 dir_t = batch["direction"].to(device)
                 lbl   = batch["level"].to(device)
                 probe = _apply_probe_mask(x, dir_t, ch_mask, dis_mask)
-                inp   = torch.cat([probe, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
-                logits = clf(inp)
+                if clf_type == "cnn":
+                    binp   = {"x_raw": batch["x_raw"].to(device), "direction": dir_t}
+                    logits = clf.classify(probe, binp)               # (B, n_classes)
+                else:
+                    inp    = torch.cat([probe, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
+                    logits = clf(inp)
                 vl_loss    += criterion(logits, lbl).item() * x.size(0)
                 vl_correct += (logits.argmax(1) == lbl).sum().item()
                 vl_total   += x.size(0)
@@ -270,7 +288,8 @@ def main() -> None:
             no_improve   = 0
             torch.save({
                 "clf_state": clf.state_dict(),
-                "n_hi":      N_HI + 1,   # probe_x(N_HI) + direction(1)
+                "clf_type":  clf_type,   # "mlp" | "cnn"
+                "n_hi":      clf_n_hi,   # mlp: probe_x(N_HI)+direction(1) | cnn: probe_x(N_HI)
                 "n_classes": spec.n_classes,
                 "d_hidden":  d_hidden,
                 "val_acc":   vl_acc,

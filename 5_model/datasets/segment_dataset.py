@@ -30,6 +30,7 @@ from torch.utils.data import Dataset
 from utils.hi_schema import (
     STAT_KEYS, DIFF_KEYS, LFP_KEYS, MORPH_KEYS,
     get_hi_cols_for_seg, get_hi_cost_vector, N_HI, spec_from_qfrac,
+    RAW_N, RAW_CH,
 )
 
 _proj_root = Path(__file__).resolve().parent.parent.parent
@@ -262,7 +263,9 @@ def load_dataset_native_seg(
             keep = (["cell_id", "cycle", "seg_name", "seg_idx", "scen",
                      "direction", "level", "capacity_Ah"]
                     + [f"hi_{i:02d}" for i in range(N_HI)])
-            df = df[keep].dropna(subset=["capacity_Ah"])
+            # 원시 곡선 컬럼(raw_v/raw_i)이 있으면 함께 보존 (CNN 입력용)
+            raw_cols = [c for c in ("raw_v", "raw_i") if c in df.columns]
+            df = df[keep + raw_cols].dropna(subset=["capacity_Ah"])
             df["dataset"] = ds
             all_dfs.append(df)
 
@@ -330,6 +333,33 @@ class SegmentNormalizer:
 HI_COLS = [f"hi_{i:02d}" for i in range(N_HI)]
 
 
+def _stack_raw_col(series, n: int) -> np.ndarray:
+    """object 컬럼(list/ndarray per row) → (n, RAW_N) float32.
+    누락(NaN/스칼라)·길이불일치는 zero-pad/truncate 로 방어."""
+    out = np.zeros((n, RAW_N), np.float32)
+    for idx, val in enumerate(series.values):
+        if isinstance(val, (list, np.ndarray)):
+            arr = np.asarray(val, dtype=np.float32).ravel()
+            m = min(len(arr), RAW_N)
+            out[idx, :m] = arr[:m]
+        # else: NaN/스칼라 → zero (원시 곡선 없는 세그먼트)
+    return out
+
+
+def _build_raw_tensor(df: pd.DataFrame) -> torch.Tensor:
+    """DataFrame → x_raw 텐서 (N, RAW_CH, RAW_N).
+    raw_v/raw_i 컬럼이 없으면(구 pkl / wide 포맷) zero 텐서로 fallback."""
+    n = len(df)
+    if "raw_v" in df.columns and "raw_i" in df.columns:
+        rv = _stack_raw_col(df["raw_v"], n)   # (n, RAW_N)
+        ri = _stack_raw_col(df["raw_i"], n)   # (n, RAW_N)
+    else:
+        rv = np.zeros((n, RAW_N), np.float32)
+        ri = np.zeros((n, RAW_N), np.float32)
+    raw = np.stack([rv, ri], axis=1)          # (n, RAW_CH=2, RAW_N)
+    return torch.from_numpy(raw)
+
+
 class SegmentDataset(Dataset):
     """
     One sample = one (cell, cycle, segment) triple.
@@ -364,6 +394,7 @@ class SegmentDataset(Dataset):
 
         self.x_hi = torch.from_numpy(x)
         self.nan_mask = torch.from_numpy(mask)
+        self.x_raw = _build_raw_tensor(df)   # (N, RAW_CH, RAW_N) — CNN 입력 (구 pkl → zeros)
         self.direction = torch.tensor(df["direction"].values, dtype=torch.float32)
         self.level = torch.tensor(df["level"].values, dtype=torch.long)
         self.seg_idx = torch.tensor(df["seg_idx"].values, dtype=torch.long)
@@ -415,6 +446,7 @@ class SegmentDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         return {
             "x_hi":      self.x_hi[idx],
+            "x_raw":     self.x_raw[idx],
             "nan_mask":  self.nan_mask[idx],
             "direction": self.direction[idx],
             "level":     self.level[idx],
@@ -439,6 +471,7 @@ def filter_dataset_by_cells(ds: "SegmentDataset", cell_ids: list[str]) -> "Segme
 def _subset_dataset(ds: "SegmentDataset", indices: list[int]) -> "SegmentDataset":
     new_ds = object.__new__(SegmentDataset)
     new_ds.x_hi        = ds.x_hi[indices]
+    new_ds.x_raw        = ds.x_raw[indices]
     new_ds.nan_mask     = ds.nan_mask[indices]
     new_ds.direction    = ds.direction[indices]
     new_ds.level        = ds.level[indices]

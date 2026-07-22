@@ -138,10 +138,15 @@ class SCREvaluator:
                 dir_t   = batch_d["direction"]
                 dir_idx = (dir_t <= 0).long()              # 0=charge, 1=discharge
 
-                # Phase 1 probe mask 적용 + direction concat — train_classifier.py와 동일한 입력
+                # Phase 1 probe mask 적용 — train_classifier.py와 동일한 입력
                 probe_x_clf = self.model.get_probe_x(x_hi, dir_t, batch_d["seg_idx"])
-                clf_inp     = torch.cat([probe_x_clf, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
-                clf_logits  = self._classifier(clf_inp)    # (B, n_classes)
+                from models.scenario_classifier import CNNProbeClassifier
+                if isinstance(self._classifier, CNNProbeClassifier):
+                    # CNN: probe_x + x_raw + direction 내부 융합 (batch_d에 x_raw 포함)
+                    clf_logits = self._classifier.classify(probe_x_clf, batch_d)  # (B, n_classes)
+                else:
+                    clf_inp    = torch.cat([probe_x_clf, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
+                    clf_logits = self._classifier(clf_inp)    # (B, n_classes)
 
                 if routing_mode == "hard":
                     class_pred = clf_logits.argmax(1)                     # (B,)

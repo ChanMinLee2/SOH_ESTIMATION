@@ -77,6 +77,62 @@ class MLPProbeClassifier(ScenarioClassifier, nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# CNNProbeClassifier
+# ---------------------------------------------------------------------------
+
+class CNNProbeClassifier(ScenarioClassifier, nn.Module):
+    """
+    원시 V/I 곡선 CNN 임베딩 + HI probe 융합 분류기 (MODEL_SPECS.md §4.2).
+
+    입력:
+        probe_x       : (B, n_hi)          direction-gated probe HI
+        batch["x_raw"]: (B, RAW_CH, RAW_N) 원시 곡선 (CNN 입력)
+        batch["direction"]: (B,)           +1/-1
+
+    구조:
+        RawCNN(x_raw) → cnn_emb (d_cnn)
+        [cnn_emb || probe_x || direction] → MLP → n_classes logits
+
+    x_raw 가 없거나 전부 0(구 pkl)이면 CNN 경로는 0 임베딩에 수렴 → probe_x 만으로
+    동작(MLP 분류기로 자연 degrade). 별도 예외 없이 호환.
+    """
+
+    def __init__(
+        self,
+        n_hi: int,
+        n_classes: int,
+        d_cnn: int = 64,
+        d_hidden: int = 128,
+        dropout: float = 0.1,
+    ) -> None:
+        nn.Module.__init__(self)
+        # 지연 import: torch 모델 계층 순환참조 방지
+        from models.raw_cnn import RawCNN
+
+        self.cnn = RawCNN(d_out=d_cnn, dropout=dropout)
+        self.head = nn.Sequential(
+            nn.Linear(d_cnn + n_hi + 1, d_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden, d_hidden // 2),
+            nn.GELU(),
+            nn.Linear(d_hidden // 2, n_classes),
+        )
+
+    def _fuse(self, probe_x: torch.Tensor, batch: dict) -> torch.Tensor:
+        x_raw = batch["x_raw"]                          # (B, RAW_CH, RAW_N)
+        cnn_emb = self.cnn(x_raw)                        # (B, d_cnn)
+        direction = batch["direction"].to(probe_x.dtype).unsqueeze(1)  # (B, 1)
+        return torch.cat([cnn_emb, probe_x, direction], dim=1)
+
+    def forward(self, probe_x: torch.Tensor, batch: dict) -> torch.Tensor:
+        return self.head(self._fuse(probe_x, batch))
+
+    def classify(self, probe_x: torch.Tensor, batch: dict) -> torch.Tensor:
+        return self.head(self._fuse(probe_x, batch))
+
+
+# ---------------------------------------------------------------------------
 # RuleClassifier
 # ---------------------------------------------------------------------------
 
@@ -241,6 +297,7 @@ class NoneClassifier(ScenarioClassifier):
 
 _REGISTRY: dict[str, type] = {
     "mlp":      MLPProbeClassifier,
+    "cnn":      CNNProbeClassifier,
     "rule":     RuleClassifier,
     "centroid": CentroidClassifier,
     "oracle":   OracleClassifier,
@@ -272,6 +329,8 @@ def build_classifier(
         raise ValueError(f"Unknown classifier '{name}'. Choose from {sorted(_REGISTRY)}")
     if key == "mlp":
         return MLPProbeClassifier(n_hi, n_classes, d_hidden=d_hidden, dropout=dropout)
+    if key == "cnn":
+        return CNNProbeClassifier(n_hi, n_classes, d_hidden=d_hidden, dropout=dropout)
     if key == "rule":
         if spec is None:
             raise ValueError("spec is required for RuleClassifier")

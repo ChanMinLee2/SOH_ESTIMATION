@@ -214,14 +214,23 @@ def main() -> None:
             _clf_ckpt = torch.load(_clf_ckpt_path, map_location="cpu", weights_only=False)
         except TypeError:
             _clf_ckpt = torch.load(_clf_ckpt_path, map_location="cpu")
-        _clf = MLPProbeClassifier(
-            n_hi=_clf_ckpt["n_hi"],
-            n_classes=_clf_ckpt["n_classes"],
-            d_hidden=_clf_ckpt["d_hidden"],
-        )
+        _clf_type = _clf_ckpt.get("clf_type", "mlp")
+        if _clf_type == "cnn":
+            from models.scenario_classifier import CNNProbeClassifier
+            _clf = CNNProbeClassifier(
+                n_hi=_clf_ckpt["n_hi"],
+                n_classes=_clf_ckpt["n_classes"],
+                d_hidden=_clf_ckpt["d_hidden"],
+            )
+        else:
+            _clf = MLPProbeClassifier(
+                n_hi=_clf_ckpt["n_hi"],
+                n_classes=_clf_ckpt["n_classes"],
+                d_hidden=_clf_ckpt["d_hidden"],
+            )
         _clf.load_state_dict(_clf_ckpt["clf_state"])
         evaluator.set_classifier(_clf)
-        print(f"[test] 분류기 로드: {_clf_ckpt_path}  "
+        print(f"[test] 분류기 로드: {_clf_ckpt_path}  type={_clf_type}  "
               f"val_acc={_clf_ckpt.get('val_acc', float('nan')):.4f}")
     else:
         routing_mode = rs_cfg.get("random_seg_routing", "none")

@@ -43,6 +43,13 @@ LEAK_COLS: set[str] = {
 }
 
 
+# ── 원시 세그먼트 곡선 (CNN 입력) ────────────────────────────────────────────
+# 세그먼트의 V/I 시계열을 q_frac [0,1] 그리드에 리샘플한 고정 길이.
+# hi_correlation.py(데이터 생성)와 segment_dataset.py(로더)가 공유하는 단일 상수.
+RAW_N: int = 48       # 리샘플 포인트 수
+RAW_CH: int = 2       # 채널 수: [V, |I|]
+
+
 # Computation cost by category (used in L0 loss)
 CATEGORY_COSTS: dict[str, float] = {
     "stat":  1.0,

@@ -11,14 +11,15 @@ raw data
   ↓ [1_convert]       MIT(.mat HDF5) / HUST(.pkl) → _1_data_unified/
   ↓ [2_preprocess]    7단계 필터링                 → _4_data_hi/clean/
   ↓ [3_integrity]     10개 항목 무결성 검사         → reports/
-  ↓ [4_hi_analysis]   HI 추출 (Global 15 + Seg 6×66)
+  ↓ [4_hi_analysis]   HI 추출 (Global 15 + Seg 6×66) + 원시 곡선 리샘플(raw_v/raw_i, 48pt)
                         → _4_data_hi/{axis}/cycle/{ds}/*.pkl  (wide-cycle)
-                        → _4_data_hi/{axis}/seg/{ds}/*.pkl    (native-seg)
+                        → _4_data_hi/{axis}/seg/{ds}/*.pkl    (native-seg + raw_v/raw_i)
                         → _4_data_hi/{axis}/scenario_spec.json
   ↓ [5_model]
       Phase 1 : L0 HardConcrete gate → probe/scen HI 선택 → gates/*.json
       Phase 2 : 고정 gate + 회귀 전용 → checkpoints/best.pt
       Clf     : 독립 시나리오 분류기 학습 → classifier/clf_best.pt  ← B안 추가
+                classifier.type = mlp(HI) | cnn(원시 V/I CNN + HI 융합)  ← CNN 옵션
   ↓ [test_scr]   평가 3축:
       E1 (qfrac→qfrac test)     : 이상적 상한선 (routing=none)
       E2 (qfrac→random test)    : 배포 시나리오  (routing=none, random_segment_test=true)
@@ -522,8 +523,14 @@ ce, cv_q_frac, cv_time_frac, chg_ica_peak1_h
            ← 방전 인자를 np.empty(0)로 전달 → min_pts 체크로 자동 skip
 4. SegmentRecord.meta["seg_name"] 또는 spec.scenario_names[scenario_id]
 5. _seg_stat / _seg_diff / _seg_lfp / _seg_morph_curves 호출
-6. row 딕셔너리 누적 → wide DataFrame (한 행 = 한 사이클)
+6. _resample_segment(v, i, q) → raw_v_{seg}/raw_i_{seg} (q_frac [0,1] 그리드 48pt) 저장
+7. row 딕셔너리 누적 → wide DataFrame (한 행 = 한 사이클)
 ```
+
+> **원시 곡선 리샘플 (`_resample_segment`, RAW_N=48)**: 세그먼트 V/|I| 시계열을 세그먼트
+> 내 상대 누적전하 q_rel을 [0,1]로 정규화한 그리드에 선형보간한다. 세그먼트 길이(포인트
+> 수)가 셀·사이클·데이터셋마다 달라도 동일 해상도로 CNN에 입력 가능하게 한다.
+> `_to_seg_df`가 `raw_v_{seg}`/`raw_i_{seg}`를 native-seg의 `raw_v`/`raw_i` 컬럼으로 전달.
 
 multiprocessing 호환: `_extract_one_cell((pkl_path_str, axis, cfg_json))` 튜플 형태로 전달 (pickle 가능).
 
@@ -534,7 +541,7 @@ multiprocessing 호환: `_extract_one_cell((pkl_path_str, axis, cfg_json))` 튜�
 ```
 _4_data_hi/{axis}/
   cycle/{ds}/{cell}.pkl    wide-cycle HI (한 행=한 사이클, stat/diff/lfp/morph × 세그먼트)
-  seg/{ds}/{cell}.pkl      native-seg HI (한 행=한 세그먼트, hi_00..hi_63)
+  seg/{ds}/{cell}.pkl      native-seg HI (한 행=한 세그먼트, hi_00..hi_63 + raw_v/raw_i[48])
   scenario_spec.json       해당 축의 ScenarioSpec
 hi_features.pkl            qfrac 추출 캐시 (축 변경 시 hi_features_{axis}.pkl)
 ```
@@ -627,7 +634,8 @@ data:
   gates_from: null | "_5_data_model_scr/MMDD_HHMM_p1_prot"  # Phase 2 시 지정
   use_initial_capacity: true
 
-classifier:             # ── Phase 1/2: SCRModel probe gate 설정 ──────────────
+classifier:             # ── Phase 1/2: SCRModel probe gate + 분류기 설정 ──────
+  type: mlp             # 분류기 타입: mlp(HI probe) | cnn(원시 V/I CNN + HI 융합)
   is_auto_mk_selection: false
   charge_probe_m:   3   # Phase 2에서 probe JSON 상위 m개 사용 (분류기와 별개)
   discharge_probe_m: 2
@@ -711,9 +719,11 @@ columns:
 | `level` | int | latent_class 0/1/2 (lo/mid/hi) |
 | `capacity_Ah` | float | 사이클 실측 용량 — SOH 타겟 원본 |
 | `hi_00`..`hi_63` | float32 | 64개 HI (세그먼트별, NaN 허용) |
+| `raw_v` / `raw_i` | list[48] | 원시 V/|I| 곡선 (q_frac 정규화 48pt, CNN 입력용). native-seg에만 존재; 없으면 로더가 zero-fallback |
 | `dataset` | str | `MIT` 또는 `HUST` |
 
-> Wide 포맷: `_wide_to_segments()` 로 reshape. Native seg 포맷: `load_dataset_native_seg()` 직접 로드.
+> Wide 포맷: `_wide_to_segments()` 로 reshape (raw 컬럼 없음 → x_raw=0).  
+> Native seg 포맷: `load_dataset_native_seg()` 직접 로드 (raw_v/raw_i 있으면 CNN 입력으로 사용).
 
 ---
 
@@ -737,13 +747,14 @@ nan_mask = ~isnan(x_raw)          # 1.0=유효, 0.0=결측
 
 ```python
 {
-  "x_hi":      Tensor (64,)   float32  # z-scored HI, NaN→0
-  "nan_mask":  Tensor (64,)   float32  # 1.0=유효, 0.0=결측
-  "direction": Tensor ()      float32  # +1.0 or -1.0
-  "level":     Tensor ()      int64    # latent class (0/1/2)
-  "seg_idx":   Tensor ()      int64    # 시나리오 인덱스 0..n-1
-  "target":    Tensor ()      float32  # SOH ratio = cap_Ah / cap_init_Ah ∈ (0, 1]
-  "cap_init":  Tensor ()      float32  # z-scored 초기/정격 용량 Ah (크기 conditioning)
+  "x_hi":      Tensor (64,)    float32  # z-scored HI, NaN→0
+  "x_raw":     Tensor (2, 48)  float32  # 원시 [V; |I|] 곡선 (CNN 입력). raw 없는 pkl → 전부 0
+  "nan_mask":  Tensor (64,)    float32  # 1.0=유효, 0.0=결측
+  "direction": Tensor ()       float32  # +1.0 or -1.0
+  "level":     Tensor ()       int64    # latent class (0/1/2)
+  "seg_idx":   Tensor ()       int64    # 시나리오 인덱스 0..n-1
+  "target":    Tensor ()       float32  # SOH ratio = cap_Ah / cap_init_Ah ∈ (0, 1]
+  "cap_init":  Tensor ()       float32  # z-scored 초기/정격 용량 Ah (크기 conditioning)
 }
 ```
 
@@ -751,15 +762,19 @@ nan_mask = ~isnan(x_raw)          # 1.0=유효, 0.0=결측
 
 ```python
 batch = {
-  "x_hi":      (B, 64)   float32
-  "nan_mask":  (B, 64)   float32
-  "direction": (B,)      float32
-  "level":     (B,)      int64
-  "seg_idx":   (B,)      int64
-  "target":    (B,)      float32
-  "cap_init":  (B,)      float32
+  "x_hi":      (B, 64)    float32
+  "x_raw":     (B, 2, 48) float32   # RAW_CH=2, RAW_N=48 (CNN 분류기 입력)
+  "nan_mask":  (B, 64)    float32
+  "direction": (B,)       float32
+  "level":     (B,)       int64
+  "seg_idx":   (B,)       int64
+  "target":    (B,)       float32
+  "cap_init":  (B,)       float32
 }
 ```
+
+> `x_raw`는 CNN 분류기(`classifier.type: cnn`)에서만 사용. SCRModel 회귀 forward는 이 키를
+> 읽지 않고 무시하므로 기존 회귀 경로는 완전히 불변.
 
 ---
 
@@ -868,6 +883,10 @@ MORPH_KEYS  # 6개
 CATEGORY_COSTS = {"stat": 1.0, "diff": 1.5, "lfp": 2.0, "morph": 3.0}
 LEAK_COLS = {"stat_q_abs", "stat_energy_seg"}   # 모델 입력 제외
 
+RAW_N  = 48   # 원시 세그먼트 곡선 리샘플 포인트 수 (CNN 입력)
+RAW_CH = 2    # 원시 곡선 채널 수: [V, |I|]
+# hi_correlation.py(데이터 생성)와 segment_dataset.py(로더)가 공유하는 단일 소스
+
 def get_hi_cols_for_seg(seg: str) -> list[str]:  # 64개 컬럼명 반환 (순서 고정)
 def get_hi_cost_vector(seg: str) -> list[float]: # 64개 L0 비용 벡터
 def spec_from_qfrac() -> ScenarioSpec:           # backward-compat: qfrac 기본 spec 반환
@@ -922,6 +941,7 @@ def build_datasets(cfg, spec=None) -> (train_ds, val_ds, test_ds, norm):
 | 텐서 (`__getitem__` 반환) | 형상 | 설명 |
 |---|---|---|
 | `x_hi` | (64,) | z-score 정규화된 HI 피처 |
+| `x_raw` | (2, 48) | 원시 [V; |I|] 곡선 (CNN 입력). raw 컬럼 없는 pkl → zero-fallback (`_build_raw_tensor`) |
 | `nan_mask` | (64,) | 1=유효값, 0=원래NaN |
 | `direction` | scalar | +1=충전, -1=방전 |
 | `level` | scalar(int64) | 0=lo, 1=mid, 2=hi (spec.class_names 인덱스) |
@@ -1027,6 +1047,7 @@ model = SCRModel(
 | 클래스 | 학습 방식 | 레이블 필요 | 용도 |
 |---|---|---|---|
 | `MLPProbeClassifier` | CE (독립) | ✗ | **B안 기본 분류기** — `train_classifier.py`로 별도 학습 |
+| `CNNProbeClassifier` | CE (독립) | ✗ | **원시 V/I 곡선 CNN + HI probe 융합** — `classifier.type: cnn` |
 | `RuleClassifier` | 없음 (규칙) | ✗ | `spec.scenario_to_dir_class(seg_idx)` 결정론적 배정 |
 | `CentroidClassifier` | fit 단계 | ✗ | L2 최근접 센트로이드 (`update()+finalize()` 또는 `fit()`) |
 | `OracleClassifier` | 없음 (GT) | ✓ | `batch["level"]` 직접 사용 → 상한선 측정 |
@@ -1034,8 +1055,19 @@ model = SCRModel(
 
 ```python
 from models.scenario_classifier import build_classifier
-clf = build_classifier("mlp",  n_hi=64, n_classes=3, d_hidden=64)  # B안
-clf = build_classifier("rule", n_hi=64, n_classes=3, spec=spec)    # 규칙 기반
+clf = build_classifier("mlp",  n_hi=64, n_classes=3, d_hidden=64)   # B안 (HI만)
+clf = build_classifier("cnn",  n_hi=64, n_classes=3, d_hidden=128)  # 원시 곡선 CNN 융합
+clf = build_classifier("rule", n_hi=64, n_classes=3, spec=spec)     # 규칙 기반
+```
+
+**CNNProbeClassifier 구조** (`models/raw_cnn.py`의 `RawCNN` 사용):
+```
+x_raw (B,2,48) ─ RawCNN ─→ cnn_emb (B,64)
+   RawCNN: Conv stem → ResBlock×2 → AttentionPool → Linear  (≈42K params)
+[cnn_emb(64) ‖ probe_x(64) ‖ direction(1)] = 129D → MLP → n_classes logits
+
+classify(probe_x, batch): batch["x_raw"]·batch["direction"]를 내부에서 융합
+구 pkl(x_raw 전부 0) → CNN 임베딩이 상수로 수렴 → probe_x만으로 동작(무해 degrade)
 ```
 
 > **B안 설계 원칙**: 분류기는 회귀 모델(SCRModel)과 완전히 분리.  
@@ -1147,11 +1179,14 @@ SCRModel Phase 1/2와 완전히 독립적으로 HI 특성만으로 시나리오 
 
 **학습 구조:**
 ```
+타입   : scr.yaml classifier.type = mlp(기본) | cnn
 마스크 : classification_HIs.json 로드 → charge/discharge 방향별 상위 m개 probe HI 마스크
-입력   : probe_x (N_HI=64, — 마스크 적용) + direction (1) = 65차원
+입력   : (mlp) probe_x (N_HI=64, 마스크 적용) + direction (1) = 65차원
+         (cnn) probe_x (64) + RawCNN(x_raw (2,48))=64 + direction (1) = 129차원 내부 융합
          (마스크 없으면 x_hi 전체 fallback)
 타겟   : batch["level"]  (latent_class: lo=0 / mid=1 / hi=2)
-모델   : MLPProbeClassifier  Linear(65→d_hidden)→ReLU→Dropout→Linear(d_hidden→d_hidden//2)→ReLU→Linear(→n_classes)
+모델   : (mlp) MLPProbeClassifier  Linear(65→d_hidden)→ReLU→Dropout→Linear(→d_hidden//2)→ReLU→Linear(→n_classes)
+         (cnn) CNNProbeClassifier  RawCNN + Linear(129→d_hidden)→GELU→Dropout→Linear(→d_hidden//2)→GELU→Linear(→n_classes)
 손실   : CrossEntropyLoss  (regression과 완전 분리)
 정규화 : 동일 config로 build_datasets 호출 → Phase 2와 동일 정규화기 자동 재현
 저장   : {run_dir}/classifier/clf_best.pt
@@ -1173,8 +1208,9 @@ python run_pipeline.py 8 --to-step 8
 **저장 포맷:**
 ```python
 {
-  "clf_state": ...,     # MLPProbeClassifier state_dict
-  "n_hi":      65,      # 입력 차원 = N_HI(64) + direction(1)
+  "clf_state": ...,     # MLPProbeClassifier | CNNProbeClassifier state_dict
+  "clf_type":  "mlp",   # "mlp" | "cnn" — test_scr.py 복원 시 분기 기준
+  "n_hi":      65,      # mlp: N_HI(64)+direction(1)=65 | cnn: N_HI=64 (direction 내부 concat)
   "n_classes": 3,       # 출력 클래스 수
   "d_hidden":  64,      # 히든 차원
   "val_acc":   0.xxx,   # 최고 검증 정확도
@@ -1182,6 +1218,9 @@ python run_pipeline.py 8 --to-step 8
   "axis":      "prot",  # 학습 축
 }
 ```
+
+> `type: cnn`으로 학습하려면 Step 4를 재실행해 raw_v/raw_i 컬럼이 포함된 seg pkl을 먼저
+> 생성해야 한다. raw 없는 기존 pkl로 `cnn`을 써도 동작하나 x_raw=0이라 CNN 이점이 없다.
 
 ---
 
@@ -1232,15 +1271,16 @@ self._classifier  = None               # set_classifier()로 주입
 
 **B안 라우팅 지원:**
 ```python
-evaluator.set_classifier(clf)           # MLPProbeClassifier 주입
+evaluator.set_classifier(clf)           # MLPProbeClassifier | CNNProbeClassifier 주입
 # predict_dataset(ds, routing_mode="hard")  → 분류기 argmax → seg_idx 오버라이드
 # predict_dataset(ds, routing_mode="soft")  → 분류기 확률 가중 평균
 # predict_dataset(ds, routing_mode="none")  → 기존 동작 (seg_idx 그대로)
 
-# 분류기 입력 구성 (train_classifier.py와 동일):
-#   probe_x_clf = model.get_probe_x(x_hi, direction, seg_idx)  # (B, 64) probe 마스크 적용
-#   clf_inp     = [probe_x_clf | direction]                     # (B, 65)
-#   clf_logits  = classifier(clf_inp)
+# 분류기 입력 구성 (train_classifier.py와 동일, 타입별 분기):
+#   probe_x_clf = model.get_probe_x(x_hi, direction, seg_idx)   # (B, 64) probe 마스크 적용
+#   MLP: clf_logits = classifier([probe_x_clf | direction])      # (B, 65)
+#   CNN: clf_logits = classifier.classify(probe_x_clf, batch_d)  # batch_d에 x_raw 포함
+#        (isinstance(classifier, CNNProbeClassifier) 로 분기)
 
 # routing table (spec.routing)이 jagged list일 경우 padding 후 수동 채움:
 #   _routing_t = zeros(n_dir, max_n_cls)  ← torch.tensor() 대신 안전한 방식
