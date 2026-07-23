@@ -461,6 +461,56 @@ def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
     return {k: torch.stack([b[k] for b in batch]) for k in keys}
 
 
+class FastTensorLoader:
+    """사전 구축된 (N,·) 텐서를 슬라이싱해 배치 dict를 생성하는 빠른 이터레이터.
+
+    SegmentDataset은 모든 필드를 이미 (N,·) 텐서로 메모리에 올려두므로, 표준
+    DataLoader의 per-sample ``__getitem__`` + ``collate_fn``(키마다 2048회 ``torch.stack``)
+    오버헤드가 GPU를 굶긴다. 이 로더는 인덱스 슬라이싱 한 번으로 배치를 만들어
+    그 오버헤드를 제거한다 (대규모 세그먼트 학습에서 에폭 시간 대폭 단축).
+
+    SCRModel 회귀 forward(Phase 1/2)는 ``x_raw``를 사용하지 않으므로 기본 제외한다.
+    CNN 분류기 학습 등 ``x_raw``가 필요하면 ``include_raw=True``.
+
+    트레이너의 ``_to_device``가 배치를 GPU로 옮기므로 텐서는 CPU에 유지한다
+    (배치당 1회 연속 전송 → per-sample stack보다 훨씬 빠르고 GPU 메모리 상주 없음).
+    """
+
+    _MODEL_KEYS = ["x_hi", "nan_mask", "direction", "level",
+                   "seg_idx", "target", "cap_init"]
+
+    def __init__(
+        self,
+        ds: "SegmentDataset",
+        batch_size: int,
+        shuffle: bool = False,
+        include_raw: bool = False,
+        drop_last: bool = False,
+    ) -> None:
+        keys = list(self._MODEL_KEYS)
+        if include_raw:
+            keys.insert(1, "x_raw")
+        self.keys = keys
+        self.tensors = {k: getattr(ds, k) for k in keys}
+        self.n = len(ds)
+        self.bs = int(batch_size)
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+
+    def __len__(self) -> int:
+        if self.drop_last:
+            return self.n // self.bs
+        return (self.n + self.bs - 1) // self.bs
+
+    def __iter__(self):
+        idx = torch.randperm(self.n) if self.shuffle else torch.arange(self.n)
+        for i in range(0, self.n, self.bs):
+            sel = idx[i:i + self.bs]
+            if self.drop_last and sel.numel() < self.bs:
+                break
+            yield {k: self.tensors[k][sel] for k in self.keys}
+
+
 def filter_dataset_by_cells(ds: "SegmentDataset", cell_ids: list[str]) -> "SegmentDataset":
     """SegmentDataset에서 지정된 cell_id 행만 추출해 새 Dataset 반환."""
     cell_set = set(cell_ids)

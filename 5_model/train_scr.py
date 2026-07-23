@@ -48,7 +48,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from utils.io_utils import load_config, save_json
-from datasets.segment_dataset import build_datasets, collate_fn
+from datasets.segment_dataset import build_datasets, collate_fn, FastTensorLoader
 from models.scr_model import SCRModel
 from training.scr_trainer import SCRTrainer
 from utils.hi_schema import N_HI, spec_from_qfrac
@@ -454,15 +454,10 @@ def main() -> None:
     train_ds, val_ds, test_ds, norm = build_datasets(cfg, spec=spec)
 
     tr_cfg = cfg["training"]
-    pin    = (device.type == "cuda")
-    train_loader = DataLoader(
-        train_ds, batch_size=tr_cfg["batch_size"], shuffle=True,
-        collate_fn=collate_fn, num_workers=0, pin_memory=pin,
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=tr_cfg["batch_size"], shuffle=False,
-        collate_fn=collate_fn, num_workers=0, pin_memory=pin,
-    )
+    # FastTensorLoader: 사전 구축 텐서 슬라이싱 → per-sample collate 오버헤드 제거.
+    # SCRModel 회귀 forward는 x_raw 미사용 → 학습 로더에서 제외 (메모리/전송 절감).
+    train_loader = FastTensorLoader(train_ds, tr_cfg["batch_size"], shuffle=True)
+    val_loader   = FastTensorLoader(val_ds,   tr_cfg["batch_size"], shuffle=False)
 
     # ------------------------------------------------------------------
     # Phase 1: L0 gate 학습
