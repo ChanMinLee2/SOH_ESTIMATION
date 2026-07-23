@@ -69,6 +69,37 @@ _NATIVE_HI_COLS = (
     + [f"morph_{k}" for k in _MORPH_KEYS]
 )  # 64 columns
 
+# ── 위치기반 레짐 라벨 (q_frac_wide 6-시나리오 모델공간과 정렬) ────────────────
+# 세그먼트 중심 q_frac 을 3분할(tercile)해 lo/mid/hi 레벨을 배정하고,
+# 방향과 함께 모델 시나리오 id(0..5)로 매핑한다.
+#   충전  : q_frac↑ = SOC↑  → center<1/3 chg_lo(0) / <2/3 chg_mid(1) / else chg_hi(2)
+#   방전  : q_frac↑ = SOC↓  → center<1/3 dis_hi(3) / <2/3 dis_mid(4) / else dis_lo(5)
+# scen 코드는 hi_correlation._SEG_SCEN 규약(충전 양수/방전 음수)과 동일.
+_RS_SCEN_NAMES = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
+
+
+def _assign_regime(center_qf: float, is_charge: bool) -> tuple[int, int]:
+    """세그먼트 중심 q_frac + 방향 → (segment_id 0..5, scen). q_frac_wide 정렬."""
+    b = 0 if center_qf < 1.0 / 3 else (1 if center_qf < 2.0 / 3 else 2)
+    if is_charge:
+        return b, b + 1                 # chg_lo(0,1) / chg_mid(1,2) / chg_hi(2,3)
+    return 3 + b, -(3 - b)              # dis_hi(3,-3) / dis_mid(4,-2) / dis_lo(5,-1)
+
+
+def _build_rs_spec():
+    """재생성 test_rs 용 6-시나리오 ScenarioSpec (q_frac_wide 라우팅과 동일)."""
+    from common.scenario.base import ScenarioSpec
+    return ScenarioSpec(
+        axis="test_rs",
+        n_scenarios=6,
+        scenario_names=_RS_SCEN_NAMES,
+        n_classes=3,
+        class_names=["lo", "mid", "hi"],
+        routing=[[0, 1, 2], [5, 4, 3]],     # routing[dir][level]=scenario_id
+        classifier_default="mlp_probe",
+        params={"note": "position-binned regime labels (tercile of center q_frac)"},
+    )
+
 
 def _load_ref_curves(pkl_path_str: str) -> dict:
     """clean PKL에서 cycle 1 (최초 유효) morph 기준 곡선 로드.
@@ -314,15 +345,21 @@ def _extract_cell(args: tuple):
                     hi_dict.update(_compute_morph(
                         v[m], i[m], dt[m], ref_curves["discharge"], start_qf, end_qf,
                     ))
+                    center_qf     = 0.5 * (start_qf + end_qf)
+                    seg_id, scenv = _assign_regime(center_qf, is_charge=False)
+                    rv, ri        = _WORKER_HIC._resample_segment(v[m], i[m], q[m])  # CNN 원시 곡선
                     seg_rows.append({
                         "cell_id":    cell_id,
                         "dataset":    dataset,
                         "cycle":      cyc,
-                        "segment_id": 1,         # discharge
-                        "scen":       1,
+                        "segment_id": seg_id,     # dis_hi(3)/dis_mid(4)/dis_lo(5)
+                        "scen":       scenv,
                         "capacity_Ah": dis_cap,
                         "q_frac_lo":  start_qf,
                         "q_frac_hi":  end_qf,
+                        "q_frac_center": center_qf,
+                        "raw_v":      rv.tolist(),
+                        "raw_i":      ri.tolist(),
                         **hi_dict,
                     })
 
@@ -355,15 +392,21 @@ def _extract_cell(args: tuple):
                     hi_dict.update(_compute_morph(
                         vc[m], ic[m], dtc[m], ref_curves["charge"], start_qf, end_qf,
                     ))
+                    center_qf     = 0.5 * (start_qf + end_qf)
+                    seg_id, scenv = _assign_regime(center_qf, is_charge=True)
+                    rv, ri        = _WORKER_HIC._resample_segment(vc[m], ic[m], qc[m])  # CNN 원시 곡선
                     seg_rows.append({
                         "cell_id":    cell_id,
                         "dataset":    dataset,
                         "cycle":      cyc,
-                        "segment_id": 0,         # charge
-                        "scen":       0,
+                        "segment_id": seg_id,     # chg_lo(0)/chg_mid(1)/chg_hi(2)
+                        "scen":       scenv,
                         "capacity_Ah": dis_cap,  # cycle 용량 = 방전 기준
                         "q_frac_lo":  start_qf,
                         "q_frac_hi":  end_qf,
+                        "q_frac_center": center_qf,
+                        "raw_v":      rv.tolist(),
+                        "raw_i":      ri.tolist(),
                         **hi_dict,
                     })
 
@@ -429,7 +472,7 @@ def _compute_stats(out_dir: Path) -> str:
     lines.append("[시나리오 분포]")
     _r("segment_id", "카운트     비율")
     lines.append("  " + "-" * 42)
-    _SCEN_NAME = {0: "chg (충전)", 1: "dis (방전)"}
+    _SCEN_NAME = {i: n for i, n in enumerate(_RS_SCEN_NAMES)}   # 0..5 → chg_lo..dis_lo
     if "segment_id" in combined.columns:
         for sid, cnt in combined["segment_id"].value_counts().sort_index().items():
             name = _SCEN_NAME.get(int(sid), f"id={sid}")
@@ -615,8 +658,9 @@ def _plot_demo_cycle(
                 # 25~75% 구간에서 양방향 공존 사이클 탐색
                 search = cycs[len(cycs) // 4: 3 * len(cycs) // 4] or cycs
                 for cyc in search:
-                    sids = set(seg_df[seg_df["cycle"] == cyc]["segment_id"].unique())
-                    if 0 in sids and 1 in sids:
+                    sids = set(int(s) for s in seg_df[seg_df["cycle"] == cyc]["segment_id"].unique())
+                    # 충전(0-2)·방전(3-5) 양방향 공존 사이클 탐색
+                    if any(s <= 2 for s in sids) and any(s >= 3 for s in sids):
                         demo_cyc = cyc
                         break
                 if demo_cyc < 0 and cycs:
@@ -626,7 +670,9 @@ def _plot_demo_cycle(
                     cyc_df = seg_df[seg_df["cycle"] == demo_cyc]
                     for sid in cyc_df["segment_id"].unique():
                         rows = cyc_df[cyc_df["segment_id"] == sid]
-                        segs_by_dir[int(sid)] = list(
+                        # segment_id 0-2=충전 → dir key 0, 3-5=방전 → dir key 1 (PANELS와 정렬)
+                        dir_key = 0 if int(sid) <= 2 else 1
+                        segs_by_dir.setdefault(dir_key, []).extend(
                             zip(rows["q_frac_lo"].tolist(), rows["q_frac_hi"].tolist())
                         )
 
@@ -858,11 +904,10 @@ def main() -> None:
     print(f"  출력       : {out_dir}")
     print()
 
-    # ── ScenarioSpec 저장 ─────────────────────────────────────────────────────
-    from common.scenario import get_segmenter
-    _segmenter = get_segmenter("test_rs")
-    _segmenter.save_artifacts(out_dir)
-    print(f"  scenario_spec.json 저장 → {out_dir / 'scenario_spec.json'}")
+    # ── ScenarioSpec 저장 (위치기반 6-시나리오 = q_frac_wide 정렬) ────────────
+    _rs_spec = _build_rs_spec()
+    _rs_spec.save(out_dir / "scenario_spec.json")
+    print(f"  scenario_spec.json 저장 (6-시나리오, 위치기반 레짐) → {out_dir / 'scenario_spec.json'}")
 
     # ── 입력 파일 수집 ─────────────────────────────────────────────────────────
     task_args: list[tuple] = []

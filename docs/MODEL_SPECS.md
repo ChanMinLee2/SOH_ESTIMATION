@@ -297,6 +297,56 @@ else:
     logits = clf(inp)
 ```
 
+### 4.3 평가 시 분류기 활용 — hard / soft 라우팅 (2026-07 추가)
+
+`classifier.type`(mlp/cnn)이 **분류기 자체의 아키텍처**를 고르는 것과 달리,
+**hard/soft는 학습이 끝난 뒤 평가 시점에 그 분류기 출력을 어떻게 쓸지** 결정하는
+축이다 — 학습 로직(`train_classifier.py`)에는 hard/soft 개념이 전혀 없고,
+`CrossEntropyLoss`로 분류기 1개만 학습한다. hard/soft는 `test_scr.py` 평가
+단계에서만 등장한다 (§ PIPELINE.md 5-10/5-11).
+
+SCRModel의 회귀망(cap_head)은 **단 하나**뿐이다. 시나리오마다 다른 신경망이
+있는 게 아니라, 시나리오별로 **어떤 HI를 통과시킬지 고르는 게이트(scen_gate)**가
+다르다:
+
+```
+x_hi (64개 HI)
+   │
+   ├─ scen_gates[0] (chg_lo용 게이트) ─┐
+   ├─ scen_gates[1] (chg_mid용 게이트) ─┤
+   ├─ ...                              ├─→ 선택된 seg_idx의 게이트만 통과
+   └─ scen_gates[5] (dis_lo용 게이트) ─┘
+                    │
+              x_scen (게이트 통과 후 HI)
+                    │
+        [x_probe | x_scen | dir | cap_init]
+                    │
+              cap_head (공유, 단 하나)  ← 이 신경망 자체는 hard/soft 동일
+                    │
+                cap_pred
+```
+
+hard/soft가 결정하는 것은 **"어느 시나리오 게이트로 회귀 입력을 구성할지"**다:
+
+| | 어떤 scen_gate를 쓰나 | cap_head는 몇 번 도나 |
+|---|---|---|
+| **hard** | 분류기 argmax로 고른 시나리오 게이트 **1개**만 적용 | 1회 (선택된 게이트 결과로만 예측) |
+| **soft** | **n_classes개**(lo/mid/hi 3개) 시나리오 게이트를 전부 적용 | 3회 (각각 예측 후 softmax 확률로 가중평균) |
+| **oracle** | 정답 seg_idx로 게이트 **1개** 고정 (분류기 우회) | 1회 |
+
+즉 "어느 회귀 헤드를 쓸지"보다는 **"어느 시나리오의 HI 서브셋(게이트)으로 회귀
+입력을 구성할지"** 결정이라고 보는 게 더 정확하다. `cap_head` 신경망 가중치는
+세 모드 무관하게 완전히 동일한 것을 쓴다 — hard/oracle은 그 신경망에 입력 1개만
+넣고, soft는 후보 입력 3개를 넣어 나온 3개 예측을 분류기 확신도(softmax
+확률)로 블렌딩한다.
+
+**분류 판정(`level_pred`)은 hard/soft에서 항상 동일** — 둘 다
+`clf_logits.argmax(1)`을 분류 판정으로 쓴다. 차이는 회귀(`cap_pred`) 계산
+방식에만 있다. 따라서 `confusion_matrix_test_hard.png`와
+`confusion_matrix_test_soft.png`가 완전히 같은 건 정상이며(분류 판정이 같으므로),
+회귀 산포도(`scatter_test_hard.png` vs `scatter_test_soft.png`)는 서로 달라야
+정상이다.
+
 ---
 
 ## 5. 회귀 모델 CNN 적용 검토

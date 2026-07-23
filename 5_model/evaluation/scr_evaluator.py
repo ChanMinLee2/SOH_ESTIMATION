@@ -262,6 +262,63 @@ class SCREvaluator:
         return results
 
     # ------------------------------------------------------------------
+    # 통합 평가: 학습된 분류기로 분류 → 라우팅 → 회귀 (oracle/hard/soft)
+    # ------------------------------------------------------------------
+    _MODE_ROUTING = {"oracle": "none", "hard": "hard", "soft": "soft"}
+
+    def evaluate_modes(
+        self,
+        ds: SegmentDataset,
+        modes: Sequence[str] = ("oracle", "hard", "soft"),
+        batch_size: int = 512,
+        direction_routing_for_oracle: bool = False,
+    ) -> dict:
+        """각 라우팅 모드로 분류→회귀 평가.
+
+        modes:
+          oracle : 정답 seg_idx로 라우팅 (분류 100% 가정 → 회귀 상한선)
+          hard   : 학습된 분류기 argmax로 라우팅 (실배포 시나리오)
+          soft   : 분류기 확률 가중 평균
+        Returns {mode: {"capacity","breakdown","classification","_pred"}}.
+        분류기가 없으면 hard/soft는 호출자가 modes에서 제외해야 한다.
+        """
+        out: dict = {}
+        for mode in modes:
+            rmode = self._MODE_ROUTING[mode]
+            dr = direction_routing_for_oracle and (rmode == "none")
+            pred = self.predict_dataset(
+                ds, batch_size, routing_mode=rmode, direction_routing=dr
+            )
+            entry = {
+                "capacity":  self._capacity_metrics(pred),
+                "breakdown": self._compute_breakdown(pred),
+            }
+            if mode == "oracle":
+                entry["classification"] = {
+                    "accuracy": 1.0,
+                    "note": "oracle: ground-truth routing (정답 레짐 라벨 사용)",
+                }
+            else:
+                cm = self.classification_metrics(pred)
+                entry["classification"] = cm if cm is not None else {
+                    "note": "정답 레짐 라벨 없음 — 분류 정확도 산출 불가",
+                }
+            entry["_pred"] = pred
+            out[mode] = entry
+        return out
+
+    @staticmethod
+    def strip_modes_for_json(modes_result: dict, efficiency: dict | None = None) -> dict:
+        """evaluate_modes 결과에서 _pred(대용량 배열) 제거 + efficiency 부착."""
+        clean = {
+            mode: {k: v for k, v in entry.items() if k != "_pred"}
+            for mode, entry in modes_result.items()
+        }
+        if efficiency is not None:
+            clean["efficiency"] = efficiency
+        return clean
+
+    # ------------------------------------------------------------------
     # Save metrics JSON (capacity + breakdown + scenario + efficiency)
     # ------------------------------------------------------------------
     def save_metrics(self, results: dict, metrics_dir: Path) -> None:
@@ -327,6 +384,84 @@ class SCREvaluator:
             "accuracy": acc,
             "per_class_accuracy": {cls_names[i]: per_class[i] for i in range(n_cls)},
             "confusion_matrix": cm.tolist(),
+        }
+
+    def classification_metrics(self, pred_dict: dict) -> dict | None:
+        """라우팅 분류기의 레짐(level) 분류 성능 (routing=hard/soft 테스트 전용).
+
+        반환:
+          accuracy               전체 평균 정확도
+          per_class_accuracy     클래스(lo/mid/hi)별 recall
+          per_direction_accuracy 충전/방전별 정확도
+          per_scenario_accuracy  시나리오별(방향×레벨 → scenario_name) 정확도
+          confusion_matrix       n_classes × n_classes
+          n_samples              샘플 수
+        분류가 비활성(level_pred 균일)이면 None 반환.
+        """
+        y_true = np.asarray(pred_dict.get("level_true", []))
+        y_pred = np.asarray(pred_dict.get("level_pred", []))
+        if len(y_true) == 0 or len(np.unique(y_pred)) <= 1:
+            return None
+        # 정답 라벨이 단일값(placeholder, 예: test_rs n_classes=1)이면 정확도 무의미
+        if len(np.unique(y_true)) <= 1:
+            uniq, cnt = np.unique(y_pred, return_counts=True)
+            return {
+                "note": "정답 레짐 라벨이 단일값(placeholder) — 분류 정확도 무의미. "
+                        "위치기반 레짐 라벨 포함해 데이터 재생성 필요.",
+                "predicted_distribution": {int(u): int(c) for u, c in zip(uniq, cnt)},
+                "n_samples": int(len(y_true)),
+            }
+
+        n_cls     = self._n_classes
+        cls_names = self._class_names
+        direction = np.asarray(pred_dict.get("direction", np.zeros_like(y_true)))
+
+        overall = float((y_true == y_pred).mean())
+
+        # 클래스(레벨)별 recall
+        per_class: dict = {}
+        for i in range(n_cls):
+            sel = y_true == i
+            per_class[cls_names[i]] = (
+                float((y_pred[sel] == i).mean()) if sel.sum() > 0 else None
+            )
+
+        # 방향별 정확도
+        per_direction: dict = {}
+        for tag, sel in [("charge", direction > 0), ("discharge", direction < 0)]:
+            if sel.sum() > 0:
+                per_direction[tag] = float((y_true[sel] == y_pred[sel]).mean())
+
+        # 시나리오별 정확도 (true 시나리오 = routing[dir_idx][level_true])
+        per_scenario: dict = {}
+        routing = getattr(self._spec, "routing", None)
+        if routing is not None:
+            counts: dict = {}
+            correct: dict = {}
+            for dir_v, lt, lp in zip(direction, y_true, y_pred):
+                dir_idx = 0 if dir_v > 0 else 1
+                try:
+                    sid = routing[dir_idx][int(lt)]
+                except (IndexError, TypeError, ValueError):
+                    continue
+                name = (self._seg_names[sid]
+                        if 0 <= sid < len(self._seg_names) else f"scen_{sid}")
+                counts[name]  = counts.get(name, 0) + 1
+                correct[name] = correct.get(name, 0) + int(lt == lp)
+            per_scenario = {k: float(correct[k] / counts[k]) for k in counts}
+
+        cm = np.zeros((n_cls, n_cls), dtype=int)
+        for t, pr in zip(y_true, y_pred):
+            if 0 <= int(t) < n_cls and 0 <= int(pr) < n_cls:
+                cm[int(t)][int(pr)] += 1
+
+        return {
+            "accuracy":               overall,
+            "per_class_accuracy":     per_class,
+            "per_direction_accuracy": per_direction,
+            "per_scenario_accuracy":  per_scenario,
+            "confusion_matrix":       cm.tolist(),
+            "n_samples":              int(len(y_true)),
         }
 
     def _compute_efficiency(self, p: dict) -> dict:
@@ -572,13 +707,31 @@ class SCREvaluator:
         p = pred_dict["cap_pred_raw"]
         t = pred_dict["cap_true_raw"]
 
+        # 분류(routing) 활성 시: 정답/오답 색상으로 분류 성능을 산점도에 표시
+        y_true = np.asarray(pred_dict.get("level_true", []))
+        y_pred = np.asarray(pred_dict.get("level_pred", []))
+        clf_active = (len(y_pred) == len(t) and len(t) > 0
+                      and len(np.unique(y_pred)) > 1)
+
         fig, ax = plt.subplots(figsize=(5, 5))
-        ax.scatter(t, p, s=5, alpha=0.4)
+        if clf_active:
+            correct = (y_true == y_pred)
+            acc = float(correct.mean())
+            ax.scatter(t[~correct], p[~correct], s=6, alpha=0.5, c="#d62728",
+                       label=f"misclassified ({int((~correct).sum())})")
+            ax.scatter(t[correct], p[correct], s=5, alpha=0.4, c="#2ca02c",
+                       label=f"correct ({int(correct.sum())})")
+            ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
+            title = f"SCR {tag} — pred vs true  (level acc={acc:.3f})"
+        else:
+            ax.scatter(t, p, s=5, alpha=0.4)
+            title = f"SCR {tag} — pred vs true"
+
         lim = [min(t.min(), p.min()) * 0.98, max(t.max(), p.max()) * 1.02]
         ax.plot(lim, lim, "r--", linewidth=1)
         ax.set_xlabel("True SOH")
         ax.set_ylabel("Predicted SOH")
-        ax.set_title(f"SCR {tag} — pred vs true")
+        ax.set_title(title)
         ax.set_xlim(lim); ax.set_ylim(lim)
         path = self.figures_dir / f"scatter_{tag}.png"
         fig.savefig(path, dpi=150, bbox_inches="tight")

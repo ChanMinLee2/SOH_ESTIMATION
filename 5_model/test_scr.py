@@ -233,13 +233,42 @@ def main() -> None:
         print(f"[test] 분류기 로드: {_clf_ckpt_path}  type={_clf_type}  "
               f"val_acc={_clf_ckpt.get('val_acc', float('nan')):.4f}")
     else:
-        routing_mode = rs_cfg.get("random_seg_routing", "none")
-        if routing_mode in ("hard", "soft"):
-            print(f"[test] 경고: routing={routing_mode}이지만 분류기 체크포인트 없음 "
-                  f"({_clf_ckpt_path}). routing=none으로 폴백.")
+        print(f"[test] 분류기 체크포인트 없음 ({_clf_ckpt_path}) — oracle 모드만 실행.")
 
-    results = evaluator.evaluate(train_ds, val_ds, test_ds)
-    evaluator.save_metrics(results, metrics_dir)
+    # ------------------------------------------------------------------
+    # 통합 평가: 학습된 분류기로 분류 → 라우팅 → 회귀 (oracle / hard / soft)
+    #   oracle : 정답 seg_idx 라우팅 (회귀 상한선)
+    #   hard   : 분류기 argmax 라우팅 (실배포)   ← 분류기 있을 때만
+    #   soft   : 분류기 확률 가중 평균           ← 분류기 있을 때만
+    # ------------------------------------------------------------------
+    import json as _json
+    has_clf = evaluator._classifier is not None
+    route_modes = ("oracle", "hard", "soft") if has_clf else ("oracle",)
+    print(f"\n[test] 통합 평가 모드: {route_modes}  (분류기 {'있음' if has_clf else '없음'})")
+
+    test_modes  = evaluator.evaluate_modes(test_ds,  modes=route_modes)
+    train_modes = evaluator.evaluate_modes(train_ds, modes=("oracle",))
+    val_modes   = evaluator.evaluate_modes(val_ds,   modes=("oracle",))
+
+    _eff = evaluator._compute_efficiency(test_modes["oracle"]["_pred"])
+    metrics_out = {
+        "test":  evaluator.strip_modes_for_json(test_modes,  _eff),
+        "train": evaluator.strip_modes_for_json(train_modes),
+        "val":   evaluator.strip_modes_for_json(val_modes),
+    }
+    (metrics_dir / "metrics.json").write_text(
+        _json.dumps(metrics_out, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[test] saved {metrics_dir / 'metrics.json'}")
+
+    # 모드별 플롯: scatter(분류 색상) + confusion (hard/soft)
+    for mode in route_modes:
+        pred = test_modes[mode]["_pred"]
+        evaluator._plot_scatter(pred, tag=f"test_{mode}")
+        if mode != "oracle":
+            evaluator._plot_confusion_matrix(pred, tag=f"test_{mode}")
+    # 용량 곡선은 실배포(hard) 기준, 분류기 없으면 oracle
+    _curve_mode = "hard" if has_clf else "oracle"
+    evaluator._plot_capacity_curves(test_modes[_curve_mode]["_pred"])
 
     # Routing heatmap
     probe_sel = _selected_from_masks(ch_mask, dis_mask)   # union for heatmap
@@ -248,28 +277,31 @@ def main() -> None:
     evaluator.plot_routing_heatmap(routing_dir,
                                    probe_sel=probe_sel,
                                    scen_sel=scen_sel)
-    # Laplace UQ (train_scr.py Phase 2에서 uq.enabled=true 시 생성됨)
+
+    # Laplace UQ (train_scr.py Phase 2에서 uq.enabled=true 시 생성됨) — oracle 회귀 기준
     uq_ckpt = run_dir / "checkpoints" / "laplace_uq.pt"
-    test_pred = results["test"]
     if uq_ckpt.exists():
         from utils.uncertainty import LaplaceUQ
         uq = LaplaceUQ.load(model, uq_ckpt, device)
-        test_pred = evaluator.predict_dataset_uq(test_ds, uq)
-        evaluator.save_uq_metrics(test_pred, metrics_dir)
-        evaluator.plot_uq(test_pred, figures_dir)
-    evaluator.save_predictions(test_pred, predictions_dir)
+        uq_pred = evaluator.predict_dataset_uq(test_ds, uq)
+        evaluator.save_uq_metrics(uq_pred, metrics_dir)
+        evaluator.plot_uq(uq_pred, figures_dir)
+    # predictions CSV: 실배포(hard) 예측 저장 → level_pred가 실제 분류기 출력
+    _save_mode = "hard" if has_clf else "oracle"
+    evaluator.save_predictions(test_modes[_save_mode]["_pred"], predictions_dir)
 
     # ------------------------------------------------------------------
-    # Summary
+    # Summary (모드별 회귀 + 분류)
     # ------------------------------------------------------------------
-    print("\n=== SCR Evaluation Summary ===")
-    header = f"{'split':8s}  {'RMSE':>8s}  {'MAE':>8s}  {'R2':>8s}  {'MAPE':>8s}"
-    print(header)
-    print("-" * len(header))
-    for split in ("train", "val", "test"):
-        m_res = results[split]
-        print(f"{split:8s}  {m_res['rmse']:8.4f}  {m_res['mae']:8.4f}"
-              f"  {m_res['r2']:8.4f}  {m_res.get('mape', float('nan')):8.2f}")
+    print("\n=== SCR Evaluation Summary (test) ===")
+    header = f"{'mode':8s}  {'RMSE':>8s}  {'MAE':>8s}  {'R2':>8s}  {'MAPE':>8s}  {'clf_acc':>8s}"
+    print(header); print("-" * len(header))
+    for mode in route_modes:
+        cap = test_modes[mode]["capacity"]
+        acc = test_modes[mode]["classification"].get("accuracy")
+        acc_s = f"{acc:8.4f}" if isinstance(acc, (int, float)) else f"{'N/A':>8s}"
+        print(f"{mode:8s}  {cap['rmse']:8.4f}  {cap['mae']:8.4f}"
+              f"  {cap['r2']:8.4f}  {cap.get('mape', float('nan')):8.2f}  {acc_s}")
 
     probe_his = model.get_selected_probe_his()
     scen_his  = model.get_selected_scen_his()
@@ -310,11 +342,11 @@ def _run_random_segment_test(
     rs_data_dir = rs_cfg.get("random_seg_data_dir", "_4_data_hi/test_rs/seg")
     rs_datasets = rs_cfg.get("random_seg_datasets",
                              cfg.get("data", {}).get("datasets", ["MIT", "HUST"]))
-    routing     = rs_cfg.get("random_seg_routing", "none")
 
-    print(f"\n[random_seg_test] 시작: routing={routing}, data={rs_data_dir}")
+    print(f"\n[random_seg_test] 시작: data={rs_data_dir}  "
+          f"(oracle/hard/soft 통합 평가 — 분류기 유무에 따라 자동 결정)")
 
-    # test_rs ScenarioSpec 로드 (n_scenarios=2, chg/dis)
+    # test_rs ScenarioSpec 로드 (구 형식: n_scenarios=2 chg/dis | 재생성: n_scenarios=6 위치기반)
     rs_spec_path = PROJECT_ROOT / rs_data_dir.replace("/seg", "") / "scenario_spec.json"
     if rs_spec_path.exists():
         from common.scenario.base import ScenarioSpec as _Spec
@@ -339,32 +371,48 @@ def _run_random_segment_test(
 
     print(f"[random_seg_test] {len(rs_ds):,} 세그먼트")
 
-    # 평가 (routing 모드 전달)
-    # direction_routing=True: routing="none"일 때 test_rs seg_idx(0/1)→모델 시나리오 ID 보정
-    rs_pred    = evaluator.predict_dataset(
-        rs_ds, routing_mode=routing,
-        direction_routing=(routing == "none"),
+    # ── 통합 평가: oracle / hard / soft (메인 테스트와 동일 플로우) ──────────
+    # 구 test_rs(seg_idx 0/1, 2-시나리오)는 oracle 라우팅 시 방향별 보정 필요.
+    # 재생성 test_rs(위치기반 6-시나리오)는 seg_idx가 이미 모델공간이라 보정 불필요.
+    _is_model_space = (rs_spec is not None
+                       and getattr(rs_spec, "n_scenarios", 0) == model.n_scenarios)
+    has_clf  = evaluator._classifier is not None
+    rs_modes = ("oracle", "hard", "soft") if has_clf else ("oracle",)
+    rs_res   = evaluator.evaluate_modes(
+        rs_ds, modes=rs_modes,
+        direction_routing_for_oracle=not _is_model_space,
     )
-    from utils.metrics import compute_metrics
-    rs_metrics = compute_metrics(rs_pred["cap_true_raw"], rs_pred["cap_pred_raw"])
+    print(f"[random_seg_test] spec n_scenarios={getattr(rs_spec,'n_scenarios','?')} "
+          f"→ {'모델공간(위치기반 레짐)' if _is_model_space else '방향보정(구 형식)'}")
+    _rs_eff = evaluator._compute_efficiency(rs_res["oracle"]["_pred"])
 
-    print("\n=== Random Segment Test ===")
-    print(f"  routing : {routing}")
-    print(f"  segs    : {len(rs_ds):,}")
-    for k, v in rs_metrics.items():
-        print(f"  {k:6s}  : {v:.4f}")
+    print("\n=== Random Segment Test (통합) ===")
+    print(f"  segs : {len(rs_ds):,}")
+    header = f"  {'mode':8s}  {'RMSE':>8s}  {'MAE':>8s}  {'R2':>8s}  {'clf_acc':>8s}"
+    print(header); print("  " + "-" * (len(header) - 2))
+    for mode in rs_modes:
+        cap   = rs_res[mode]["capacity"]
+        acc   = rs_res[mode]["classification"].get("accuracy")
+        acc_s = f"{acc:8.4f}" if isinstance(acc, (int, float)) else f"{'N/A':>8s}"
+        print(f"  {mode:8s}  {cap['rmse']:8.4f}  {cap['mae']:8.4f}"
+              f"  {cap['r2']:8.4f}  {acc_s}")
 
-    # 결과 저장
+    # 저장 (모드별 회귀 + 분류)
     rs_dir = run_dir / "random_seg_test"
     rs_dir.mkdir(exist_ok=True)
     import json as _json
     (rs_dir / "metrics.json").write_text(
-        _json.dumps({"routing": routing, **rs_metrics}, indent=2), encoding="utf-8"
+        _json.dumps(evaluator.strip_modes_for_json(rs_res, _rs_eff),
+                    indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
-    evaluator.save_predictions(rs_pred, rs_dir, tag="random_seg")
 
-    # Scatter + 셀별 용량 곡선 플랏
-    rs_fig_dir  = rs_dir / "figures"
+    # 예측 CSV: 실배포(hard) 기준, 없으면 oracle
+    _rs_save = "hard" if has_clf else "oracle"
+    evaluator.save_predictions(rs_res[_rs_save]["_pred"], rs_dir, tag="random_seg")
+
+    # 모드별 scatter + confusion + 용량 곡선
+    rs_fig_dir   = rs_dir / "figures"
     rs_rep_cells = _pick_rs_rep_cells(
         rs_ds,
         rs_data_dir_path=PROJECT_ROOT / rs_data_dir,
@@ -372,7 +420,10 @@ def _run_random_segment_test(
         n_per_ds=cfg.get("evaluation", {}).get("rep_cells_per_dataset", 3),
     )
     print(f"[random_seg_test] rep_cells: {rs_rep_cells}")
-    evaluator.plot_for_dataset(rs_pred, rs_fig_dir, rs_rep_cells, tag="random_seg")
+    for mode in rs_modes:
+        evaluator.plot_for_dataset(
+            rs_res[mode]["_pred"], rs_fig_dir, rs_rep_cells, tag=f"random_seg_{mode}",
+        )
 
     print(f"[random_seg_test] 저장 → {rs_dir}")
 

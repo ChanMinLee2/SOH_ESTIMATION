@@ -20,10 +20,11 @@ raw data
       Phase 2 : 고정 gate + 회귀 전용 → checkpoints/best.pt
       Clf     : 독립 시나리오 분류기 학습 → classifier/clf_best.pt  ← B안 추가
                 classifier.type = mlp(HI) | cnn(원시 V/I CNN + HI 융합)  ← CNN 옵션
-  ↓ [test_scr]   평가 3축:
-      E1 (qfrac→qfrac test)     : 이상적 상한선 (routing=none)
-      E2 (qfrac→random test)    : 배포 시나리오  (routing=none, random_segment_test=true)
-      E3 (qfrac→random+routing) : 분류기 기여도  (routing=hard|soft, clf 필요)
+  ↓ [test_scr]   통합 평가 (분류 → 라우팅 → 회귀, 분류기 있으면 자동 all-mode):
+      oracle : 정답 seg_idx 라우팅 → 회귀 상한선 (분류기 없어도 항상 실행)
+      hard   : 분류기 argmax 라우팅 → 실배포 시나리오
+      soft   : 분류기 확률 가중 평균
+      (test.random_segment_test=true 시 test_rs로 동일 3-모드 추가 평가)
                 → metrics/ + figures/ + routing/ + predictions/
 ```
 
@@ -303,6 +304,59 @@ RCSSegmenter(
 **윈도우 중심 분포 제약:**  
 `start_qf ∈ [0.0, 0.7]` → `center_qf ∈ [0.15, 0.85]`.  
 q_frac [0.00, 0.15] 및 [0.85, 1.00] 구간은 윈도우 중심이 될 수 없음 (구조적 특성).
+
+---
+
+### 4-1b. 랜덤세그먼트 평가 데이터 — `tmp_make_test_rs.py`
+
+`hi_correlation.py` 파이프라인을 우회해 완전 랜덤 구간·랜덤 길이 세그먼트를 직접
+추출하는 평가 전용 데이터 생성기. 실배포 시(정확한 q_frac 경계를 보장할 수 없는
+상황)를 시뮬레이션하기 위한 것으로, `test.random_segment_test: true` 설정 시
+`test_scr.py`가 소비한다 (§5-10/5-11).
+
+> **2026-07 변경**: 통합 평가(oracle/hard/soft)에서 분류 성능을 실제로 측정하려면
+> 정답 레짐 라벨과 CNN 분류기 입력(raw_v/raw_i)이 필요하다는 게 드러나
+> (§5-11 참조), 스크립트에 두 가지를 추가했다. **코드만 수정했고 재생성은 아직
+> 실행하지 않았다** — 기존 `_4_data_hi/test_rs/` 캐시는 구 형식(2-시나리오,
+> 라벨 없음) 그대로다.
+
+**추가 1 — 위치기반 레짐 라벨 (`_assign_regime`)**
+
+세그먼트 중심 q_frac을 3분위(tercile)로 나눠 q_frac_wide 6-시나리오 모델공간과
+동일한 `segment_id`(0~5)·`scen` 값을 배정한다 (기존은 충/방전 2종류만 구분,
+`segment_id ∈ {0,1}`이라 레짐 정답이 없었다):
+
+```python
+def _assign_regime(center_qf, is_charge):
+    b = 0 if center_qf < 1/3 else (1 if center_qf < 2/3 else 2)
+    if is_charge:
+        return b, b + 1                 # chg_lo(0) / chg_mid(1) / chg_hi(2)
+    return 3 + b, -(3 - b)              # dis_hi(3) / dis_mid(4) / dis_lo(5)
+```
+
+`_build_rs_spec()`이 q_frac_wide와 동일한 `routing=[[0,1,2],[5,4,3]]`의
+6-시나리오 `ScenarioSpec`을 생성 — 재생성 후 `test_scr.py`가 `direction_routing`
+보정 없이 바로 oracle 라우팅 가능 (`rs_spec.n_scenarios == model.n_scenarios`로
+자동 감지, §5-11).
+
+**추가 2 — 원시 곡선 (`raw_v`/`raw_i`)**
+
+각 세그먼트에서 `hi_correlation._resample_segment()`(§4 참조, RAW_N=48)를 호출해
+CNN 분류기 입력을 함께 저장한다. 이전에는 HI 64개만 저장했다.
+
+```python
+rv, ri = _WORKER_HIC._resample_segment(v[m], i[m], q[m])
+seg_rows.append({..., "raw_v": rv.tolist(), "raw_i": ri.tolist(), ...})
+```
+
+**재생성 방법 (실행 시):**
+```bash
+python tmp_make_test_rs.py --force
+# → _4_data_hi/test_rs/seg/{MIT,HUST}/*.pkl  (raw_v/raw_i + segment_id 0..5 포함)
+# → _4_data_hi/test_rs/scenario_spec.json    (n_scenarios=6, q_frac_wide 라우팅과 동일)
+```
+재생성 전까지는 `random_seg_test`의 hard/soft 분류 정확도가 `classification_metrics`의
+degenerate 가드에 걸려 `{"note": "..."}`로만 보고된다 (회귀 지표는 정상).
 
 ---
 
@@ -654,11 +708,15 @@ loss:
 training:
   run_overfit_test: false  # 별도 tmp_standalone_overfit.py 사용
 
+classifier:
+  type: mlp              # mlp | cnn (원시 V/I RawCNN + HI 융합, §5-5)
+
 test:
-  random_segment_test: false    # true = E2/E3 실험 (test_rs 사용)
+  random_segment_test: false    # true = 랜덤세그먼트 통합 평가 추가 실행 (test_rs 사용)
   random_seg_data_dir: "_4_data_hi/test_rs/seg"
   random_seg_datasets: ["MIT", "HUST"]
-  random_seg_routing: "none"    # none=E2 | hard=E3-hard | soft=E3-soft
+  # random_seg_routing 은 더 이상 단일 모드를 고르지 않는다 — 통합 평가가
+  # 분류기 유무에 따라 oracle(+hard+soft)를 자동으로 모두 실행한다 (§5-10/5-11).
 ```
 
 **run dir 명명 규칙** (`train_scr.py` 자동 생성):
@@ -1226,24 +1284,40 @@ python run_pipeline.py 8 --to-step 8
 
 ### 5-10. 평가 진입점 — `5_model/test_scr.py`
 
+> **2026-07 재구조**: 기존 E1(qfrac→qfrac)/E2(qfrac→random)/E3(routing) 3축 체계를
+> 폐기하고, **분류→회귀 통합 평가**로 단일화했다. 학습된 분류기가 테스트셋을 실제로
+> 분류하고, 그 결과로 라우팅한 회귀 성능까지 한 번에 확인할 수 있어야 한다는 요구
+> (routing=none으로 분류기를 우회하는 기존 E1은 분류 성능을 전혀 보여주지 못했음)를
+> 반영했다.
+
+**평가 모드 (분류기 유무에 따라 자동 결정):**
+
+| 모드 | 라우팅 | 의미 |
+|---|---|---|
+| `oracle` | 정답 seg_idx | 분류 100% 가정 시 회귀 상한선. 분류기 없어도 항상 실행 |
+| `hard` | 분류기 argmax | 실배포 시나리오 (분류기 체크포인트 있을 때만) |
+| `soft` | 분류기 확률 가중 평균 | 분류 불확실성을 반영한 회귀 (분류기 있을 때만) |
+
+각 모드마다 **회귀(capacity/breakdown) + 분류(classification) 지표를 함께** 계산한다
+(`SCREvaluator.evaluate_modes()`, §5-11).
+
 ```bash
-# E1: qfrac→qfrac test (기본, 분류기 불필요)
-python 5_model/test_scr.py
-
-# E2: qfrac→random test (random_segment_test: true, routing: none in yaml)
+# 기본: run_dir 내 classifier/clf_best.pt 자동 탐색 → oracle+hard+soft 모두 실행
 python 5_model/test_scr.py --checkpoint .../best.pt
 
-# E3-hard: 분류기 routing (classifier 자동 탐색 — run_dir/classifier/clf_best.pt)
-python 5_model/test_scr.py --checkpoint .../best.pt
-# (yaml: random_seg_routing: hard)
-
-# E3-hard: 분류기 체크포인트 직접 지정
+# 분류기 체크포인트 직접 지정
 python 5_model/test_scr.py \
     --checkpoint _5_data_model_scr/0716_1200_p2_mlp_prot/checkpoints/best.pt \
     --classifier-ckpt _5_data_model_scr/0716_1200_p2_mlp_prot/classifier/clf_best.pt
 
+# 분류기 없으면 oracle만 자동 실행 (hard/soft 건너뜀)
+python 5_model/test_scr.py --checkpoint .../best.pt   # classifier/clf_best.pt 없는 run_dir
+
 python 5_model/test_scr.py --rep-cells b1c0 b1c1 1-1
 ```
+
+랜덤세그먼트 평가(`test.random_segment_test: true`)도 동일한 oracle/hard/soft
+플로우로 실행된다 (§5-11 랜덤세그먼트 통합 평가 참조).
 
 **Spec 로드 순서 (build_datasets 이전에 수행):**
 ```python
@@ -1274,7 +1348,7 @@ self._classifier  = None               # set_classifier()로 주입
 evaluator.set_classifier(clf)           # MLPProbeClassifier | CNNProbeClassifier 주입
 # predict_dataset(ds, routing_mode="hard")  → 분류기 argmax → seg_idx 오버라이드
 # predict_dataset(ds, routing_mode="soft")  → 분류기 확률 가중 평균
-# predict_dataset(ds, routing_mode="none")  → 기존 동작 (seg_idx 그대로)
+# predict_dataset(ds, routing_mode="none")  → 기존 동작 (seg_idx 그대로, oracle 라우팅에 사용)
 
 # 분류기 입력 구성 (train_classifier.py와 동일, 타입별 분기):
 #   probe_x_clf = model.get_probe_x(x_hi, direction, seg_idx)   # (B, 64) probe 마스크 적용
@@ -1286,15 +1360,48 @@ evaluator.set_classifier(clf)           # MLPProbeClassifier | CNNProbeClassifie
 #   _routing_t = zeros(n_dir, max_n_cls)  ← torch.tensor() 대신 안전한 방식
 ```
 
+**통합 평가 — `evaluate_modes()` (2026-07 신규):**
+```python
+results = evaluator.evaluate_modes(
+    ds, modes=("oracle", "hard", "soft"), batch_size=512,
+)
+# results[mode] = {
+#   "capacity":       compute_metrics 결과 (rmse/mae/r2/mape)
+#   "breakdown":      charge/discharge + level_lo/mid/hi 별 capacity 지표
+#   "classification": classification_metrics() 결과 (아래) 또는 oracle이면 {"accuracy":1.0,...}
+#   "_pred":          predict_dataset() 원본 반환값 (플롯/CSV 저장용, JSON 직렬화 전 제거)
+# }
+clean = evaluator.strip_modes_for_json(results, efficiency=eff_dict)  # _pred 제거 + efficiency 부착
+```
+
+**분류 성능 — `classification_metrics(pred_dict)` (2026-07 신규):**
+```python
+{
+  "accuracy":               float,   # 전체 평균 정확도
+  "per_class_accuracy":     {"lo": .., "mid": .., "hi": ..},   # 클래스(레벨)별 recall
+  "per_direction_accuracy": {"charge": .., "discharge": ..},
+  "per_scenario_accuracy":  {"chg_lo": .., "dis_hi": .., ...}, # routing[dir][level] 기준 시나리오별
+  "confusion_matrix":       [[...]],  # n_classes × n_classes
+  "n_samples":              int,
+}
+# 반환 None 조건: level_pred 가 전부 동일값 (분류기 미사용/미학습)
+# degenerate 가드: level_true 가 전부 동일값(placeholder, 예: 구 test_rs n_classes=1)이면
+#   accuracy 대신 {"note": "...", "predicted_distribution": {...}} 반환 — 무의미한 수치 노출 방지
+```
+
 **데이터셋별 플롯 저장 (random_seg_test):**
 ```python
-evaluator.plot_for_dataset(rs_pred, out_dir, rep_cells, tag="random_seg")
-# → out_dir/scatter_random_seg.png  (pred vs true SOH 산포도)
-# → out_dir/capacity_curve_{cell}.png  (대표 셀 용량 곡선)
-# → out_dir/confusion_matrix_random_seg.png  (level 혼동 행렬)
+evaluator.plot_for_dataset(rs_pred, out_dir, rep_cells, tag="random_seg_hard")
+# → out_dir/scatter_random_seg_hard.png     (정답/오답 색상 산포도, 아래 참조)
+# → out_dir/capacity_curve_{cell}.png       (대표 셀 용량 곡선)
+# → out_dir/confusion_matrix_random_seg_hard.png  (level 혼동 행렬)
 ```
 
 하드코딩 제거: `N_SEGS`, `N_LEVELS`, `SEGMENTS`, `_LEVEL_NAMES` 상수 없음.
+
+**scatter — 분류 정확도 색상 표시 (2026-07 추가):** 분류(level_pred)가 활성이면
+정답(초록)/오답(빨강) 색상으로 산포도를 그리고 제목에 `level acc=` 를 표시한다.
+분류 비활성(oracle, 또는 분류기 없음)이면 기존 단색 산포도로 자동 폴백.
 
 **predict_dataset 반환 dict:**
 ```python
@@ -1302,21 +1409,57 @@ evaluator.plot_for_dataset(rs_pred, out_dir, rep_cells, tag="random_seg")
   "cap_pred_raw":  np.ndarray,  # SOH ratio 예측값 — inverse_target 불필요
   "cap_true_raw":  np.ndarray,  # SOH ratio 실측값
   "cap_init_raw":  np.ndarray,  # Ah per sample (SOH→Ah 변환: pred × cap_init_raw)
+  "level_pred":    np.ndarray,  # 분류기 argmax (routing=none 이면 항상 0 — 회귀모델 더미값)
+  "level_true":    np.ndarray,  # 정답 latent class
   ...
 }
 ```
+> `level_pred`가 전부 0인 건 `routing_mode="none"`(oracle 라우팅 시 seg_idx를 정답으로
+> 고정)일 때의 정상 동작이다 — SCRModel의 `level_logits`가 항상 zeros이기 때문. 분류기가
+> 실제로 호출되는 건 `hard`/`soft` 모드뿐이다 (evaluator 내부에서 `set_classifier()`된
+> 분류기의 `classify()`를 호출).
 
-**저장 파일:**
+**저장 파일 (통합 평가 이후 구조):**
 
 | 경로 | 내용 |
 |---|---|
-| `figures/scatter_test.png` | pred SOH vs true SOH 산포도 (x/y축 "SOH") |
-| `figures/capacity_curve_{cell}.png` | 대표 셀 용량 곡선 Ah (SOH × cap_init_raw 변환 후 표시) |
-| `figures/confusion_matrix_test.png` | CE 비활성 시 생략 (level_logits=zeros 감지) |
-| `metrics/metrics.json` | capacity(RMSE/MAE/R2/MAPE, SOH 단위) + breakdown + scenario(disabled) + efficiency |
+| `figures/scatter_test_{mode}.png` | mode ∈ {oracle,hard,soft}. hard/soft는 정답/오답 색상 |
+| `figures/confusion_matrix_test_{mode}.png` | hard/soft만 생성 (oracle은 자명하므로 생략) |
+| `figures/capacity_curve_{cell}.png` | 대표 셀 용량 곡선 (분류기 있으면 hard 기준, 없으면 oracle) |
+| `metrics/metrics.json` | `{split: {mode: {capacity, breakdown, classification}, efficiency}}` — split ∈ {train(oracle만),val(oracle만),test(oracle+hard+soft)} |
 | `routing/routing_heatmap.png` | probe(1행) + scen(n_scenarios행) × HI(64열) 활성 히트맵 |
 | `routing/routing_table.csv` | gate별 선택 HI 목록 |
-| `predictions/test_predictions.csv` | `soh_true`, `soh_pred`, `soh_error`, `cap_true_Ah`, `cap_pred_Ah`, `cap_init_Ah`, level_true/pred, active HI 수 |
+| `predictions/test_predictions.csv` | 실배포(hard) 예측 저장 (분류기 없으면 oracle) — `soh_true`, `soh_pred`, `soh_error`, `cap_true_Ah`, `cap_pred_Ah`, `cap_init_Ah`, level_true/pred, active HI 수 |
+
+**metrics.json 예시 구조:**
+```jsonc
+{
+  "test": {
+    "oracle": {"capacity": {...}, "breakdown": {...}, "classification": {"accuracy": 1.0, "note": "oracle: ..."}},
+    "hard":   {"capacity": {...}, "breakdown": {...}, "classification": {"accuracy": 0.822, "per_class_accuracy": {...}, "per_scenario_accuracy": {...}, "confusion_matrix": [...]}},
+    "soft":   {"capacity": {...}, "breakdown": {...}, "classification": {"accuracy": 0.822, ...}},
+    "efficiency": {"avg_probe_his": 10.0, "avg_scen_his": 55.0, ...}
+  },
+  "train": {"oracle": {...}},
+  "val":   {"oracle": {...}}
+}
+```
+
+**랜덤세그먼트 통합 평가 (`_run_random_segment_test`):** 메인 테스트와 동일하게
+`evaluate_modes()`를 호출해 `random_seg_test/metrics.json`에 oracle/hard/soft +
+efficiency를 저장한다. 구 `test_rs`(2-시나리오, `_assign_regime` 이전 형식)는 정답
+레짐 라벨이 placeholder(단일값)라 `classification_metrics`의 degenerate 가드가
+`{"note": "...", "predicted_distribution": {...}}`를 반환한다 — **회귀(RMSE 등)는
+정상적으로 보고되지만 분류 정확도는 위치기반 레짐 라벨 포함해 `test_rs`를
+재생성(`tmp_make_test_rs.py`, §4-1b)하기 전까지 무의미**하다.
+
+```python
+_is_model_space = (rs_spec.n_scenarios == model.n_scenarios)   # 6-시나리오 재생성 여부 감지
+evaluator.evaluate_modes(
+    rs_ds, modes=rs_modes,
+    direction_routing_for_oracle=not _is_model_space,  # 구 형식(0/1)만 방향 보정
+)
+```
 
 ---
 
