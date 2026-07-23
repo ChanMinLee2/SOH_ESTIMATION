@@ -35,7 +35,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from utils.io_utils import load_config
-from datasets.segment_dataset import build_datasets
+from datasets.segment_dataset import build_datasets, FastTensorLoader
 from models.scenario_classifier import MLPProbeClassifier, CNNProbeClassifier
 from utils.hi_schema import N_HI, spec_from_qfrac
 from common.scenario.base import ScenarioSpec
@@ -221,10 +221,9 @@ def main() -> None:
     opt       = torch.optim.AdamW(clf.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
 
-    train_loader = DataLoader(train_ds, batch_size=batch_sz, shuffle=True,
-                              collate_fn=_collate, num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_sz, shuffle=False,
-                              collate_fn=_collate, num_workers=0)
+    # FastTensorLoader: collate 오버헤드 제거. CNN 분류기는 x_raw 필요 → include_raw=True.
+    train_loader = FastTensorLoader(train_ds, batch_sz, shuffle=True,  include_raw=True)
+    val_loader   = FastTensorLoader(val_ds,   batch_sz, shuffle=False, include_raw=True)
 
     clf_dir = run_dir / "classifier"
     clf_dir.mkdir(exist_ok=True)
