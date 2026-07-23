@@ -209,6 +209,416 @@ def print_stats(stats: dict, spec_names: list, axis: str, dataset: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 1b. q_frac_wide 전용 — 생존율 + 시간길이 + 전압길이 통계
+#
+# iter_segments()는 min_pts를 통과한 세그먼트만 yield하므로, 생존율(시도 대비
+# 통과 비율)을 구하려면 세그먼터가 내부적으로 시도 횟수도 세야 한다.
+# QFracWideSegmenter._extract()에 추가된 n_attempted/n_yielded 카운터를 사용.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def collect_qfracwide_stats(pkl_dir: Path, segmenter, spec_names: list) -> dict:
+    """pkl_dir(한 데이터셋) 전체 스캔 → 시나리오별 {attempted, yielded, dur_s, v_range}.
+
+    segmenter.reset_counters()로 시작해 segmenter.n_attempted/n_yielded를 그대로
+    읽어 생존율 분모로 사용한다 — q_frac_wide 세그먼터 전용(다른 축은 카운터 없음).
+    """
+    segmenter.reset_counters()
+    files = sorted(pkl_dir.glob("*.pkl"))
+    if not files:
+        print(f"  [경고] {pkl_dir} 에 pkl 파일 없음")
+        return {n: {"dur_s": [], "v_range": []} for n in spec_names}
+
+    stats = {n: {"dur_s": [], "v_range": []} for n in spec_names}
+    _empty = np.empty(0, dtype=float)
+
+    for f in tqdm(files, desc=f"  [{pkl_dir.name}] 생존율/길이 통계"):
+        try:
+            with open(f, "rb") as fh:
+                raw = pickle.load(fh)
+        except Exception:
+            continue
+        df_all = raw.get("cycles")
+        if df_all is None:
+            continue
+        if "phase" not in df_all.columns:
+            df_all = _add_phase(df_all)
+        cell_id = raw.get("meta", {}).get("cell_id", f.stem)
+
+        for cyc, grp in df_all.groupby("cycle"):
+            if int(cyc) == 0:
+                continue
+            dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
+            chg = grp[grp["phase"] == "charge"].sort_values("time_s")
+            if len(dis) < 30:
+                continue
+
+            v_d, i_d, _, dt_d, q_d = _build_arrays(dis)
+            for rec in segmenter.iter_segments(cell_id, int(cyc), v_d, i_d, dt_d, q_d):
+                sn = rec.meta.get("seg_name") or spec_names[rec.scenario_id]
+                if sn in stats:
+                    stats[sn]["dur_s"].append(float(np.sum(rec.dt)))
+                    stats[sn]["v_range"].append(float(rec.v.max() - rec.v.min()))
+
+            if len(chg) >= 20:
+                v_c, i_c, _, dt_c, q_c = _build_arrays(chg)
+                for rec in segmenter.iter_segments(
+                    cell_id, int(cyc), _empty, _empty, _empty, _empty, v_c, i_c, dt_c, q_c,
+                ):
+                    sn = rec.meta.get("seg_name") or spec_names[rec.scenario_id]
+                    if sn in stats:
+                        stats[sn]["dur_s"].append(float(np.sum(rec.dt)))
+                        stats[sn]["v_range"].append(float(rec.v.max() - rec.v.min()))
+
+    return stats
+
+
+def _collect_one_cell_qfw(args: tuple) -> tuple:
+    """워커 프로세스: 셀 1개 처리 → (stats, n_attempted, n_yielded, candidate_n_points).
+
+    ProcessPoolExecutor로 호출되므로 top-level 함수여야 pickle 가능하다.
+    프로세스마다 독립된 QFracWideSegmenter를 새로 만들어 상태를 로컬로 누적한다
+    (segmenter 인스턴스는 프로세스 간 공유 불가).
+    """
+    pkl_path_str, axis_cfg, spec_names = args
+    from common.scenario import get_segmenter
+
+    segmenter = get_segmenter("q_frac_wide", {"q_frac_wide": axis_cfg})
+    stats = {n: {"dur_s": [], "v_range": []} for n in spec_names}
+    _empty = np.empty(0, dtype=float)
+
+    f = Path(pkl_path_str)
+    try:
+        with open(f, "rb") as fh:
+            raw = pickle.load(fh)
+    except Exception:
+        return stats, {}, {}, {}
+
+    df_all = raw.get("cycles")
+    if df_all is None:
+        return stats, {}, {}, {}
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)
+    cell_id = raw.get("meta", {}).get("cell_id", f.stem)
+
+    for cyc, grp in df_all.groupby("cycle"):
+        if int(cyc) == 0:
+            continue
+        dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
+        chg = grp[grp["phase"] == "charge"].sort_values("time_s")
+        if len(dis) < 30:
+            continue
+
+        v_d, i_d, _, dt_d, q_d = _build_arrays(dis)
+        for rec in segmenter.iter_segments(cell_id, int(cyc), v_d, i_d, dt_d, q_d):
+            sn = rec.meta.get("seg_name") or spec_names[rec.scenario_id]
+            if sn in stats:
+                stats[sn]["dur_s"].append(float(np.sum(rec.dt)))
+                stats[sn]["v_range"].append(float(rec.v.max() - rec.v.min()))
+
+        if len(chg) >= 20:
+            v_c, i_c, _, dt_c, q_c = _build_arrays(chg)
+            for rec in segmenter.iter_segments(
+                cell_id, int(cyc), _empty, _empty, _empty, _empty, v_c, i_c, dt_c, q_c,
+            ):
+                sn = rec.meta.get("seg_name") or spec_names[rec.scenario_id]
+                if sn in stats:
+                    stats[sn]["dur_s"].append(float(np.sum(rec.dt)))
+                    stats[sn]["v_range"].append(float(rec.v.max() - rec.v.min()))
+
+    return stats, dict(segmenter.n_attempted), dict(segmenter.n_yielded), dict(segmenter.candidate_n_points)
+
+
+def collect_qfracwide_stats_parallel(
+    pkl_dir: Path, axis_cfg: dict, spec_names: list, n_workers: int = 4,
+) -> tuple:
+    """collect_qfracwide_stats의 병렬 버전. ProcessPoolExecutor로 셀 단위 분산 후 병합.
+
+    Returns: (stats, n_attempted, n_yielded, candidate_n_points) — 병합된 결과.
+    segmenter 객체가 아니라 dict 3종을 직접 반환한다(워커별 인스턴스는 버려지므로).
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    files = sorted(pkl_dir.glob("*.pkl"))
+    if not files:
+        print(f"  [경고] {pkl_dir} 에 pkl 파일 없음")
+        empty = {n: {"dur_s": [], "v_range": []} for n in spec_names}
+        return empty, {}, {}, {}
+
+    stats: dict = {n: {"dur_s": [], "v_range": []} for n in spec_names}
+    n_attempted: dict = {}
+    n_yielded: dict = {}
+    candidate_n_points: dict = {}
+
+    task_args = [(str(f), axis_cfg, spec_names) for f in files]
+
+    if n_workers <= 1:
+        results = [_collect_one_cell_qfw(a) for a in tqdm(task_args, desc=f"  [{pkl_dir.name}]")]
+    else:
+        results = []
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futs = {ex.submit(_collect_one_cell_qfw, a): a for a in task_args}
+            with tqdm(total=len(futs), desc=f"  [{pkl_dir.name}] ({n_workers} workers)") as pbar:
+                for fut in as_completed(futs):
+                    results.append(fut.result())
+                    pbar.update(1)
+
+    for cell_stats, cell_att, cell_yld, cell_cnp in results:
+        for sn in spec_names:
+            stats[sn]["dur_s"].extend(cell_stats.get(sn, {}).get("dur_s", []))
+            stats[sn]["v_range"].extend(cell_stats.get(sn, {}).get("v_range", []))
+        for sn, c in cell_att.items():
+            n_attempted[sn] = n_attempted.get(sn, 0) + c
+        for sn, c in cell_yld.items():
+            n_yielded[sn] = n_yielded.get(sn, 0) + c
+        for sn, pts in cell_cnp.items():
+            candidate_n_points.setdefault(sn, []).extend(pts)
+
+    return stats, n_attempted, n_yielded, candidate_n_points
+
+
+class _CounterProxy:
+    """collect_qfracwide_stats_parallel의 병합 결과를 세그먼터 인스턴스처럼 보이게
+    감싸는 얇은 래퍼 — print_qfracwide_stats/plot_*가 seg.n_attempted 등을 그대로
+    읽을 수 있도록 인터페이스를 맞춘다 (실제 세그먼터는 아니지만 이 3개 속성만 사용됨)."""
+
+    def __init__(self, n_attempted: dict, n_yielded: dict, candidate_n_points: dict):
+        self.n_attempted = n_attempted
+        self.n_yielded = n_yielded
+        self.candidate_n_points = candidate_n_points
+
+
+def print_qfracwide_stats(
+    per_dataset_stats: dict,   # {"MIT": stats_dict, "HUST": stats_dict}
+    per_dataset_segmenter,     # {"MIT": segmenter, "HUST": segmenter} (n_attempted/n_yielded 보유)
+    spec_names: list,
+    n1: float, n2: float, n_samples: int,
+    out_path: Path | None = None,
+) -> None:
+    w = 100
+    lines = [
+        f"\n{'=' * w}",
+        f"  q_frac_wide  생존율 / 시간길이 / 전압길이 통계   (n1={n1}, n2={n2}, n_samples={n_samples})",
+        f"{'=' * w}",
+    ]
+    header = (f"  {'dataset':<6} {'시나리오':<10} {'시도':>8} {'생존':>8} {'생존율':>7}  "
+              f"{'시간(s) mean':>12} {'median':>8}  {'전압폭(V) mean':>14} {'median':>8} {'max':>8}")
+    for ds in per_dataset_stats:
+        lines.append(f"\n{'─' * w}")
+        lines.append(f"  [{ds}]")
+        lines.append(header)
+        lines.append(f"  {'─' * (w - 2)}")
+        stats = per_dataset_stats[ds]
+        seg = per_dataset_segmenter[ds]
+        for name in spec_names:
+            attempted = seg.n_attempted.get(name, 0)
+            yielded   = seg.n_yielded.get(name, 0)
+            surv_pct  = (100 * yielded / attempted) if attempted > 0 else float("nan")
+            dur   = stats.get(name, {}).get("dur_s", [])
+            vrng  = stats.get(name, {}).get("v_range", [])
+            if dur:
+                dur_mean, dur_med = np.mean(dur), np.median(dur)
+            else:
+                dur_mean = dur_med = float("nan")
+            if vrng:
+                v_mean, v_med, v_max = np.mean(vrng), np.median(vrng), np.max(vrng)
+            else:
+                v_mean = v_med = v_max = float("nan")
+            lines.append(
+                f"  {ds:<6} {name:<10} {attempted:>8,} {yielded:>8,} {surv_pct:>6.1f}%  "
+                f"{dur_mean:>12.2f} {dur_med:>8.2f}  {v_mean:>14.4f} {v_med:>8.4f} {v_max:>8.4f}"
+            )
+    lines.append(f"\n{'=' * w}\n")
+    text = "\n".join(lines)
+    print(text)
+
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        print(f"  통계 저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1c. min_pts 임계값 스윕 — 재스캔 없이 segmenter.candidate_n_points 분포로 계산
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_min_pts_sweep(
+    per_dataset_segmenter: dict,     # {"MIT": segmenter, "HUST": segmenter}
+    spec_names: list,
+    thresholds: list,                # 예: [5, 6, 8, 10]
+    n1: float, n2: float, n_samples: int,
+    out_path: Path | None = None,
+) -> None:
+    """candidate_n_points(모든 시도의 실제 원시 포인트 수) 분포로 min_pts별
+    생존율을 재스캔 없이 즉시 계산해 표로 출력한다."""
+    w = 14 + 10 + 8 * len(thresholds) + 2
+    lines = [
+        f"\n{'=' * w}",
+        f"  q_frac_wide  min_pts 임계값별 생존율 스윕   (n1={n1}, n2={n2}, n_samples={n_samples})",
+        f"{'=' * w}",
+    ]
+    th_header = "".join(f"{'min_pts='+str(t):>10}" for t in thresholds)
+    header = f"  {'dataset':<6} {'시나리오':<10}{th_header}"
+    for ds, seg in per_dataset_segmenter.items():
+        lines.append(f"\n{'─' * w}")
+        lines.append(f"  [{ds}]")
+        lines.append(header)
+        lines.append(f"  {'─' * (w - 2)}")
+        for name in spec_names:
+            counts = np.array(seg.candidate_n_points.get(name, []))
+            if len(counts) == 0:
+                row = "".join(f"{'—':>10}" for _ in thresholds)
+            else:
+                row = "".join(f"{100*(counts>=t).mean():>9.1f}%" for t in thresholds)
+            n_att = len(counts)
+            lines.append(f"  {ds:<6} {name:<10}{row}   (시도={n_att:,}, "
+                        f"pts median={int(np.median(counts)) if n_att else '—'})")
+    lines.append(f"\n{'=' * w}\n")
+    text = "\n".join(lines)
+    print(text)
+
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        print(f"  통계 저장: {out_path}")
+
+
+def plot_min_pts_sweep(
+    per_dataset_segmenter: dict,
+    spec_names: list,
+    n1: float, n2: float, n_samples: int,
+    out_path: Path,
+    th_min: int = 3,
+    th_max: int = 20,
+) -> None:
+    """min_pts를 th_min~th_max 전체 스윕한 생존율 곡선. 시나리오별 서브플롯,
+    각 서브플롯에 MIT/HUST 두 선. x=min_pts, y=생존율(%)."""
+    datasets  = list(per_dataset_segmenter.keys())
+    colors    = {"MIT": "#3498db", "HUST": "#e74c3c"}
+    n_scen    = len(spec_names)
+    ncols     = 3
+    nrows     = int(np.ceil(n_scen / ncols))
+    ths       = np.arange(th_min, th_max + 1)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.2 * nrows), squeeze=False)
+    for idx, name in enumerate(spec_names):
+        ax = axes[idx // ncols][idx % ncols]
+        for ds in datasets:
+            seg = per_dataset_segmenter[ds]
+            counts = np.array(seg.candidate_n_points.get(name, []))
+            if len(counts) == 0:
+                continue
+            surv = [100 * (counts >= t).mean() for t in ths]
+            ax.plot(ths, surv, marker="o", markersize=3, label=ds,
+                    color=colors.get(ds, None))
+        ax.axvline(8, color="gray", ls="--", lw=1, alpha=0.6)
+        ax.text(8.2, 5, "n≥8\n(diff/lfp 가능)", fontsize=7, color="gray")
+        ax.set_title(name, fontsize=10)
+        ax.set_xlabel("min_pts")
+        ax.set_ylabel("생존율 (%)")
+        ax.set_ylim(-3, 103)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+
+    for idx in range(n_scen, nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+
+    fig.suptitle(f"min_pts 임계값 스윕 — 시나리오별 생존율 곡선   "
+                f"n1={n1} n2={n2} n_samples={n_samples}", fontsize=11)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  플롯 저장: {out_path}")
+
+
+def plot_qfracwide_stats(
+    per_dataset_stats: dict,   # {"MIT": stats_dict, "HUST": stats_dict}
+    per_dataset_segmenter: dict,
+    spec_names: list,
+    n1: float, n2: float, n_samples: int,
+    out_path: Path,
+) -> None:
+    """3패널 플롯: 생존율(막대) / 시간길이(박스플롯) / 전압폭(박스플롯).
+
+    각 패널은 시나리오(x축)별로 MIT·HUST를 나란히 비교한다.
+    """
+    datasets = list(per_dataset_stats.keys())          # ["MIT","HUST"]
+    n_scen   = len(spec_names)
+    colors   = {"MIT": "#3498db", "HUST": "#e74c3c"}
+
+    fig, axes = plt.subplots(3, 1, figsize=(max(9, n_scen * 1.6), 13))
+
+    # ── 패널 1: 생존율 막대그래프 ────────────────────────────────────────────
+    ax = axes[0]
+    x = np.arange(n_scen)
+    width = 0.35
+    for di, ds in enumerate(datasets):
+        seg = per_dataset_segmenter[ds]
+        surv = []
+        for name in spec_names:
+            att = seg.n_attempted.get(name, 0)
+            yld = seg.n_yielded.get(name, 0)
+            surv.append(100 * yld / att if att > 0 else 0.0)
+        offset = (di - (len(datasets) - 1) / 2) * width
+        bars = ax.bar(x + offset, surv, width, label=ds,
+                      color=colors.get(ds, None), edgecolor="black", linewidth=0.5)
+        for b, v in zip(bars, surv):
+            ax.text(b.get_x() + b.get_width() / 2, v + 1, f"{v:.0f}%",
+                    ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(spec_names)
+    ax.set_ylabel("생존율 (%)  = yielded / attempted")
+    ax.set_ylim(0, 108)
+    ax.set_title(f"q_frac_wide 세그먼트 생존율 (min_pts 통과 비율)   "
+                f"n1={n1}  n2={n2}  n_samples={n_samples}")
+    ax.legend(loc="upper right")
+    ax.grid(axis="y", alpha=0.3)
+
+    # ── 패널 2/3 공통: 시나리오별 [MIT박스, HUST박스] 나란히 배치 ─────────────
+    def _grouped_boxplot(ax, key: str, ylabel: str, title: str):
+        plot_data, positions, box_colors = [], [], []
+        pos = 0.0
+        group_gap = 0.6
+        for name in spec_names:
+            for ds in datasets:
+                data = per_dataset_stats[ds].get(name, {}).get(key, [])
+                plot_data.append(data if len(data) > 0 else [np.nan])
+                positions.append(pos)
+                box_colors.append(colors.get(ds, "#999999"))
+                pos += 1.0
+            pos += group_gap
+        bp = ax.boxplot(plot_data, positions=positions, widths=0.8,
+                        patch_artist=True, showfliers=False)
+        for patch, c in zip(bp["boxes"], box_colors):
+            patch.set_facecolor(c)
+            patch.set_alpha(0.7)
+        group_centers = []
+        step = len(datasets) + group_gap
+        for gi in range(n_scen):
+            start = gi * step
+            group_centers.append(start + (len(datasets) - 1) / 2.0)
+        ax.set_xticks(group_centers)
+        ax.set_xticklabels(spec_names)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.3)
+        handles = [plt.matplotlib.patches.Patch(facecolor=colors[ds], alpha=0.7, label=ds)
+                  for ds in datasets]
+        ax.legend(handles=handles, loc="upper right")
+
+    _grouped_boxplot(axes[1], "dur_s", "세그먼트 시간 길이 (s)",
+                     "세그먼트별 시간 길이 분포 (이상치 제외)")
+    _grouped_boxplot(axes[2], "v_range", "세그먼트 전압 폭 V_max-V_min (V)",
+                     "세그먼트별 전압 폭 분포 (이상치 제외)")
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  플롯 저장: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. 사이클 시각화  (--mode segment)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -823,6 +1233,68 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
                                 n_cycles=args.n_cycles)
 
 
+def _run_qfracwide_survival(axis_cfg: dict, n_workers: int = 1) -> None:
+    """q_frac_wide 전용: MIT+HUST 각각 세그먼터를 만들어 생존율/시간길이/전압길이 통계 수집.
+
+    n_workers > 1 이면 collect_qfracwide_stats_parallel(ProcessPoolExecutor)로 셀 단위 병렬 처리.
+    """
+    from common.scenario import get_segmenter
+
+    n1 = axis_cfg.get("n1", 0.4)
+    n2 = axis_cfg.get("n2", 0.2)
+    n_samples = axis_cfg.get("n_samples", 4)
+
+    # spec_names는 segmenter 없이도 결정 가능 (q_frac_wide는 항상 고정 6개)
+    _tmp_seg = get_segmenter("q_frac_wide", {"q_frac_wide": axis_cfg})
+    names = _tmp_seg.get_spec().scenario_names
+
+    per_ds_stats = {}
+    per_ds_seg = {}
+    for ds, root in (("MIT", MIT_DIR), ("HUST", HUST_DIR)):
+        print(f"\n=== [{ds}] 생존율/길이 통계 수집: {root}  (workers={n_workers}) ===")
+        if n_workers <= 1:
+            seg = get_segmenter("q_frac_wide", {"q_frac_wide": axis_cfg})
+            per_ds_stats[ds] = collect_qfracwide_stats(root, seg, names)
+            per_ds_seg[ds] = seg
+        else:
+            stats, att, yld, cnp = collect_qfracwide_stats_parallel(
+                root, axis_cfg, names, n_workers=n_workers)
+            per_ds_stats[ds] = stats
+            per_ds_seg[ds] = _CounterProxy(att, yld, cnp)
+
+    out_dir = STEP_DIR / "outputs" / "seg_diagnose" / "q_frac_wide"
+    tag = f"n1-{int(round(n1*100))}%_n2-{int(round(n2*100))}%_N-{n_samples}"
+
+    txt_path = out_dir / f"survival_stats_{tag}.txt"
+    print_qfracwide_stats(per_ds_stats, per_ds_seg, names, n1, n2, n_samples, out_path=txt_path)
+
+    plot_path = out_dir / f"survival_stats_{tag}.png"
+    plot_qfracwide_stats(per_ds_stats, per_ds_seg, names, n1, n2, n_samples, out_path=plot_path)
+
+    # min_pts 스윕 — candidate_n_points 분포로 재스캔 없이 5/6/8/10 등 임계값별 생존율 계산
+    sweep_txt_path = out_dir / f"minpts_sweep_{tag}.txt"
+    print_min_pts_sweep(per_ds_seg, names, [5, 6, 8, 10], n1, n2, n_samples, out_path=sweep_txt_path)
+
+    sweep_plot_path = out_dir / f"minpts_sweep_{tag}.png"
+    plot_min_pts_sweep(per_ds_seg, names, n1, n2, n_samples, out_path=sweep_plot_path)
+
+    # 원시 통계 저장 (dur_s/v_range 리스트 + attempted/yielded 카운트 + 포인트수 분포)
+    # → 재스캔 없이 다른 n1/n2 run과 비교하거나, 임의의 min_pts 값을 추가로 조사할 때 재사용 가능
+    raw_path = out_dir / f"survival_stats_{tag}.pkl"
+    raw_dump = {
+        "n1": n1, "n2": n2, "n_samples": n_samples,
+        "spec_names": names,
+        "stats": per_ds_stats,
+        "counters": {ds: {"n_attempted": dict(seg.n_attempted),
+                          "n_yielded": dict(seg.n_yielded),
+                          "candidate_n_points": dict(seg.candidate_n_points)}
+                    for ds, seg in per_ds_seg.items()},
+    }
+    with open(raw_path, "wb") as f:
+        pickle.dump(raw_dump, f)
+    print(f"  원시 통계 저장(재사용용): {raw_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="시나리오 세그먼트 진단 (통계 + 시각화)")
     parser.add_argument("--seg-axis",    type=str, default=None,
@@ -849,12 +1321,35 @@ def main():
                         help="통계 수집·출력 생략")
     parser.add_argument("--no-plot",     action="store_true",
                         help="사이클 시각화 생략")
+    parser.add_argument("--survival-stats", action="store_true",
+                        help="q_frac_wide 전용: MIT+HUST 생존율/시간길이/전압길이 비교 통계. "
+                             "--seg-axis q_frac_wide 필수. --n1/--n2/--n-samples로 파라미터 지정 "
+                             "(--axis-config 로도 가능). --dataset/--no-plot 무시하고 시각화 생략, "
+                             "MIT+HUST 둘 다 자동 수행.")
+    parser.add_argument("--n1", type=float, default=None, help="q_frac_wide n1 (--survival-stats용)")
+    parser.add_argument("--n2", type=float, default=None, help="q_frac_wide n2 (--survival-stats용)")
+    parser.add_argument("--n-samples", type=int, default=None, dest="n_samples",
+                        help="q_frac_wide n_samples (--survival-stats용)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="--survival-stats 전용: 셀 단위 병렬 프로세스 수 (기본: 1=순차). "
+                             "ProcessPoolExecutor로 hi_correlation.py와 동일한 방식으로 병렬화.")
     args = parser.parse_args()
 
     try:
         axis_cfg: dict = json.loads(args.axis_config)
     except json.JSONDecodeError as e:
         print(f"[ERROR] --axis-config JSON 파싱 실패: {e}")
+        return
+
+    if args.survival_stats:
+        if args.n1 is not None:
+            axis_cfg["n1"] = args.n1
+        if args.n2 is not None:
+            axis_cfg["n2"] = args.n2
+        if args.n_samples is not None:
+            axis_cfg["n_samples"] = args.n_samples
+        _run_qfracwide_survival(axis_cfg, n_workers=args.workers)
+        print("\n완료!")
         return
 
     if args.seg_axis is not None:

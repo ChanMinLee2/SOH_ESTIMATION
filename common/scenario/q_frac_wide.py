@@ -74,6 +74,21 @@ class QFracWideSegmenter(Segmenter):
         self.cv_v_thresh = cv_v_thresh
         self.cv_cc_frac = cv_cc_frac
 
+        # 진단용 카운터 (min_pts 생존율 계산) — iter_segments의 공개 동작에는 영향 없음.
+        # scenario_name -> count. reset_counters()로 초기화 후 여러 셀에 걸쳐 누적 가능.
+        self.n_attempted: dict[str, int] = {}
+        self.n_yielded: dict[str, int] = {}
+        # scenario_name -> [원시 포인트 수, ...] — 시도한 모든 후보의 실제 m.sum() 기록.
+        # 이 분포만 있으면 재스캔 없이 임의의 min_pts 값에서 생존율을
+        # (arr >= threshold).mean() 으로 즉시 계산할 수 있다.
+        self.candidate_n_points: dict[str, list] = {}
+
+    def reset_counters(self) -> None:
+        """카운터 초기화 (seg_diagnose.py 등 진단 스크립트용)."""
+        self.n_attempted = {}
+        self.n_yielded = {}
+        self.candidate_n_points = {}
+
     # ── 구간 정의 ────────────────────────────────────────────────────────────
 
     def _zone_bounds(self) -> dict[str, tuple[float, float]]:
@@ -129,14 +144,19 @@ class QFracWideSegmenter(Segmenter):
                 continue
 
             scenario_id = spec.routing[dir_idx][latent_class]
+            sname       = _SCENARIO_NAMES[scenario_id]
 
             for start_qf in starts:
                 end_qf = start_qf + self.n2
                 lo_q   = start_qf * q_tot
                 hi_q   = end_qf   * q_tot
                 m      = (q >= lo_q) & (q < hi_q)
-                if m.sum() < self.min_pts:
+                n_pts  = int(m.sum())
+                self.n_attempted[sname] = self.n_attempted.get(sname, 0) + 1
+                self.candidate_n_points.setdefault(sname, []).append(n_pts)
+                if n_pts < self.min_pts:
                     continue
+                self.n_yielded[sname] = self.n_yielded.get(sname, 0) + 1
 
                 records.append(SegmentRecord(
                     cell_id=cell_id,
