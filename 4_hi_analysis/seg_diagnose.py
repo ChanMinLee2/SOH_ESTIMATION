@@ -72,6 +72,14 @@ _PALETTE = [
     "#27ae60", "#c0392b", "#8e44ad", "#16a085",
 ]
 
+# q_frac_wide 세그먼트 파라미터 — CLI --axis-config 대신 여기서 직접 수정 가능.
+# (--axis-config를 명시하면 그 값이 아래 값을 덮어씀)
+QFRAC_WIDE_AXIS_CONFIG = {
+    "n1": 0.45,
+    "n2": 0.09,
+    "n_samples": 4,
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 유틸
@@ -1149,7 +1157,12 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
 
     ds      = args.dataset.upper()
     root    = MIT_DIR if ds == "MIT" else HUST_DIR
-    out_dir = STEP_DIR / "outputs" / "seg_diagnose" / axis
+    if axis == "q_frac_wide":
+        dir_name = (f"q_frac_wide_n1-{int(round(seg.n1*100))}%"
+                    f"_n2-{int(round(seg.n2*100))}%_N-{seg.n_samples}")
+    else:
+        dir_name = axis
+    out_dir = STEP_DIR / "outputs" / "seg_diagnose" / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 통계 ──────────────────────────────────────────────────────────────────
@@ -1330,9 +1343,6 @@ def main():
     parser.add_argument("--n2", type=float, default=None, help="q_frac_wide n2 (--survival-stats용)")
     parser.add_argument("--n-samples", type=int, default=None, dest="n_samples",
                         help="q_frac_wide n_samples (--survival-stats용)")
-    parser.add_argument("--workers", type=int, default=1,
-                        help="--survival-stats 전용: 셀 단위 병렬 프로세스 수 (기본: 1=순차). "
-                             "ProcessPoolExecutor로 hi_correlation.py와 동일한 방식으로 병렬화.")
     args = parser.parse_args()
 
     try:
@@ -1341,6 +1351,11 @@ def main():
         print(f"[ERROR] --axis-config JSON 파싱 실패: {e}")
         return
 
+    if args.seg_axis == "q_frac_wide" or args.survival_stats:
+        # 파일 상단 QFRAC_WIDE_AXIS_CONFIG를 기본값으로 쓰고, --axis-config로
+        # 넘어온 값이 있으면 그것으로 덮어씀 (CLI 인자가 우선).
+        axis_cfg = {**QFRAC_WIDE_AXIS_CONFIG, **axis_cfg}
+
     if args.survival_stats:
         if args.n1 is not None:
             axis_cfg["n1"] = args.n1
@@ -1348,7 +1363,7 @@ def main():
             axis_cfg["n2"] = args.n2
         if args.n_samples is not None:
             axis_cfg["n_samples"] = args.n_samples
-        _run_qfracwide_survival(axis_cfg, n_workers=args.workers)
+        _run_qfracwide_survival(axis_cfg)
         print("\n완료!")
         return
 

@@ -489,19 +489,25 @@ LFP는 NMC/NCA와 달리 평탄 전압 구간(Flat Plateau)이 약 3.2~3.4V에 �
 
 ---
 
-### 핵심 평가 프레임 (3축 평가)
+### 핵심 평가 프레임 (통합 평가: oracle/hard/soft)
 
-이 계획서의 모든 실험은 아래 3가지 평가 축을 기준으로 결과를 수집한다.
+> **2026-07-23 변경**: 기존 E1(qfrac→qfrac)/E2(qfrac→random)/E3(routing) 3축 명칭은
+> 폐기되었다. `test_scr.py`가 분류기 유무에 따라 **oracle/hard/soft 3모드를 자동으로
+> 한 번에** 평가하는 통합 평가로 대체됐다(`docs/PIPELINE.md` §5-10/5-11 참조).
+> `test.random_segment_test: true`를 켜면 동일한 qfrac 테스트 세트 평가 뒤에
+> test_rs(랜덤 컷 세그먼트)에서도 같은 oracle/hard/soft 3모드를 추가로 평가한다.
+> 이 계획서의 실험들은 이 통합 평가에서 나오는 아래 4개 지점 조합으로 결과를 수집한다.
 
-| 평가 축 | 데이터 | routing | 의미 |
+| 평가 지점 | 데이터 | routing | 의미 (구 명칭) |
 |---------|--------|---------|------|
-| **E1** qfrac → qfrac | 기존 test split | — | 이상적 조건 상한선 |
-| **E2** qfrac → random | test_rs 세그먼트 | none | 실제 배포 시나리오 성능 |
-| **E3** qfrac → random + routing | test_rs 세그먼트 | hard | 분류기의 기여도 |
+| `main.oracle` | qfrac test split | 정답 seg_idx | 이상적 조건 상한선 (구 E1) |
+| `test_rs.oracle` | test_rs (랜덤 컷) | 정답 seg_idx (위치기반 `_assign_regime` 라벨) | distribution shift만 반영한 상한선 (구 E2 — 기존엔 방향(충/방전)만으로 라우팅했으나 이제 6-시나리오 정답 라벨이 있어 진짜 oracle 라우팅이 됨) |
+| `test_rs.hard` | test_rs (랜덤 컷) | 분류기 argmax | 실배포 시나리오 — 분류기 기여도 (구 E3-hard) |
+| `test_rs.soft` | test_rs (랜덤 컷) | 분류기 확률 가중 | 실배포 시나리오 보조 (구 E3-soft) |
 
-E1과 E2의 차이 = **distribution shift 손실**  
-E2와 E3의 차이 = **분류기 라우팅의 기여**  
-이 두 갭이 논문의 핵심 주장을 정량화한다.
+`main.oracle` − `test_rs.oracle` = **distribution shift 손실**  
+`test_rs.oracle` − `test_rs.hard` = **분류기 불완전성으로 인한 추가 손실**(= 분류기 라우팅의 기여도를 뒤집어 본 것)  
+이 두 갭이 논문의 핵심 주장을 정량화한다 — 개념은 과거 "E1-E2", "E2-E3" 갭과 동일하며 명칭과 계산 경로만 바뀌었다.
 
 ---
 
@@ -511,7 +517,7 @@ E2와 E3의 차이 = **분류기 라우팅의 기여**
 
 #### 0-1. test_rs 데이터셋 생성
 
-랜덤 세그먼트 데이터셋(`_4_data_hi/test_rs/`)이 생성 완료되어야 E2/E3 평가를 수행할 수 있다.
+랜덤 세그먼트 데이터셋(`_4_data_hi/test_rs/`)이 생성 완료되어야 `test_rs.oracle`/`test_rs.hard`/`test_rs.soft` 평가를 수행할 수 있다.
 
 ```bash
 # 백그라운드 실행 완료 확인
@@ -526,7 +532,7 @@ cat _4_data_hi/test_rs/test_rs_stats.txt   # 통계 요약
 
 #### 0-2. 분류기 재활성화
 
-E3(routing=hard) 실험을 위해 분류기(`lambda_scen > 0`)를 포함한 Phase 1을 재학습해야 한다.
+`test_rs.hard`/`test_rs.soft` 평가를 위해 분류기(`lambda_scen > 0`)를 포함한 Phase 1을 재학습해야 한다.
 
 ```yaml
 # scr.yaml — 분류기 활성화 설정
@@ -535,7 +541,9 @@ loss:
   lambda_l0: 0.01
 ```
 
-분류기가 비활성화된 기존 체크포인트는 E1, E2에만 사용 가능하다. E3는 분류기 포함 재학습 체크포인트 필요.
+분류기가 비활성화된 기존 체크포인트는 `main.oracle`/`test_rs.oracle`에만 사용 가능하다(분류기가
+없으면 `test_scr.py`가 자동으로 oracle만 실행하고 hard/soft는 건너뜀). `test_rs.hard`/`soft`는
+분류기 포함 재학습 체크포인트가 필요.
 
 #### 0-3. 코드 수정 완료 확인
 
@@ -588,69 +596,20 @@ training:
 
 ---
 
-### R-1. 3축 평가 — E1: qfrac → qfrac (기준선 재확인)
+### R-1. 통합 평가 — main.oracle / test_rs.oracle·hard·soft 일괄 수집
 
-**목적**: 기존 체크포인트로 이상적 조건 상한선을 측정. 이 결과가 E2, E3 비교의 분모가 된다.
+**목적**: 위 4개 평가 지점(구 E1/E2/E3)을 `test_scr.py` 한 번 실행으로 전부 수집한다 —
+현재 코드는 분류기 유무에 따라 자동으로 필요한 모드를 실행하므로, 과거처럼
+`--override` 플래그로 모드를 하나씩 바꿔가며 세 번 실행할 필요가 없다
+(`--override`는 현재 `test_scr.py`에 존재하지 않는 옵션이니 쓰지 않는다).
 
-**실행** (코드 수정 없음, 현재 기본 동작):
+**전제**: test_rs 데이터 생성 완료(0-1). `test_rs.hard`/`soft`까지 보려면 분류기 포함
+재학습 체크포인트 필요(0-2) — 없으면 oracle만 자동 실행되고 hard/soft는 건너뛴다.
 
-```bash
-python 5_model/test_scr.py --checkpoint _5_data_model_scr/0715_1340/checkpoints/best.pt
-# → test 분할(HUST) 세그먼트 평가, routing 없음
-```
-
-**scr.yaml**:
-```yaml
-test:
-  random_segment_test: false    # 기본값 — qfrac 분할 세그먼트로 평가
-```
-
-**수집 지표**: test RMSE, MAE, R², MAPE (HUST zero-shot + 10-shot fine-tune)
-
----
-
-### R-2. 3축 평가 — E2: qfrac → random (distribution shift 측정)
-
-**목적**: test_rs 랜덤 세그먼트에서 동일 체크포인트(분류기 비활성)의 성능 측정.  
-**의미**: E1과의 차이 = distribution shift에 의한 성능 손실량.
-
-**전제**: test_rs 데이터 생성 완료 (0-1 확인).
-
-**실행**:
-```bash
-# E2 평가 — 기존 체크포인트, random_segment_test, routing=none
-python 5_model/test_scr.py \
-  --checkpoint _5_data_model_scr/0715_1340/checkpoints/best.pt \
-  --override test.random_segment_test=true \
-  --override test.random_seg_routing=none
-```
-
-또는 scr.yaml 수정 후 실행:
-```yaml
-test:
-  random_segment_test: true
-  random_seg_data_dir: "_4_data_hi/test_rs/seg"
-  random_seg_datasets: ["MIT", "HUST"]
-  random_seg_routing: "none"     # 방향(충/방전)으로만 헤드 선택
-```
-
-**출력 위치**: `{run_dir}/random_seg_test/metrics.json`, `random_seg_predictions.csv`
-
-**수집 지표**: 랜덤 세그먼트 RMSE, R² (E1과 동일 체크포인트, 비교를 위해 나란히 보고)
-
----
-
-### R-3. 3축 평가 — E3: qfrac → random + routing (분류기 기여도 측정)
-
-**목적**: 분류기 라우팅이 distribution shift 손실을 얼마나 회복하는지 측정.  
-**의미**: E2와의 차이 = 분류기의 기여도. E1과 같아질수록 라우팅이 완벽.
-
-**전제**: 분류기 활성화 후 재학습한 체크포인트 필요 (0-2 완료).
-
-#### R-3-0. 분류기 활성화 Phase 1 재학습
+#### 0단계 — 분류기 포함 체크포인트 준비 (hard/soft가 필요한 경우만)
 
 ```yaml
-# config/scr_with_classifier.yaml 또는 scr.yaml 수정
+# scr.yaml
 loss:
   lambda_scen: 0.5              # CE 손실 활성화
   lambda_l0: 0.01
@@ -658,46 +617,50 @@ loss:
 ```
 
 ```bash
-# Phase 1 재학습 (분류기 포함)
+# Phase 1 재학습 (분류기 포함) → gates/classification_HIs.json 생성
 python 5_model/train_scr.py --phase 1 --config 5_model/config/scr.yaml
-# → {run_id_cls}/gates/classification_HIs.json 생성
 
-# Phase 2 재학습
-python 5_model/train_scr.py --phase 2 \
-  --gates-from _5_data_model_scr/{run_id_cls}
+# Phase 2 재학습 (고정 게이트 + 회귀 헤드)
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/{run_id_cls}
+
+# 시나리오 분류기 학습 (B안 — 회귀와 분리)
+python 5_model/train_classifier.py --run-dir _5_data_model_scr/{run_id_cls_p2}
 ```
 
-#### R-3-1. E3 평가 (routing=hard)
+#### 1단계 — 통합 평가 실행
+
+```yaml
+# scr.yaml
+test:
+  random_segment_test: true     # true여야 test_rs.oracle/hard/soft까지 같이 실행됨
+  random_seg_data_dir: "_4_data_hi/test_rs/seg"
+  random_seg_datasets: ["MIT", "HUST"]
+  # random_seg_routing 키는 더 이상 사용되지 않음 — oracle/hard/soft 전부 자동 실행됨
+```
 
 ```bash
 python 5_model/test_scr.py \
   --checkpoint _5_data_model_scr/{run_id_cls_p2}/checkpoints/best.pt \
-  --override test.random_segment_test=true \
-  --override test.random_seg_routing=hard
+  --classifier-ckpt _5_data_model_scr/{run_id_cls_p2}/classifier/clf_best.pt
 ```
 
-#### R-3-2. E3 평가 (routing=soft, 보조)
+**출력**:
+- `{run_dir}/metrics/metrics.json` → `test.oracle` / `test.hard` / `test.soft` (= `main.oracle` 등)
+- `{run_dir}/random_seg_test/metrics.json` → `test_rs.oracle` / `test_rs.hard` / `test_rs.soft`
 
-```bash
-python 5_model/test_scr.py \
-  --checkpoint _5_data_model_scr/{run_id_cls_p2}/checkpoints/best.pt \
-  --override test.random_segment_test=true \
-  --override test.random_seg_routing=soft
-```
+#### 비교 요약표 (실험 완료 후 작성)
 
-#### 3축 비교 최종 요약표 (이 실험 완료 후 작성)
+| 평가 지점 | RMSE | R² | 비고 (구 명칭) |
+|---|---|---|---|
+| `main.oracle` | TBD | TBD | 상한선 (구 E1) |
+| `test_rs.oracle` | TBD | TBD | distribution shift만 (구 E2, 라벨 정확도 개선판) |
+| `test_rs.hard` | TBD | TBD | 실배포, 분류기 기여 (구 E3-hard) |
+| `test_rs.soft` | TBD | TBD | 실배포 보조 (구 E3-soft) |
 
-| 실험 | 학습 데이터 | 테스트 데이터 | routing | RMSE | R² | 비고 |
-|------|-----------|------------|---------|------|-----|------|
-| E1 | qfrac segs | qfrac test split | — | TBD | TBD | 상한선 |
-| E2 | qfrac segs | test_rs (random) | none | TBD | TBD | 배포 시나리오 |
-| E3-hard | qfrac segs | test_rs (random) | hard | TBD | TBD | 라우팅 기여 |
-| E3-soft | qfrac segs | test_rs (random) | soft | TBD | TBD | 라우팅 기여(보조) |
-
-**해석 기준**:
-- E1 - E2 > E3 - E2 : 라우팅이 기여함 (논문 주장 성립)
-- E1 ≈ E2 : distribution shift가 애초에 작음 (문제 자체가 약함, 추가 분석 필요)
-- E3 > E1 : 라우팅이 부작용 발생 (잘못된 분류가 오히려 손해)
+**해석 기준** (구 기준과 동일한 논리, 이름만 교체):
+- `(main.oracle − test_rs.oracle) > (test_rs.oracle − test_rs.hard)` : 라우팅이 기여함 (논문 주장 성립)
+- `main.oracle ≈ test_rs.oracle` : distribution shift가 애초에 작음 (문제 자체가 약함, 추가 분석 필요)
+- `test_rs.hard > main.oracle` : 라우팅이 부작용 발생 (잘못된 분류가 오히려 손해)
 
 ---
 
@@ -1138,19 +1101,19 @@ data:
 | 단계 | 작업 | 명령/파일 | 소요 시간 | 상태 |
 |:----:|------|---------|:--------:|:----:|
 | 0-1 | test_rs 생성 완료 확인 | `cat _4_data_hi/test_rs/test_rs_stats.txt` | — | 진행 중 |
-| 0-2 | E1 기준선 평가 (qfrac→qfrac) | `test_scr.py --checkpoint 0715_1340/...` | ~5분 | ⬜ |
-| 0-3 | E2 배포 시나리오 평가 (qfrac→random, routing=none) | scr.yaml `random_segment_test: true` | ~5분 | ⬜ |
+| 0-2 | `main.oracle` 기준선 평가 (qfrac→qfrac) | `test_scr.py --checkpoint 0715_1340/...` | ~5분 | ⬜ |
+| 0-3 | `test_rs.oracle` 배포 시나리오 평가 (qfrac→random) | scr.yaml `random_segment_test: true` | ~5분 | ⬜ |
 
-#### Phase 1: 분류기 활성화 + E3 (핵심 실험)
+#### Phase 1: 분류기 활성화 + test_rs.hard/soft (핵심 실험)
 
 | 단계 | 실험 ID | 코드 수정 | 실행 시간 | 우선순위 |
 |:----:|---------|:--------:|:--------:|:--------:|
-| 1 | **R-3-0**: 분류기 활성화 Phase 1 재학습 | `lambda_scen: 0.5` | ~1시간 | ★★★ |
-| 2 | **R-3-0**: 분류기 포함 Phase 2 재학습 | `gates_from: {cls_run}` | ~30분 | ★★★ |
-| 3 | **E3-hard**: qfrac→random, routing=hard 평가 | yaml 변경 후 test_scr.py | ~5분 | ★★★ |
-| 4 | **E3-soft**: qfrac→random, routing=soft 평가 | yaml 변경 후 test_scr.py | ~5분 | ★★★ |
+| 1 | 분류기 활성화 Phase 1 재학습 | `lambda_scen: 0.5` | ~1시간 | ★★★ |
+| 2 | 분류기 포함 Phase 2 재학습 | `gates_from: {cls_run}` | ~30분 | ★★★ |
+| 3 | **test_rs.hard** 평가 (분류기 argmax 라우팅) | 분류기 체크포인트 지정 후 test_scr.py | ~5분 | ★★★ |
+| 4 | **test_rs.soft** 평가 (분류기 확률 가중, 보조) | 동일 실행에서 자동 산출 | ~5분 | ★★★ |
 
-> **단계 1~4 완료 후**: E1/E2/E3 비교표 작성 → 분류기 기여도 정량화
+> **단계 1~4 완료 후**: `main.oracle`/`test_rs.oracle`/`test_rs.hard`/`test_rs.soft` 비교표 작성 → 분류기 기여도 정량화
 
 #### Phase 2: 축 비교 실험 (코드 수정 불필요)
 
@@ -1159,7 +1122,7 @@ data:
 | 5 | **F-PROTO-P2, F-VWIN-P2** | 없음 | 각 ~30분 | ★★★ |
 | 6 | **A4-P1ONLY-RCS** | 없음 | ~5분 (평가만) | ★★★ |
 | 7 | **C4-NSHOT-RCS** (N=1,5,20) | 없음 | ~30분 | ★★★ |
-| 8 | 각 축별 E2/E3 평가 (protocol/vwindow) | yaml 변경 | ~20분 | ★★☆ |
+| 8 | 각 축별 `test_rs.oracle`/`hard`/`soft` 평가 (protocol/vwindow) | yaml 변경 | ~20분 | ★★☆ |
 
 #### Phase 3: Ablation 및 Baseline (코드 수정 필요)
 

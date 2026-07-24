@@ -32,7 +32,8 @@ from typing import Iterator
 import numpy as np
 
 from .base import ScenarioSpec, SegmentRecord, Segmenter
-from .vwindow import _detect_cv_start
+# CV 구간 제거 비활성화로 더 이상 사용하지 않음 (iter_segments 참고)
+# from .vwindow import _detect_cv_start
 
 _SCENARIO_NAMES = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
 _ROUTING = [[0, 1, 2], [5, 4, 3]]
@@ -52,16 +53,16 @@ class QFracWideSegmenter(Segmenter):
 
     def __init__(
         self,
-        n1: float = 0.4,       # 구간 크기 (q_frac 비율, [0.35, 0.45) 범위)
+        n1: float = 0.4,       # 구간 크기 (q_frac 비율, [0.35, 0.45] 범위)
         n2: float = 0.2,       # 세그먼트 길이 (q_frac 비율, 0 < n2 < n1)
         n_samples: int = 4,    # 구간당 세그먼트 수
         min_pts: int = 10,
-        cv_v_thresh: float = 3.60,
+        cv_v_thresh: float = 3.59,
         cv_cc_frac: float = 0.80,
     ):
-        if not (0.35 <= n1 < 0.45):
+        if not (0.35 <= n1 <= 0.45):
             raise ValueError(
-                f"q_frac_wide: n1은 [0.35, 0.45) 범위여야 합니다. 현재 n1={n1}"
+                f"q_frac_wide: n1은 [0.35, 0.45] 범위여야 합니다. 현재 n1={n1}"
             )
         if not (0 < n2 < n1):
             raise ValueError(
@@ -211,14 +212,14 @@ class QFracWideSegmenter(Segmenter):
                 dis_v, dis_i, dis_dt, dis_q, -1, cell_id, cycle, seg_local)
             yield from recs
 
-        # 충전 (CV 구간 제거 후 CC만)
+        # 충전 (CC+CV 전체 사용 — 100% = 해당 사이클 실제 완충 용량과 일치시키기 위해
+        # CV 구간 제거 로직을 비활성화함. cv_v_thresh/cv_cc_frac는 더 이상 쓰이지 않음.)
+        # cv_start = _detect_cv_start(chg_v, chg_i, self.cv_v_thresh, self.cv_cc_frac)
+        # cc_v  = chg_v[:cv_start]
+        # cc_i  = chg_i[:cv_start]
+        # cc_dt = chg_dt[:cv_start]
+        # cc_q  = chg_q[:cv_start]
         if chg_v is not None and len(chg_v) >= self.min_pts:
-            cv_start = _detect_cv_start(chg_v, chg_i, self.cv_v_thresh, self.cv_cc_frac)
-            cc_v  = chg_v[:cv_start]
-            cc_i  = chg_i[:cv_start]
-            cc_dt = chg_dt[:cv_start]
-            cc_q  = chg_q[:cv_start]
-            if len(cc_v) >= self.min_pts:
-                recs, seg_local = self._extract(
-                    cc_v, cc_i, cc_dt, cc_q, +1, cell_id, cycle, seg_local)
-                yield from recs
+            recs, seg_local = self._extract(
+                chg_v, chg_i, chg_dt, chg_q, +1, cell_id, cycle, seg_local)
+            yield from recs

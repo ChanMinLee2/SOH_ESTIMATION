@@ -21,6 +21,7 @@ test 시 routing=hard/soft 실험(E3)에서만 사용된다.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 import time
@@ -39,6 +40,7 @@ from datasets.segment_dataset import build_datasets, FastTensorLoader
 from models.scenario_classifier import MLPProbeClassifier, CNNProbeClassifier
 from utils.hi_schema import N_HI, spec_from_qfrac
 from common.scenario.base import ScenarioSpec
+from utils.tqdm_utils import trange, write as tqdm_write
 
 
 def _collate(batch):
@@ -132,6 +134,31 @@ def _apply_probe_mask(
     return probe_x
 
 
+# ---------------------------------------------------------------------------
+# 학습 기록 CSV — scr_trainer.py의 train_log.csv 와 동일한 패턴
+# ---------------------------------------------------------------------------
+
+_LOG_COLS = ["epoch", "tr_loss", "tr_acc", "val_loss", "val_acc", "lr", "elapsed_s"]
+
+
+def _init_log_csv(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(_LOG_COLS)
+
+
+def _append_log_csv(
+    path: Path, epoch: int, tr_loss: float, tr_acc: float,
+    vl_loss: float, vl_acc: float, lr: float, elapsed: float,
+) -> None:
+    row = [
+        epoch,
+        f"{tr_loss:.6f}", f"{tr_acc:.6f}",
+        f"{vl_loss:.6f}", f"{vl_acc:.6f}",
+        f"{lr:.6e}", f"{elapsed:.2f}",
+    ]
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(row)
 
 
 def main() -> None:
@@ -228,11 +255,16 @@ def main() -> None:
     clf_dir = run_dir / "classifier"
     clf_dir.mkdir(exist_ok=True)
 
+    log_path = run_dir / "logs" / "classifier_logs.csv"
+    _init_log_csv(log_path)
+    print(f"[clf] 학습 기록 → {log_path}")
+
     best_val_acc = -1.0
     no_improve   = 0
     t0 = time.time()
 
-    for epoch in range(1, epochs + 1):
+    pbar = trange(1, epochs + 1, desc="Classifier training")
+    for epoch in pbar:
         # ── train ────────────────────────────────────────────────────────
         clf.train()
         tr_loss = tr_correct = tr_total = 0
@@ -276,11 +308,18 @@ def main() -> None:
         vl_loss /= vl_total
         vl_acc   = vl_correct / vl_total
 
+        _append_log_csv(log_path, epoch, tr_loss, tr_acc, vl_loss, vl_acc,
+                        lr, time.time() - t0)
+
+        if hasattr(pbar, "set_postfix"):
+            pbar.set_postfix(tr_acc=f"{tr_acc:.4f}", val_acc=f"{vl_acc:.4f}",
+                             best=f"{max(best_val_acc, vl_acc):.4f}")
+
         if epoch % 10 == 0 or epoch == 1:
-            print(f"[clf] epoch {epoch:>4d}  "
-                  f"tr_loss={tr_loss:.4f}  tr_acc={tr_acc:.4f}  "
-                  f"val_loss={vl_loss:.4f}  val_acc={vl_acc:.4f}  "
-                  f"({time.time()-t0:.0f}s)")
+            tqdm_write(f"[clf] epoch {epoch:>4d}  "
+                      f"tr_loss={tr_loss:.4f}  tr_acc={tr_acc:.4f}  "
+                      f"val_loss={vl_loss:.4f}  val_acc={vl_acc:.4f}  "
+                      f"({time.time()-t0:.0f}s)")
 
         if vl_acc > best_val_acc:
             best_val_acc = vl_acc
@@ -298,12 +337,15 @@ def main() -> None:
         else:
             no_improve += 1
             if no_improve >= patience:
-                print(f"[clf] Early stop @ epoch {epoch}  best_val_acc={best_val_acc:.4f}")
+                tqdm_write(f"[clf] Early stop @ epoch {epoch}  best_val_acc={best_val_acc:.4f}")
                 break
 
+    if hasattr(pbar, "close"):
+        pbar.close()
     elapsed = time.time() - t0
-    print(f"\n[clf] 완료  best_val_acc={best_val_acc:.4f}  총 {elapsed:.0f}s")
-    print(f"[clf] 저장 → {clf_dir / 'clf_best.pt'}")
+    tqdm_write(f"\n[clf] 완료  best_val_acc={best_val_acc:.4f}  총 {elapsed:.0f}s")
+    tqdm_write(f"[clf] 저장 → {clf_dir / 'clf_best.pt'}")
+    tqdm_write(f"[clf] 학습 기록 저장 → {log_path}")
 
 
 if __name__ == "__main__":

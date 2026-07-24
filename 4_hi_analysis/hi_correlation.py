@@ -1930,8 +1930,14 @@ def _add_phase(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+_PROGRESS_BATCH = 20   # 사이클 N개마다 진행률 큐에 보고 (IPC 오버헤드 절감)
+
+
 def _extract_one_cell(args) -> list:
-    if isinstance(args, tuple):
+    _progress_q = None
+    if isinstance(args, tuple) and len(args) == 4:
+        pkl_path_str, _axis, _axis_cfg_json, _progress_q = args
+    elif isinstance(args, tuple):
         pkl_path_str, _axis, _axis_cfg_json = args
     else:
         pkl_path_str, _axis, _axis_cfg_json = str(args), "qfrac", "{}"
@@ -1970,7 +1976,14 @@ def _extract_one_cell(args) -> list:
     # {seg_name: {curve_type: [(cyc, arr), ...]}} — 배치 DTW용 곡선 버퍼
     _curve_buf: dict[str, dict[str, list]] = {}
 
+    _progress_local = 0
     for cyc, grp in df_all.groupby("cycle"):
+        if _progress_q is not None:
+            _progress_local += 1
+            if _progress_local >= _PROGRESS_BATCH:
+                _progress_q.put(_progress_local)
+                _progress_local = 0
+
         if int(cyc) == 0:
             continue
         dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
@@ -2116,6 +2129,9 @@ def _extract_one_cell(args) -> list:
                     cycle_rows[_c][f"morph_{_ct}_dtw_{_seg}"]  = float(_dv)
                     cycle_rows[_c][f"morph_{_ct}_frec_{_seg}"] = float(_fv)
 
+    if _progress_q is not None and _progress_local > 0:
+        _progress_q.put(_progress_local)
+
     return list(cycle_rows.values())
 
 
@@ -2135,12 +2151,41 @@ def load_all(
         for f in tqdm(files, desc=pkl_dir.name):
             all_rec.extend(_extract_one_cell((str(f), axis, cfg_json)))
     else:
+        # 파일 완료 단위 tqdm(pbar)만으로는 큰 파일이 많이 배정된 초반에 진행률이
+        # 한참 안 움직이는 것처럼 보임 → Manager 큐로 워커의 사이클 처리량을
+        # 실시간으로 받아 별도 진행률 바(총량 미상, 카운트+속도만 표시)를 갱신.
+        import multiprocessing as mp
+        import queue as _queue_mod
+        import threading
+
+        _mgr = mp.Manager()
+        _progress_q = _mgr.Queue()
+        _stop_evt = threading.Event()
+        _cyc_pbar = tqdm(desc=f"{pkl_dir.name} 사이클 처리량", unit="cyc", position=1, leave=False)
+
+        def _drain_progress():
+            while not _stop_evt.is_set():
+                try:
+                    n = _progress_q.get(timeout=0.2)
+                    _cyc_pbar.update(n)
+                except _queue_mod.Empty:
+                    continue
+
+        _drain_thread = threading.Thread(target=_drain_progress, daemon=True)
+        _drain_thread.start()
+
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futs = {ex.submit(_extract_one_cell, (str(f), axis, cfg_json)): f for f in files}
-            with tqdm(total=len(files), desc=pkl_dir.name) as pbar:
+            futs = {ex.submit(_extract_one_cell, (str(f), axis, cfg_json, _progress_q)): f
+                    for f in files}
+            with tqdm(total=len(files), desc=pkl_dir.name, position=0) as pbar:
                 for fut in as_completed(futs):
                     all_rec.extend(fut.result())
                     pbar.update(1)
+
+        _stop_evt.set()
+        _drain_thread.join(timeout=1.0)
+        _cyc_pbar.close()
+        _mgr.shutdown()
     return pd.DataFrame(all_rec) if all_rec else pd.DataFrame()
 
 

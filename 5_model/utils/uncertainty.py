@@ -4,10 +4,16 @@ uncertainty.py — Last-Layer Laplace Approximation (LLA) for SCRModel.
 외부 의존성 없이 PyTorch + scipy만으로 구현.
 임의의 cap_head 타입에 적용 가능 (MLP, ResNet-Tab, Transformer, iTransformer, FTTransformer).
 
-수식:
-  φ(x)  : cap_head 최종 레이어 직전 피처 (d,) — 바이어스 확장 후 (d+1,)
-  H     : (d+1, d+1)  = (1/σ_n²) Σ φᵢφᵢᵀ + λI
-  σ²(x*) = σ_n² + φ(x*)ᵀ H⁻¹ φ(x*)
+수식 (시나리오별 이분산 aleatoric noise):
+  φ(x)    : cap_head 최종 레이어 직전 피처 (d,) — 바이어스 확장 후 (d+1,)
+  σ_n(s)  : 시나리오 s(=seg_idx)별 관측 노이즈 표준편차 (n_scenarios,)
+  H       : (d+1, d+1) = Σᵢ (φᵢ/σ_n(sᵢ))(φᵢ/σ_n(sᵢ))ᵀ + λI
+  σ²(x*)  = σ_n(s*)² + φ(x*)ᵀ H⁻¹ φ(x*)
+
+Why: 전역 스칼라 σ_n 하나로는 시나리오 간 실제 오차 스케일 차이(예: dis_lo RMSE
+     0.006 vs chg_mid RMSE 0.023, ~4배)를 반영하지 못해 68% 구간이 13~17%p
+     과잉 커버리지되는 것을 확인함(calibration.png 히스토그램이 사실상 점질량).
+     σ_n을 seg_idx별로 분리해 이분산성을 aleatoric 항에 직접 반영한다.
 
 Usage:
     uq = LaplaceUQ(model, device)
@@ -76,18 +82,19 @@ class LaplaceUQ:
         self.model = model
         self.device = device
         self.prior_precision = prior_precision
-        self._L: Optional[torch.Tensor] = None   # lower-triangular Cholesky of H (CPU)
-        self._sigma_n: float = 1.0               # 노이즈 표준편차 추정값
+        self.n_scenarios: int = getattr(model, "n_scenarios", 1)
+        self._L: Optional[torch.Tensor] = None            # lower-triangular Cholesky of H (CPU)
+        self._sigma_n: torch.Tensor = torch.ones(self.n_scenarios)  # 시나리오별 노이즈 표준편차
         self._fitted = False
 
     # ------------------------------------------------------------------
     # Feature collection via forward hook
     # ------------------------------------------------------------------
 
-    def _collect_phi(self, loader: DataLoader) -> tuple[torch.Tensor, torch.Tensor]:
-        """로더 전체에서 φ_aug = [φ; 1] 피처와 target을 수집한다."""
+    def _collect_phi(self, loader: DataLoader) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """로더 전체에서 φ_aug = [φ; 1] 피처, target, seg_idx를 수집한다."""
         last_lin = _get_last_linear(self.model.cap_head)
-        feats, targets = [], []
+        feats, targets, seg_idxs = [], [], []
 
         def _hook(_, inp, __):
             feats.append(inp[0].detach().cpu())
@@ -99,12 +106,14 @@ class LaplaceUQ:
                 batch_d = _batch_to_device(batch, self.device)
                 self.model(batch_d)
                 targets.append(batch["target"].cpu())
+                seg_idxs.append(batch["seg_idx"].cpu())
         handle.remove()
 
         phi = torch.cat(feats, dim=0)                           # (N, d)
         phi_aug = torch.cat([phi, torch.ones(len(phi), 1)], 1)  # (N, d+1)
         t = torch.cat(targets, dim=0)                           # (N,)
-        return phi_aug, t
+        seg_idx = torch.cat(seg_idxs, dim=0).long()             # (N,)
+        return phi_aug, t, seg_idx
 
     def _collect_phi_batch(self, batch: dict) -> torch.Tensor:
         """단일 배치에서 φ_aug 피처를 수집한다 (추론용)."""
@@ -135,34 +144,50 @@ class LaplaceUQ:
         """
         LLA 사후 분포를 학습 데이터로 추정한다.
 
-        noise_std=None 이면 MAP 예측값과 실제 target의 잔차 표준편차로 자동 추정.
+        noise_std=None 이면 시나리오(seg_idx)별로 MAP 예측값과 실제 target의
+        잔차 표준편차를 따로 추정한다 (이분산 aleatoric noise).
+        noise_std에 스칼라를 넘기면 모든 시나리오에 동일하게 적용(레거시 호환).
         """
-        phi_aug, t = self._collect_phi(train_loader)   # CPU
+        phi_aug, t, seg_idx = self._collect_phi(train_loader)   # CPU
 
-        # σ_n 추정
+        # σ_n(s) 추정 — 시나리오별
         if noise_std is None:
             last_lin  = _get_last_linear(self.model.cap_head)
             W = last_lin.weight.data.cpu()              # (1, d)
             b = last_lin.bias.data.cpu()                # (1,)
             phi = phi_aug[:, :-1]                       # (N, d)
             pred = (phi @ W.T).squeeze(1) + b.squeeze(0)
-            noise_std = float((t - pred).std().clamp(min=1e-6))
-        self._sigma_n = noise_std
+            resid = t - pred
+            global_std = float(resid.std().clamp(min=1e-6))
 
-        self._fit_H(phi_aug)
+            sigma_n = torch.full((self.n_scenarios,), global_std)
+            for s in range(self.n_scenarios):
+                sel = seg_idx == s
+                if sel.sum() > 1:
+                    sigma_n[s] = resid[sel].std().clamp(min=1e-6)
+                else:
+                    print(f"[LaplaceUQ] scenario {s}: 샘플 부족({int(sel.sum())}개) "
+                          f"→ 전역 σ_n={global_std:.4f}로 대체")
+        else:
+            sigma_n = torch.full((self.n_scenarios,), float(noise_std))
+        self._sigma_n = sigma_n
+
+        self._fit_H(phi_aug, seg_idx)
         self._fitted = True
+        sigma_str = ", ".join(f"{v:.4f}" for v in sigma_n.tolist())
         print(
             f"[LaplaceUQ] fit 완료: d_feat={phi_aug.shape[1]-1}, "
-            f"σ_n={noise_std:.4f}, λ={self.prior_precision:.4f}, "
+            f"σ_n(시나리오별)=[{sigma_str}], λ={self.prior_precision:.4f}, "
             f"N={phi_aug.shape[0]}"
         )
         return self
 
-    def _fit_H(self, phi_aug: torch.Tensor) -> None:
-        """H = (1/σ_n²) XᵀX + λI 의 Cholesky 인수분해를 저장한다."""
+    def _fit_H(self, phi_aug: torch.Tensor, seg_idx: torch.Tensor) -> None:
+        """H = Σᵢ (φᵢ/σ_n(sᵢ))(φᵢ/σ_n(sᵢ))ᵀ + λI 의 Cholesky 인수분해를 저장한다."""
         d1 = phi_aug.shape[1]
-        H = (phi_aug.T @ phi_aug) / (self._sigma_n ** 2) + \
-            self.prior_precision * torch.eye(d1)
+        sigma_per_sample = self._sigma_n[seg_idx].unsqueeze(1)  # (N, 1)
+        phi_scaled = phi_aug / sigma_per_sample                 # (N, d+1)
+        H = phi_scaled.T @ phi_scaled + self.prior_precision * torch.eye(d1)
         try:
             self._L = torch.linalg.cholesky(H)
         except torch.linalg.LinAlgError:
@@ -184,20 +209,20 @@ class LaplaceUQ:
         if grid is None:
             grid = [0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0]
 
-        phi_aug, t_val = self._collect_phi(val_loader)
+        phi_aug, t_val, seg_idx_val = self._collect_phi(val_loader)
         t_np = t_val.numpy()
 
         best_nll, best_lam = float("inf"), self.prior_precision
         for lam in grid:
             self.prior_precision = lam
-            self._fit_H(phi_aug)
-            mu, std = self._predict_from_phi(phi_aug)
+            self._fit_H(phi_aug, seg_idx_val)
+            mu, std = self._predict_from_phi(phi_aug, seg_idx_val)
             nll = _nll(t_np, mu.numpy(), std.numpy())
             if nll < best_nll:
                 best_nll, best_lam = nll, lam
 
         self.prior_precision = best_lam
-        self._fit_H(phi_aug)   # best_lam으로 복원
+        self._fit_H(phi_aug, seg_idx_val)   # best_lam으로 복원
         print(f"[LaplaceUQ] 최적 prior_precision={best_lam:.4f}  val_NLL={best_nll:.4f}")
         return best_lam
 
@@ -206,7 +231,7 @@ class LaplaceUQ:
     # ------------------------------------------------------------------
 
     def _predict_from_phi(
-        self, phi_aug: torch.Tensor
+        self, phi_aug: torch.Tensor, seg_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         last_lin = _get_last_linear(self.model.cap_head)
         W = last_lin.weight.data.cpu()          # (1, d)
@@ -214,11 +239,12 @@ class LaplaceUQ:
         phi = phi_aug[:, :-1]
         mu = (phi @ W.T).squeeze(1) + b.squeeze(0)   # (B,)
 
-        # σ²(x*) = σ_n² + φᵀ H⁻¹ φ  via Cholesky solve
+        # σ²(x*) = σ_n(s*)² + φᵀ H⁻¹ φ  via Cholesky solve
         v = torch.linalg.solve_triangular(
             self._L, phi_aug.T, upper=False
         )                                              # (d+1, B)
-        pred_var = self._sigma_n ** 2 + (v ** 2).sum(dim=0)  # (B,)
+        sigma_n_b = self._sigma_n[seg_idx.long()]            # (B,)
+        pred_var = sigma_n_b ** 2 + (v ** 2).sum(dim=0)       # (B,)
         pred_std = pred_var.clamp(min=0.0).sqrt()
         return mu, pred_std
 
@@ -242,7 +268,8 @@ class LaplaceUQ:
         mean = out["cap_pred"].cpu()
 
         phi_aug = self._collect_phi_batch(batch).cpu()
-        _, std = self._predict_from_phi(phi_aug)
+        seg_idx = batch["seg_idx"].cpu()
+        _, std = self._predict_from_phi(phi_aug, seg_idx)
         return mean, std
 
     # ------------------------------------------------------------------
@@ -257,7 +284,8 @@ class LaplaceUQ:
         torch.save(
             {
                 "L":               self._L,
-                "sigma_n":         self._sigma_n,
+                "sigma_n":         self._sigma_n,   # (n_scenarios,) 텐서
+                "n_scenarios":     self.n_scenarios,
                 "prior_precision": self.prior_precision,
             },
             path,
@@ -273,9 +301,10 @@ class LaplaceUQ:
     ) -> "LaplaceUQ":
         data = torch.load(path, map_location="cpu")
         uq = cls(model, device, prior_precision=float(data["prior_precision"]))
-        uq._L       = data["L"]
-        uq._sigma_n = float(data["sigma_n"])
-        uq._fitted  = True
+        uq._L          = data["L"]
+        uq._sigma_n    = data["sigma_n"]
+        uq.n_scenarios = data.get("n_scenarios", len(data["sigma_n"]))
+        uq._fitted     = True
         print(f"[LaplaceUQ] loaded ← {path}")
         return uq
 

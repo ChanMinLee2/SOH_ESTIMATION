@@ -430,6 +430,8 @@ def main() -> None:
     _MODEL_SHORT = {"mlp": "mlp", "transformer": "tr", "i_transformer": "itr",
                     "resnet_tab": "res", "ft_transformer": "ftt"}
     _axis_short  = _AXIS_SHORT.get(_axis_name, _axis_name[:4])
+    if _axis_name == "q_frac_wide":
+        _axis_short += f"_{_n1}%_{_n2}%"
     _reg_model   = cfg.get("model", {}).get("regression_model", "mlp")
     _model_short = _MODEL_SHORT.get(_reg_model, _reg_model[:3])
     _phase_tag   = f"p{args.phase}" if args.phase else "p?"

@@ -556,4 +556,4 @@ classifier:
 
 - 회귀 헤드 공유 CNN 통합(§5.2): `SCRModel.with_raw_cnn` + `cap_heads._HEAD_IN` 동적화.
   HUST chg_hi/mid 평탄 예측 진단 결과에 따라 착수 여부 결정.
-- CNN 분류기 학습 후 E3 routing=hard 실험으로 MLP 대비 분류 정확도·SOH RMSE 비교.
+- CNN 분류기 학습 후 `test_rs.hard`(분류기 argmax 라우팅) 평가로 MLP 대비 분류 정확도·SOH RMSE 비교.
