@@ -14,8 +14,10 @@ routing/routing_table.csv / checkpoints/*.pt 를 읽어 하나의 비교 플롯�
   Row 4   : 스칼라 지표 7종 — R²(hard, overall) / 분류 정확도(hard) / 인퍼런스
             시간(ms/sample) / 학습 파라미터 수 / oracle→hard RMSE 저하율(라우팅
             비용) / 평균 HI 비용(avg_cost) / random-seg(E2) RMSE(있으면)
-  Row 5   : 선정 HI 자카드(Jaccard) 유사도 히트맵 — probe(방향게이트) + 시나리오별,
-            run × run 행렬. routing_table.csv의 이진 마스크만 사용 (모델 재로딩 불요).
+  Row 5   : 선정 HI 자카드(Jaccard) 유사도 히트맵 — run별로 1개씩, probe(방향게이트) +
+            시나리오 간 (scenario × scenario) 행렬. 한 run 안에서 시나리오마다 얼마나
+            다른 HI 서브셋을 선정했는지 보기 위함 (대각선=1.0, 낮을수록 시나리오 간
+            HI 선택이 서로 다름). routing_table.csv의 이진 마스크만 사용(모델 재로딩 불요).
   Row 6   : (--with-jacobian 지정 시) 선정 HI 자코비안(gradient) 코사인 유사도
             히트맵 — Overall + 시나리오별. 실제 테스트 샘플에서
             d(cap_pred)/d(x_hi) 를 시나리오별로 평균한 벡터끼리 비교 —
@@ -481,6 +483,20 @@ def _sim_matrix(bundles: list[RunBundle], key: str, kind: str) -> np.ndarray:
     return m
 
 
+def _scenario_sim_matrix(bundle: RunBundle, labels: list[str]) -> np.ndarray:
+    """단일 run 내부에서 라벨(probe/시나리오)끼리 선정 HI 자카드 유사도.
+    낮을수록 그 두 라벨이 서로 다른 HI 서브셋을 쓴다는 뜻 — "시나리오별로 얼마나
+    다른 HI를 골랐는가"를 보기 위한 행렬(대각선은 항상 1.0)."""
+    n = len(labels)
+    m = np.full((n, n), np.nan)
+    for i in range(n):
+        for j in range(n):
+            ai = bundle.routing_sets.get(labels[i], set())
+            aj = bundle.routing_sets.get(labels[j], set())
+            m[i, j] = _jaccard(ai, aj)
+    return m
+
+
 # =============================================================================
 # 시각화
 # =============================================================================
@@ -539,6 +555,34 @@ def _heatmap_row(fig, gs_row, col_labels: list[str], bundles: list[RunBundle],
                 ax.text(j, i, txt, ha="center", va="center", fontsize=5.5,
                         color="black" if not np.isnan(v) and v > 0.4 else "dimgray")
         ax.set_title(f"{title_prefix}{col_label}", fontsize=8)
+    return im if n_runs > 0 else None
+
+
+def _scenario_heatmap_row(fig, gs_row_spec, bundles: list[RunBundle],
+                           labels: list[str], title_prefix: str):
+    """run별로 하나씩(열=run) labels×labels(probe+시나리오) 자카드 행렬을 그린다.
+
+    _heatmap_row(kind="jaccard")는 "같은 시나리오를 run끼리 비교"(run×run)했지만,
+    이 함수는 "한 run 안에서 시나리오끼리 비교"(scenario×scenario) — 시나리오별로
+    실제로 다른 HI를 선정했는지 보기 위한 본래 의도에 맞춘 버전.
+    """
+    n_runs = len(bundles)
+    inner = gridspec.GridSpecFromSubplotSpec(1, n_runs, subplot_spec=gs_row_spec, wspace=0.7)
+    n_lab = len(labels)
+    im = None
+    for c, b in enumerate(bundles):
+        ax = fig.add_subplot(inner[0, c])
+        m = _scenario_sim_matrix(b, labels)
+        im = ax.imshow(m, vmin=0, vmax=1, cmap="RdYlGn")
+        ax.set_xticks(range(n_lab)); ax.set_xticklabels(labels, rotation=90, fontsize=6)
+        ax.set_yticks(range(n_lab)); ax.set_yticklabels(labels, fontsize=6)
+        for i in range(n_lab):
+            for j in range(n_lab):
+                v = m[i, j]
+                txt = "NaN" if np.isnan(v) else f"{v:.2f}"
+                ax.text(j, i, txt, ha="center", va="center", fontsize=5.5,
+                        color="black" if not np.isnan(v) and v > 0.4 else "dimgray")
+        ax.set_title(f"{title_prefix}{_short_label(b.label)}", fontsize=7.5)
     return im if n_runs > 0 else None
 
 
@@ -614,8 +658,7 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path):
             _scalar_bar_row(fig, [gs[row_i, c] for c in range(len(chunk))], chunk, bundles, scalar_cache)
             scalar_row_i += 1
         elif kind == "jaccard":
-            im1 = _heatmap_row(fig, [gs[row_i, c] for c in range(n_cols)], jaccard_labels, bundles,
-                                "jaccard", "Jaccard — ")
+            im1 = _scenario_heatmap_row(fig, gs[row_i, :], bundles, jaccard_labels, "")
         elif kind == "jacobian":
             im2 = _heatmap_row(fig, [gs[row_i, c] for c in range(n_cols)], col_labels, bundles,
                                 "jacobian", "Jacobian cos — ")

@@ -50,6 +50,12 @@ try:
 except Exception:
     pass
 
+try:
+    from .vqslope import VQSlopeSegmenter
+    REGISTRY["vqslope"] = VQSlopeSegmenter
+except Exception:
+    pass
+
 
 def get_segmenter(name: str, cfg: dict | None = None) -> Segmenter:
     """

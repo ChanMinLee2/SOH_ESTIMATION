@@ -162,7 +162,35 @@ def main():
         "--axis-config", default=None, metavar="JSON",
         help="축 파라미터 JSON (Step 4~7에 전달). 예: '{\"n1\": 0.4, \"n2\": 0.2, \"n_samples\": 4}'",
     )
+    # 단축 인자 (PowerShell JSON 우회) — Step 4~7에 그대로 전달
+    parser.add_argument("--n1",        type=float, default=None,
+                        help="q_frac_wide 구간 크기 (--axis-config 대체, PowerShell 호환)")
+    parser.add_argument("--n2",        type=float, default=None,
+                        help="q_frac_wide 세그먼트 길이 (--axis-config 대체)")
+    parser.add_argument("--n-samples", type=int,   default=None, dest="n_samples",
+                        help="q_frac_wide/vqslope 구간당 세그먼트 수 (--axis-config 대체)")
+    parser.add_argument("--mode",      default=None,
+                        help="vqslope 플래토 검출 모드 dva|ica (--axis-config 대체)")
+    parser.add_argument("--random-segment", action="store_true", dest="random_segment",
+                        help="q_frac_wide/vqslope 구간 내 고정길이 랜덤 창 (--axis-config 대체)")
+    parser.add_argument("--seg-len-pts", type=int, default=None, dest="seg_len_pts",
+                        help="random_segment 시 창의 고정 관측 포인트 수 (기본 20)")
     args = parser.parse_args()
+
+    # 단축 인자 → args.axis_config(JSON) 로 합침. 이후 기존 --axis-config 전달 로직이
+    # 모든 하위 스텝(4~7)에 올바른 JSON을 넘긴다. subprocess는 shell 없이 인자를 그대로
+    # 전달하므로 PowerShell 따옴표 벗김 문제가 발생하지 않는다.
+    if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
+            or args.mode is not None or args.random_segment or args.seg_len_pts is not None):
+        import json as _json
+        _quick: dict = {}
+        if args.n1        is not None: _quick["n1"]        = args.n1
+        if args.n2        is not None: _quick["n2"]        = args.n2
+        if args.n_samples is not None: _quick["n_samples"] = args.n_samples
+        if args.mode      is not None: _quick["mode"]      = args.mode
+        if args.random_segment:        _quick["random_segment"] = True
+        if args.seg_len_pts is not None: _quick["seg_len_pts"] = args.seg_len_pts
+        args.axis_config = _json.dumps(_quick)
 
     to_step = args.to_step if args.to_step is not None else len(STEPS)
 

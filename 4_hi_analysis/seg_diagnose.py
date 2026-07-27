@@ -22,6 +22,16 @@ seg_diagnose.py
 
   --mode all : segment + ic 둘 다 생성
 
+  4. 조건 비교 시각화  --mode compare
+       동일 셀·동일 사이클에 대해 서로 다른 축/파라미터 조건(q_frac_wide n1/n2/N,
+       random_segment 유무, vqslope mode/N 등) 여러 개를 한 장에 세로로 쌓아
+       "같은 데이터가 조건별로 어떻게 잘리는지"를 나란히 비교한다.
+       각 행 = plot_cycle_segments의 [상단] V-t 밴드 패널과 동일한 그림.
+       조건 목록은 JSON 설정 파일(--compare-config, 기본: compare_conditions.json)로 지정
+       — PowerShell에서 여러 조건을 CLI로 전달할 때 생기는 따옴표 깨짐 문제를 회피.
+       조건별 segmenter는 그 자리에서 새로 만들어 실행하므로, 해당 조건의 데이터가
+       아직 _4_data_hi/{axis}/{tag}/ 에 추출되어 있지 않아도 즉시 비교할 수 있다.
+
 사용 예시:
   python 4_hi_analysis/seg_diagnose.py                        # 자동: 모든 hi_features*.pkl 축
   python 4_hi_analysis/seg_diagnose.py --seg-axis protocol    # 특정 축 지정
@@ -31,6 +41,9 @@ seg_diagnose.py
   python 4_hi_analysis/seg_diagnose.py --seg-axis qfrac --cell b1c0 --cycle 10
   python 4_hi_analysis/seg_diagnose.py --seg-axis protocol --no-plot
   python 4_hi_analysis/seg_diagnose.py --seg-axis cluster --no-stats
+  python 4_hi_analysis/seg_diagnose.py --mode compare --dataset HUST --cell HUST_1-8 --cycle 1145
+  python 4_hi_analysis/seg_diagnose.py --mode compare --dataset HUST --cell HUST_1-8 --cycle 1145 \
+      --compare-config 4_hi_analysis/compare_conditions.json
 """
 
 import argparse
@@ -117,6 +130,31 @@ def _t_range_from_q(t_full: np.ndarray, q_full: np.ndarray, q_seg: np.ndarray):
     idx0 = np.clip(idx0, 0, len(t_full) - 1)
     idx1 = np.clip(idx1, idx0, len(t_full) - 1)
     return float(t_full[idx0]), float(t_full[idx1])
+
+
+def _rand_suffix_tag(axis_cfg: dict) -> str:
+    """random_segment 파라미터 → 태그 접미사. hi_correlation._rand_suffix와 동일 규칙(중복 정의)."""
+    if not axis_cfg.get("random_segment", False):
+        return ""
+    return f"_random-L{int(axis_cfg.get('seg_len_pts', 20))}"
+
+
+def _condition_tag(axis: str, axis_cfg: dict) -> str:
+    """--mode compare 조건 표시용 라벨.
+
+    hi_correlation._qfw_tag/_vqslope_tag와 동일 규칙(다른 파일 참조 대신 중복 정의 —
+    이 프로젝트에서 train_scr.py/train_classifier.py도 같은 방식으로 태그 로직을 각자 보유).
+    """
+    if axis == "q_frac_wide":
+        n1 = int(round(axis_cfg.get("n1", 0.4) * 100))
+        n2 = int(round(axis_cfg.get("n2", 0.2) * 100))
+        ns = int(axis_cfg.get("n_samples", 4))
+        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix_tag(axis_cfg)}"
+    if axis == "vqslope":
+        mode = str(axis_cfg.get("mode", "dva")).lower()
+        ns   = int(axis_cfg.get("n_samples", 1))
+        return f"vqslope/{mode}_N-{ns}{_rand_suffix_tag(axis_cfg)}"
+    return f"{axis}/{json.dumps(axis_cfg, ensure_ascii=False)}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1124,6 +1162,421 @@ def plot_ic_windows(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 4. vqslope 존 분리 시각화  (--mode vqzone)  — vqslope 전용
+#    한 사이클에 대해 "왜 여기서 head/mid/tail을 잘랐는가"를 명시적으로 보여준다:
+#      [열1] V vs t (원본)      — head/plateau/tail 색상 밴드
+#      [열2] V vs Q (V-Q curve) — 플래토 진입/이탈(q_entry/q_exit) 세로선 + 존 음영
+#      [열3] |dV/dQ| vs Q       — θ_flat 임계선 + 플래토(|dV/dQ|<θ) 음영
+#    행: 방전 / 충전
+# ─────────────────────────────────────────────────────────────────────────────
+
+# head=hi(급경사초입) / plateau=mid / tail=lo(급경사말단)
+_VQZONE_COLOR = {"head": "#e74c3c", "plateau": "#2ecc71", "tail": "#3498db"}
+_VQZONE_LABEL = {"head": "head (hi, 급경사초입)",
+                 "plateau": "plateau (mid, 평탄)",
+                 "tail": "tail (lo, 급경사말단)"}
+
+
+def _zone_bounds_from_recs(recs: list) -> "tuple[float, float] | None":
+    """세그먼트 meta에서 q_entry/q_exit(플래토 경계) 추출. 없으면 None."""
+    for _, rec in recs:
+        m = rec.meta or {}
+        if "q_entry" in m and "q_exit" in m:
+            return float(m["q_entry"]), float(m["q_exit"])
+    return None
+
+
+def _plot_vqzone_direction(axes_row, arrays, recs, theta_flat: float, title_prefix: str):
+    """한 방향(방전/충전)의 3-패널 그리기. axes_row = [ax_vt, ax_vq, ax_dvdq]."""
+    from common.scenario._curves import _build_vq_curve
+
+    ax_vt, ax_vq, ax_dvdq = axes_row
+    if arrays is None:
+        for ax in axes_row:
+            ax.text(0.5, 0.5, f"{title_prefix}\n데이터 부족", transform=ax.transAxes,
+                    ha="center", va="center"); ax.axis("off")
+        return
+
+    v, i_mag, t, dt, q = arrays          # q = 원본 누적전하 (q_local)
+    t_rel = t - t[0]
+    qm, v_sm, dvdq_sm, q_tot = _build_vq_curve(v, i_mag, dt)
+    rng = _zone_bounds_from_recs(recs)
+
+    # 존 경계를 q_local 축과 시간축 인덱스로 변환
+    if rng is not None:
+        q_entry, q_exit = rng
+        i_entry = int(np.searchsorted(q, q_entry))
+        i_exit  = int(np.searchsorted(q, q_exit))
+        i_entry = np.clip(i_entry, 0, len(t) - 1)
+        i_exit  = np.clip(i_exit, i_entry, len(t) - 1)
+        zone_spans = [("head", 0, i_entry), ("plateau", i_entry, i_exit),
+                      ("tail", i_exit, len(t) - 1)]
+    else:
+        q_entry = q_exit = None
+        zone_spans = []
+
+    # ── 패널 1: V vs t (원본) + 존 밴드 ──────────────────────────────────────
+    ax_vt.plot(t_rel, v, "k-", lw=1.0, alpha=0.7, zorder=3)
+    for zname, a, b in zone_spans:
+        if b > a:
+            ax_vt.axvspan(t_rel[a], t_rel[b], color=_VQZONE_COLOR[zname], alpha=0.22,
+                          label=_VQZONE_LABEL[zname])
+    ax_vt.set_xlabel("time (s, 구간 시작 기준)"); ax_vt.set_ylabel("V [V]")
+    ax_vt.set_title(f"{title_prefix} — V-t (원본) + 존 분리")
+    ax_vt.grid(alpha=0.3)
+    if zone_spans:
+        ax_vt.legend(fontsize=7, loc="best")
+
+    # ── 패널 2: V vs Q (V-Q curve) + 존 경계 ─────────────────────────────────
+    ax_vq.plot(q, v, color="0.6", lw=0.8, alpha=0.5, label="원본 V-Q")
+    fin = np.isfinite(qm) & np.isfinite(v_sm)
+    if fin.any():
+        ax_vq.plot(qm[fin], v_sm[fin], "b-", lw=1.8, label="V-Q (SG 스무딩)")
+    for zname, a, b in zone_spans:
+        if b > a:
+            ax_vq.axvspan(q[a], q[b], color=_VQZONE_COLOR[zname], alpha=0.18)
+    for xq, lbl in [(q_entry, "플래토 진입 q_entry"), (q_exit, "플래토 이탈 q_exit")]:
+        if xq is not None:
+            ax_vq.axvline(xq, color="k", ls="--", lw=1.2, alpha=0.8)
+            ax_vq.text(xq, ax_vq.get_ylim()[1], lbl, fontsize=6.5, rotation=90,
+                       va="top", ha="right", color="k")
+    ax_vq.set_xlabel("Q [Ah] (누적)"); ax_vq.set_ylabel("V [V]")
+    ax_vq.set_title(f"{title_prefix} — V-Q curve + 존 경계")
+    ax_vq.grid(alpha=0.3); ax_vq.legend(fontsize=7, loc="best")
+
+    # ── 패널 3: |dV/dQ| vs Q + θ_flat 임계선 + 플래토 음영 ────────────────────
+    if fin.any():
+        adv = np.abs(dvdq_sm)
+        ax_dvdq.plot(qm[fin], adv[fin], color="#8e44ad", lw=1.6, label="|dV/dQ|")
+        # 플래토 판정: |dV/dQ| < θ_flat
+        plt_mask = fin & (adv < theta_flat)
+        if plt_mask.any():
+            ax_dvdq.scatter(qm[plt_mask], adv[plt_mask], s=18, color="#2ecc71",
+                            zorder=5, label=f"플래토 (|dV/dQ|<{theta_flat:.2f})")
+        ax_dvdq.axhline(theta_flat, color="r", ls="--", lw=1.2,
+                        label=f"θ_flat = {theta_flat:.2f}")
+        for xq in (q_entry, q_exit):
+            if xq is not None:
+                ax_dvdq.axvline(xq, color="k", ls="--", lw=1.0, alpha=0.7)
+    ax_dvdq.set_xlabel("Q [Ah] (누적)"); ax_dvdq.set_ylabel("|dV/dQ| [V/Ah]")
+    ax_dvdq.set_title(f"{title_prefix} — |dV/dQ| + 플래토 판정(θ_flat)")
+    ax_dvdq.grid(alpha=0.3); ax_dvdq.legend(fontsize=7, loc="best")
+
+
+def plot_vqslope_zones(pkl_path: Path, segmenter, spec_names: list,
+                       cycle_id: int, out_path: Path):
+    """vqslope 전용: 한 사이클의 head/plateau/tail 분리 근거를 3-패널×2방향으로 시각화."""
+    with open(pkl_path, "rb") as f:
+        raw = pickle.load(f)
+    df_all  = raw.get("cycles")
+    cell_id = raw.get("meta", {}).get("cell_id", pkl_path.stem)
+    if df_all is None:
+        print(f"  [경고] {pkl_path.name}: cycles 없음"); return
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)
+
+    valid_cycs = sorted(c for c in df_all["cycle"].unique() if c != 0)
+    if not valid_cycs:
+        print("  [경고] 유효 사이클 없음"); return
+    if cycle_id == 0 or cycle_id not in valid_cycs:
+        cycle_id = valid_cycs[len(valid_cycs) // 2]
+        print(f"  → 사이클 미지정/무효 → 중간 사이클 {cycle_id} 사용")
+
+    grp = df_all[df_all["cycle"] == cycle_id]
+    dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
+    chg = grp[grp["phase"] == "charge"].sort_values("time_s")
+    _empty = np.empty(0, dtype=float)
+
+    dis_arrays = dis_recs = None
+    if len(dis) >= 30:
+        v_d, i_d, t_d, dt_d, q_d = _build_arrays(dis)
+        dis_arrays = (v_d, i_d, t_d, dt_d, q_d)
+        dis_recs = [(rec.meta.get("seg_name") or spec_names[rec.scenario_id], rec)
+                    for rec in segmenter.iter_segments(cell_id, cycle_id, v_d, i_d, dt_d, q_d)]
+    chg_arrays = chg_recs = None
+    if len(chg) >= 20:
+        v_c, i_c, t_c, dt_c, q_c = _build_arrays(chg)
+        chg_arrays = (v_c, i_c, t_c, dt_c, q_c)
+        chg_recs = [(rec.meta.get("seg_name") or spec_names[rec.scenario_id], rec)
+                    for rec in segmenter.iter_segments(
+                        cell_id, cycle_id, _empty, _empty, _empty, _empty, v_c, i_c, dt_c, q_c)]
+
+    theta_flat = float(getattr(segmenter, "theta_flat", 0.25))
+    mode = getattr(segmenter, "mode", "dva")
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    _plot_vqzone_direction(axes[0], dis_arrays, dis_recs or [], theta_flat, "방전(discharge)")
+    _plot_vqzone_direction(axes[1], chg_arrays, chg_recs or [], theta_flat, "충전(charge)")
+    fig.suptitle(f"vqslope 존 분리 근거  |  {cell_id}  cycle={cycle_id}  mode={mode}  "
+                 f"θ_flat={theta_flat:.2f}\n"
+                 f"head=hi(급경사초입) / plateau=mid(평탄) / tail=lo(급경사말단)  "
+                 f"— |dV/dQ|가 θ_flat 아래로 떨어지는 구간이 플래토",
+                 fontsize=12, y=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"  vqzone 플롯 저장: {out_path}")
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. 조건 비교 시각화  (--mode compare)
+#    동일 셀·동일 사이클에 대해 여러 축/파라미터 조건을 세로로 쌓아 비교.
+#    각 행은 plot_cycle_segments()의 [상단] V-t 밴드 패널과 동일한 그림이다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seg_len_summary(recs: list) -> dict[str, str]:
+    """시나리오 이름 → 관측 포인트 수 요약 문자열.
+
+    같은 시나리오 이름이 여러 세그먼트(n_samples>1)로 나오면 개수·범위를 함께 표시.
+    이 사이클·이 조건에서 "실제로" 몇 포인트짜리 세그먼트가 만들어졌는지 보여준다 —
+    n2(q_frac_wide) 같은 파라미터는 비율이라 사이클마다 실제 포인트 수가 달라지므로,
+    여기서 계산하는 값이 곧 "이 그림에서의 정의된 구간 길이"다.
+    """
+    by_name: dict[str, list[int]] = {}
+    for sn, rec in recs:
+        by_name.setdefault(sn, []).append(len(rec.v))
+    out: dict[str, str] = {}
+    for sn, lens in by_name.items():
+        if len(lens) == 1:
+            out[sn] = f"n={lens[0]}"
+        elif min(lens) == max(lens):
+            out[sn] = f"n={lens[0]}×{len(lens)}"
+        else:
+            out[sn] = f"n={min(lens)}–{max(lens)}(×{len(lens)})"
+    return out
+
+
+# hi/lo는 서로 겹치지 않으므로(mid과만 겹침) 같은 방향을 공유해도 무방 — hi·mid, mid·lo
+# 인접(겹침 가능) 쌍만 서로 다른 빗금 방향이면 충분하다.
+_ZONE_HATCH = {"hi": "//", "mid": "\\\\", "lo": "//"}
+
+
+def _qfw_zone_frac_bounds(n1: float) -> dict[str, tuple[float, float]]:
+    """q_frac_wide 존 경계 (q_frac 비율, 0~1). hi=[0,n1] / mid=중앙 n1폭 / lo=[1-n1,1].
+    n1 > 1/3이면 존끼리 겹칠 수 있다(설계상 의도된 동작 — SCENARIO_STRATEGY.md 참조)."""
+    return {
+        "hi":  (0.0, n1),
+        "mid": (0.5 - n1 / 2, 0.5 + n1 / 2),
+        "lo":  (1.0 - n1, 1.0),
+    }
+
+
+def _vqslope_zone_q_bounds(recs: list, q_tot: float) -> "dict[str, tuple[float, float]] | None":
+    """vqslope 존 경계 (절대 q, Ah). recs 중 아무 하나의 meta에서 q_entry/q_exit을 꺼낸다
+    (같은 방향의 모든 세그먼트가 같은 플래토 경계를 공유하므로 어느 것이든 상관없다)."""
+    for _, rec in recs:
+        m = rec.meta or {}
+        if "q_entry" in m and "q_exit" in m:
+            qe, qx = float(m["q_entry"]), float(m["q_exit"])
+            return {"hi": (0.0, qe), "mid": (qe, qx), "lo": (qx, q_tot)}
+    return None
+
+
+def _zone_bounds_t(axis: str, axis_cfg: dict, direction: str,
+                    phase_arrays, recs: list) -> "dict[str, tuple[float, float]]":
+    """시나리오별 "존"(세그먼트를 뽑아내는 전체 구간) 경계를 시간(t0,t1)으로 계산.
+
+    개별 세그먼트 길이(_seg_len_summary)와 달리, 존 경계는 n_samples/random_segment와
+    무관하게 n1(q_frac_wide) 또는 플래토 검출(vqslope)만으로 고정된다 — "이 시나리오가
+    원래 정의된 범위가 얼마나 넓은가"를 보여준다.
+    """
+    if phase_arrays is None:
+        return {}
+    _, _, t_p, _, q_p = phase_arrays
+    if len(q_p) == 0:
+        return {}
+    q_tot = float(q_p[-1])
+
+    if axis == "q_frac_wide":
+        n1 = float(axis_cfg.get("n1", 0.4))
+        frac_bounds = _qfw_zone_frac_bounds(n1)
+        q_bounds = {z: (f0 * q_tot, f1 * q_tot) for z, (f0, f1) in frac_bounds.items()}
+    elif axis == "vqslope":
+        q_bounds = _vqslope_zone_q_bounds(recs, q_tot)
+        if q_bounds is None:
+            return {}
+    else:
+        return {}
+
+    out: dict[str, tuple[float, float]] = {}
+    for zone, (q0, q1) in q_bounds.items():
+        t0, t1 = _t_range_from_q(t_p, q_p, np.array([q0, q1]))
+        if t0 is not None:
+            out[f"{direction}_{zone}"] = (t0, t1)
+    return out
+
+
+def _draw_vt_panel(ax, dis_arrays, dis_recs, chg_arrays, chg_recs, color_map, title="",
+                    len_summary: "dict[str, str] | None" = None,
+                    zone_bounds: "dict[str, tuple[float, float]] | None" = None):
+    """V vs time_s 패널: 세그먼트 색상 밴드 오버레이 (plot_condition_comparison 전용).
+
+    plot_cycle_segments()의 [상단] 패널과 같은 시각 문법(회색 배경 곡선 + 색상 밴드 +
+    색상 오버레이 곡선)을 쓰되, 여러 조건을 한 figure에 여러 행으로 쌓을 수 있도록
+    독립 함수로 분리했다. len_summary가 주어지면 범례에 시나리오별 관측 포인트 수를 덧붙이고,
+    zone_bounds가 주어지면 "존" 전체 범위를 옅은 배경 밴드로 먼저 깔아 세그먼트 밴드(진한 색)와
+    구분해서 보여준다 — 진한 밴드=실제 뽑힌 세그먼트, 옅은 밴드=시나리오가 정의된 전체 구간.
+    """
+    ax.set_facecolor("#f8f9fa")
+    ax.set_xlabel("Time [s]", fontsize=9)
+    ax.set_ylabel("Voltage [V]", fontsize=9)
+    ax.tick_params(labelsize=8)
+    if title:
+        ax.set_title(title, fontsize=9, pad=4)
+
+    for phase_arrays, fill_col, line_col, lbl in [
+        (chg_arrays, "#d6eaf8", "#2980b9", "Charge"),
+        (dis_arrays, "#fdf2e9", "#ca6f1e", "Discharge"),
+    ]:
+        if phase_arrays is None:
+            continue
+        v_bg, _, t_bg, _, _ = phase_arrays
+        if len(t_bg) < 10:
+            continue
+        ax.fill_between(t_bg, v_bg.min() - 0.02, v_bg, color=fill_col, alpha=0.2, zorder=0)
+        ax.plot(t_bg, v_bg, color="#cccccc", lw=0.8, zorder=1, alpha=0.9)
+        ax.text((t_bg[0] + t_bg[-1]) / 2, 0.03, lbl, transform=ax.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=8, color=line_col, alpha=0.65)
+
+    if (chg_arrays is not None and dis_arrays is not None
+            and len(chg_arrays[2]) >= 10 and len(dis_arrays[2]) >= 10):
+        ax.axvline(float(chg_arrays[2][-1]), color="#555555", lw=1.2, ls="--", zorder=4, alpha=0.6)
+
+    # ── 존(시나리오 정의 구간) 배경 밴드 — 세그먼트 밴드보다 먼저(아래) 그림 ──────
+    if zone_bounds:
+        for sn, (t0, t1) in zone_bounds.items():
+            c = color_map.get(sn, "black")
+            zone_suffix = sn.rsplit("_", 1)[-1]
+            hatch = _ZONE_HATCH.get(zone_suffix, "//")
+            ax.axvspan(t0, t1, facecolor=c, edgecolor=c, alpha=0.13, zorder=1,
+                       hatch=hatch, linewidth=0)
+            ax.text((t0 + t1) / 2, 0.97, sn, transform=ax.get_xaxis_transform(),
+                    ha="center", va="top", fontsize=5.5, color=c, alpha=0.85, rotation=0)
+
+    legend_added: set = set()
+    handles: list = []
+    for phase_arrays, recs in [(dis_arrays, dis_recs), (chg_arrays, chg_recs)]:
+        if phase_arrays is None:
+            continue
+        _, _, t_p, _, q_p = phase_arrays
+        for sn, rec in recs:
+            c = color_map.get(sn, "black")
+            t0, t1 = _t_range_from_q(t_p, q_p, rec.q)
+            if t0 is not None:
+                ax.axvspan(t0, t1, color=c, alpha=0.35, zorder=2)
+            idx0 = int(np.searchsorted(q_p, rec.q[0], "left"))
+            idx1 = int(np.searchsorted(q_p, rec.q[-1], "right"))
+            t_seg = t_p[idx0:idx1]
+            n = min(len(t_seg), len(rec.v))
+            ax.plot(t_seg[:n], rec.v[:n], color=c, lw=2.3, alpha=0.9, zorder=3)
+            if sn not in legend_added:
+                extra = f"  ({len_summary[sn]})" if len_summary and sn in len_summary else ""
+                handles.append(mpatches.Patch(color=c, label=f"{sn}{extra}"))
+                legend_added.add(sn)
+
+    if handles:
+        ax.legend(handles=handles, fontsize=6.5, loc="upper right", framealpha=0.85,
+                  ncol=min(len(handles), 3))
+
+
+def plot_condition_comparison(
+    pkl_path: Path,
+    conditions: list,          # [{"axis": str, "axis_config": dict, "label": str(optional)}]
+    cycle_id: int,
+    out_path: Path,
+):
+    """동일 셀·동일 사이클의 원시 데이터에 조건별 segmenter를 새로 실행해
+    "같은 데이터가 조건별로 어떻게 잘리는지"를 세로로 쌓아 한 장에 비교한다.
+
+    조건마다 사전 추출된 _4_data_hi/{axis}/{tag}/ 데이터를 읽는 대신, 원시 v/i/t/dt/q
+    배열(한 번만 계산)에 대해 그 자리에서 segmenter.iter_segments()를 실행한다 —
+    아직 추출되지 않은 조건도 즉시 비교 가능하고, 데이터 추출 파이프라인과 완전히 독립적이다.
+    """
+    from common.scenario import get_segmenter
+
+    with open(pkl_path, "rb") as f:
+        raw = pickle.load(f)
+    df_all  = raw.get("cycles")
+    cell_id = raw.get("meta", {}).get("cell_id", pkl_path.stem)
+    if df_all is None:
+        print(f"  [경고] {pkl_path.name}: cycles 없음"); return
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)
+
+    valid_cycs = sorted(c for c in df_all["cycle"].unique() if c != 0)
+    if not valid_cycs:
+        print("  [경고] 유효 사이클 없음"); return
+    if cycle_id == 0 or cycle_id not in valid_cycs:
+        cycle_id = valid_cycs[len(valid_cycs) // 2]
+        print(f"  → 사이클 미지정/무효 → 중간 사이클 {cycle_id} 사용")
+
+    grp = df_all[df_all["cycle"] == cycle_id]
+    dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
+    chg = grp[grp["phase"] == "charge"].sort_values("time_s")
+    _empty = np.empty(0, dtype=float)
+
+    dis_arrays = _build_arrays(dis) if len(dis) >= 30 else None
+    chg_arrays = _build_arrays(chg) if len(chg) >= 20 else None
+    if dis_arrays is None and chg_arrays is None:
+        print(f"  [경고] {cell_id} cyc{cycle_id}: 충/방전 데이터 부족"); return
+
+    n_cond = len(conditions)
+    fig, axes = plt.subplots(n_cond, 1, figsize=(13, 3.0 * n_cond), squeeze=False)
+
+    for row, cond in enumerate(conditions):
+        ax = axes[row][0]
+        axis     = cond["axis"]
+        axis_cfg = cond.get("axis_config", {})
+        label    = cond.get("label") or _condition_tag(axis, axis_cfg)
+
+        try:
+            seg = get_segmenter(axis, {axis: axis_cfg})
+        except Exception as e:
+            ax.text(0.5, 0.5, f"[{label}]\nsegmenter 로드 실패: {e}",
+                    transform=ax.transAxes, ha="center", va="center", color="red", fontsize=9)
+            ax.axis("off")
+            print(f"  [경고] 조건 '{label}' segmenter 로드 실패: {e}")
+            continue
+
+        names     = seg.get_spec().scenario_names
+        color_map = {n: _PALETTE[i % len(_PALETTE)] for i, n in enumerate(names)}
+
+        dis_recs = []
+        if dis_arrays is not None:
+            v_d, i_d, t_d, dt_d, q_d = dis_arrays
+            dis_recs = [(rec.meta.get("seg_name") or names[rec.scenario_id], rec)
+                        for rec in seg.iter_segments(cell_id, cycle_id, v_d, i_d, dt_d, q_d)]
+        chg_recs = []
+        if chg_arrays is not None:
+            v_c, i_c, t_c, dt_c, q_c = chg_arrays
+            chg_recs = [(rec.meta.get("seg_name") or names[rec.scenario_id], rec)
+                        for rec in seg.iter_segments(
+                            cell_id, cycle_id, _empty, _empty, _empty, _empty, v_c, i_c, dt_c, q_c)]
+
+        n_total = len(dis_recs) + len(chg_recs)
+        len_summary = _seg_len_summary(dis_recs + chg_recs)
+        zone_bounds = {
+            **_zone_bounds_t(axis, axis_cfg, "dis", dis_arrays, dis_recs),
+            **_zone_bounds_t(axis, axis_cfg, "chg", chg_arrays, chg_recs),
+        }
+        _draw_vt_panel(
+            ax, dis_arrays, dis_recs, chg_arrays, chg_recs, color_map,
+            title=f"[{row}] {label}   (세그먼트 {n_total}개: dis={len(dis_recs)}, chg={len(chg_recs)})",
+            len_summary=len_summary,
+            zone_bounds=zone_bounds,
+        )
+
+    fig.suptitle(f"세그멘테이션 조건 비교  |  {cell_id}  cycle={cycle_id}",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"  조건 비교 플롯 저장: {out_path}")
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1200,6 +1653,14 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
                 plot_ic_windows(cell_pkl, seg, names, axis, ic_path,
                                 n_cycles=args.n_cycles)
 
+            if args.mode in ("vqzone", "all"):
+                if axis != "vqslope":
+                    print("  [경고] --mode vqzone은 --seg-axis vqslope 전용입니다. 건너뜀.")
+                else:
+                    vz_path = out_dir / f"{ds}_{cell_stem}_vqzone_cyc{args.cycle or 'auto'}.png"
+                    print(f"\n=== vqzone 시각화: {cell_stem}  cycle={args.cycle or 'auto'} ===")
+                    plot_vqslope_zones(cell_pkl, seg, names, args.cycle, vz_path)
+
         else:
             # ── 미지정: 랜덤 N셀 × 랜덤 사이클 ────────────────────────────
             n_rand = min(args.n_random, len(pkls))
@@ -1244,6 +1705,33 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
                 print(f"\n=== IC 커브 시각화: {cell_stem}  n_cycles={args.n_cycles} ===")
                 plot_ic_windows(cell_pkl, seg, names, axis, ic_path,
                                 n_cycles=args.n_cycles)
+
+            if args.mode in ("vqzone", "all"):
+                if axis != "vqslope":
+                    print("  [경고] --mode vqzone은 --seg-axis vqslope 전용입니다. 건너뜀.")
+                else:
+                    print(f"\n=== vqzone 시각화: 랜덤 {n_rand}셀 × 랜덤 사이클 (seed={args.seed}) ===")
+                    for cell_pkl in sampled_pkls:
+                        try:
+                            with open(cell_pkl, "rb") as fh:
+                                raw_meta = pickle.load(fh)
+                            df_tmp = raw_meta.get("cycles")
+                            if df_tmp is None:
+                                continue
+                            if "phase" not in df_tmp.columns:
+                                df_tmp = _add_phase(df_tmp)
+                            dis_tmp = df_tmp[df_tmp["phase"] == "discharge"]
+                            valid_cycs = [int(c) for c in df_tmp["cycle"].unique()
+                                          if c != 0 and int((dis_tmp["cycle"] == c).sum()) >= 30]
+                            if not valid_cycs:
+                                continue
+                            chosen_cyc = int(rng.choice(valid_cycs))
+                        except Exception as e:
+                            print(f"  [건너뜀] {cell_pkl.stem}: {e}"); continue
+                        cell_stem = cell_pkl.stem
+                        vz_path = out_dir / f"{ds}_{cell_stem}_vqzone_cyc{chosen_cyc}.png"
+                        print(f"  {cell_stem}  cycle={chosen_cyc}")
+                        plot_vqslope_zones(cell_pkl, seg, names, chosen_cyc, vz_path)
 
 
 def _run_qfracwide_survival(axis_cfg: dict, n_workers: int = 1) -> None:
@@ -1308,6 +1796,41 @@ def _run_qfracwide_survival(axis_cfg: dict, n_workers: int = 1) -> None:
     print(f"  원시 통계 저장(재사용용): {raw_path}")
 
 
+def _run_compare(args) -> None:
+    """--mode compare 진입점: JSON 설정 파일의 조건 목록을 읽어 plot_condition_comparison 호출."""
+    cfg_path = Path(args.compare_config) if args.compare_config else (STEP_DIR / "compare_conditions.json")
+    if not cfg_path.exists():
+        print(f"[ERROR] 비교 조건 설정 파일 없음: {cfg_path}")
+        print("  --compare-config PATH 로 조건 리스트 JSON 파일을 지정하거나,")
+        print(f"  {STEP_DIR / 'compare_conditions.json'} 을 만들어 두세요.")
+        return
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        conditions = json.load(f)
+    if not conditions:
+        print(f"[ERROR] {cfg_path}: 조건이 비어 있음")
+        return
+
+    if not args.cell:
+        print("[ERROR] --mode compare 는 --cell 지정이 필수입니다 (비교 대상 셀).")
+        return
+
+    ds       = args.dataset.upper()
+    root     = MIT_DIR if ds == "MIT" else HUST_DIR
+    cell_pkl = root / f"{args.cell}.pkl"
+    if not cell_pkl.exists():
+        print(f"[ERROR] {cell_pkl} 없음")
+        return
+
+    print(f"\n=== 조건 비교: {cell_pkl.stem}  cycle={args.cycle or 'auto'}  "
+          f"(조건 {len(conditions)}개, 설정파일={cfg_path}) ===")
+    for c in conditions:
+        print(f"  - {c.get('label') or _condition_tag(c['axis'], c.get('axis_config', {}))}")
+
+    out_dir  = STEP_DIR / "outputs" / "seg_diagnose" / "compare"
+    out_path = out_dir / f"{ds}_{cell_pkl.stem}_cyc{args.cycle or 'auto'}_compare.png"
+    plot_condition_comparison(cell_pkl, conditions, args.cycle, out_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="시나리오 세그먼트 진단 (통계 + 시각화)")
     parser.add_argument("--seg-axis",    type=str, default=None,
@@ -1322,8 +1845,13 @@ def main():
     parser.add_argument("--cycle",       type=int, default=0,
                         help="사이클 플롯 대상 사이클 번호 (0이면 첫 번째 유효 사이클)")
     parser.add_argument("--mode",         type=str, default="segment",
-                        choices=["segment", "ic", "all"],
-                        help="시각화 모드: segment(기본)|ic|all")
+                        choices=["segment", "ic", "vqzone", "compare", "all"],
+                        help="시각화 모드: segment(기본)|ic|vqzone(vqslope 존 분리 근거)|"
+                             "compare(여러 축/파라미터 조건 비교, --cell 필수)|all")
+    parser.add_argument("--compare-config", type=str, default=None,
+                        help="--mode compare 전용: 비교할 조건 목록 JSON 파일 경로 "
+                             "(기본: 4_hi_analysis/compare_conditions.json). "
+                             "형식: [{\"axis\":\"q_frac_wide\",\"axis_config\":{...},\"label\":\"(선택)\"}, ...]")
     parser.add_argument("--n-cycles",    type=int, default=6,
                         help="IC 모드에서 표시할 대표 사이클 수 (기본: 6)")
     parser.add_argument("--n-random",    type=int, default=10,
@@ -1344,6 +1872,11 @@ def main():
     parser.add_argument("--n-samples", type=int, default=None, dest="n_samples",
                         help="q_frac_wide n_samples (--survival-stats용)")
     args = parser.parse_args()
+
+    if args.mode == "compare":
+        _run_compare(args)
+        print("\n완료!")
+        return
 
     try:
         axis_cfg: dict = json.loads(args.axis_config)

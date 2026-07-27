@@ -78,12 +78,18 @@ def _find_latest_run_dir(output_dir: Path) -> Path | None:
 
 def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
     """spec.axis + spec.params → _4_data_hi 하위 경로 문자열."""
+    p = spec.params or {}
+    # random_segment=True 면 _random-L{seg_len_pts} suffix (hi_correlation._rand_suffix 와 동일)
+    rand_sfx = f"_random-L{int(p.get('seg_len_pts', 20))}" if p.get("random_segment", False) else ""
     if spec.axis == "q_frac_wide":
-        p  = spec.params or {}
         n1 = int(round(p.get("n1", 0.4) * 100))
         n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
-        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}"
+        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}"
+    if spec.axis == "vqslope":
+        mode = str(p.get("mode", "dva")).lower()
+        ns   = int(p.get("n_samples", 1))
+        return f"vqslope/{mode}_N-{ns}{rand_sfx}"
     return spec.axis
 
 
@@ -193,7 +199,7 @@ def main() -> None:
     _data_cfg = cfg.setdefault("data", {})
     _axis_dir = _axis_dir_from_spec(spec)
 
-    if spec.axis == "q_frac_wide":
+    if spec.axis in ("q_frac_wide", "vqslope"):
         # spec.params에서 태그 재구성 — 저장된 config 경로(구버전)보다 항상 우선
         _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
         _data_cfg["data_dir"]     = f"_4_data_hi/{_axis_dir}/cycle"

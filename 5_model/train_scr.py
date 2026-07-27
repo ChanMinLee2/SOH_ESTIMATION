@@ -403,12 +403,20 @@ def main() -> None:
     spec = _segmenter.get_spec()
     print(f"[train] seg-axis={_axis_name}  n_scenarios={spec.n_scenarios}  n_classes={spec.n_classes}")
 
+    # random_segment=True 면 태그에 _random-L{seg_len_pts} suffix (hi_correlation._rand_suffix 와 동일)
+    _rand_sfx = (f"_random-L{int(_axis_cfg.get('seg_len_pts', 20))}"
+                 if _axis_cfg.get("random_segment", False) else "")
     # q_frac_wide: n1/n2/n_samples 별 하위 디렉터리 결정
     if _axis_name == "q_frac_wide":
         _n1 = int(round(_axis_cfg.get("n1", 0.4) * 100))
         _n2 = int(round(_axis_cfg.get("n2", 0.2) * 100))
         _ns = int(_axis_cfg.get("n_samples", 4))
-        _axis_dir = f"q_frac_wide/n1-{_n1}%_n2-{_n2}%_N-{_ns}"
+        _axis_dir = f"q_frac_wide/n1-{_n1}%_n2-{_n2}%_N-{_ns}{_rand_sfx}"
+    elif _axis_name == "vqslope":
+        # vqslope: mode(dva/ica)·n_samples 별 하위 디렉터리
+        _vqmode = str(_axis_cfg.get("mode", "dva")).lower()
+        _ns     = int(_axis_cfg.get("n_samples", 1))
+        _axis_dir = f"vqslope/{_vqmode}_N-{_ns}{_rand_sfx}"
     else:
         _axis_dir = _axis_name
 
@@ -426,12 +434,17 @@ def main() -> None:
         cfg.setdefault("training", {})["seed"] = args.seed
 
     _AXIS_SHORT  = {"qfrac": "qfr", "protocol": "prot", "vwindow": "vwin",
-                    "rcs": "rcs", "cluster": "clst", "q_frac_wide": "qfw"}
+                    "rcs": "rcs", "cluster": "clst", "q_frac_wide": "qfw",
+                    "vqslope": "vqs"}
     _MODEL_SHORT = {"mlp": "mlp", "transformer": "tr", "i_transformer": "itr",
                     "resnet_tab": "res", "ft_transformer": "ftt"}
     _axis_short  = _AXIS_SHORT.get(_axis_name, _axis_name[:4])
     if _axis_name == "q_frac_wide":
         _axis_short += f"_{_n1}%_{_n2}%"
+    elif _axis_name == "vqslope":
+        _axis_short += f"_{_vqmode}"
+    if _rand_sfx:
+        _axis_short += "_rand"
     _reg_model   = cfg.get("model", {}).get("regression_model", "mlp")
     _model_short = _MODEL_SHORT.get(_reg_model, _reg_model[:3])
     _phase_tag   = f"p{args.phase}" if args.phase else "p?"

@@ -32,6 +32,7 @@ from typing import Iterator
 import numpy as np
 
 from .base import ScenarioSpec, SegmentRecord, Segmenter
+from ._random_seg import sample_random_windows
 # CV 구간 제거 비활성화로 더 이상 사용하지 않음 (iter_segments 참고)
 # from .vwindow import _detect_cv_start
 
@@ -59,6 +60,9 @@ class QFracWideSegmenter(Segmenter):
         min_pts: int = 10,
         cv_v_thresh: float = 3.59,
         cv_cc_frac: float = 0.80,
+        random_segment: bool = False,   # True: 구간 내 고정길이 랜덤 창 (설계 A)
+        seg_len_pts: int = 20,          # 랜덤 창의 고정 관측 포인트 수 (q_tot 무관)
+        random_seed: int = 42,          # 랜덤 재현성 시드
     ):
         if not (0.35 <= n1 <= 0.45):
             raise ValueError(
@@ -68,12 +72,18 @@ class QFracWideSegmenter(Segmenter):
             raise ValueError(
                 f"q_frac_wide: 0 < n2 < n1 필요. 현재 n1={n1}, n2={n2}"
             )
+        if random_segment and seg_len_pts < min_pts:
+            raise ValueError(
+                f"q_frac_wide: random_segment 시 seg_len_pts({seg_len_pts}) >= min_pts({min_pts}) 필요.")
         self.n1 = n1
         self.n2 = n2
         self.n_samples = n_samples
         self.min_pts = min_pts
         self.cv_v_thresh = cv_v_thresh
         self.cv_cc_frac = cv_cc_frac
+        self.random_segment = bool(random_segment)
+        self.seg_len_pts = int(seg_len_pts)
+        self.random_seed = int(random_seed)
 
         # 진단용 카운터 (min_pts 생존율 계산) — iter_segments의 공개 동작에는 영향 없음.
         # scenario_name -> count. reset_counters()로 초기화 후 여러 셀에 걸쳐 누적 가능.
@@ -83,12 +93,15 @@ class QFracWideSegmenter(Segmenter):
         # 이 분포만 있으면 재스캔 없이 임의의 min_pts 값에서 생존율을
         # (arr >= threshold).mean() 으로 즉시 계산할 수 있다.
         self.candidate_n_points: dict[str, list] = {}
+        # random_segment 누락 통계 — scenario_name -> [covered_pts, total_pts]
+        self.coverage: dict[str, list] = {}
 
     def reset_counters(self) -> None:
         """카운터 초기화 (seg_diagnose.py 등 진단 스크립트용)."""
         self.n_attempted = {}
         self.n_yielded = {}
         self.candidate_n_points = {}
+        self.coverage = {}
 
     # ── 구간 정의 ────────────────────────────────────────────────────────────
 
@@ -127,6 +140,7 @@ class QFracWideSegmenter(Segmenter):
         cell_id: str,
         cycle: int,
         seg_local_start: int,
+        rand_rng: "np.random.Generator | None" = None,
     ) -> tuple[list[SegmentRecord], int]:
         q_tot = float(q[-1]) if len(q) > 0 else 0.0
         if q_tot < 0.05:
@@ -140,12 +154,43 @@ class QFracWideSegmenter(Segmenter):
 
         for zone_name, latent_class in _ZONES:
             zone_start, zone_end = bounds[zone_name]
+            scenario_id = spec.routing[dir_idx][latent_class]
+            sname       = _SCENARIO_NAMES[scenario_id]
+
+            if self.random_segment:
+                # ── 랜덤 모드: 구간 안에서 고정길이(seg_len_pts) 랜덤 창 (설계 A) ──
+                # 구간 경계는 q_frac(기존 방식). 창 길이는 관측 포인트 고정 → q_tot 무관.
+                is_last = (zone_name == "lo")   # lo=[1-n1, 1.0] → 상한 포함
+                lo_q, hi_q = zone_start * q_tot, zone_end * q_tot
+                zmask = ((q >= lo_q) & (q <= hi_q)) if is_last else ((q >= lo_q) & (q < hi_q))
+                zone_idx = np.where(zmask)[0]
+                windows, cov, tot = sample_random_windows(
+                    zone_idx, self.seg_len_pts, self.n_samples, self.min_pts, rand_rng)
+                c = self.coverage.setdefault(sname, [0, 0])
+                c[0] += cov; c[1] += tot
+                for w in windows:
+                    n_pts = int(len(w))
+                    self.n_attempted[sname] = self.n_attempted.get(sname, 0) + 1
+                    self.candidate_n_points.setdefault(sname, []).append(n_pts)
+                    if n_pts < self.min_pts:
+                        continue
+                    self.n_yielded[sname] = self.n_yielded.get(sname, 0) + 1
+                    records.append(SegmentRecord(
+                        cell_id=cell_id, cycle=cycle, seg_local_id=seg_local,
+                        scenario_id=scenario_id, latent_class=latent_class,
+                        direction=direction,
+                        v=v[w], i=i[w], dt=dt[w], q=q[w],
+                        meta={"zone": zone_name, "random": True,
+                              "q_frac_lo": float(q[w[0]] / q_tot),
+                              "q_frac_hi": float(q[w[-1]] / q_tot)},
+                    ))
+                    seg_local += 1
+                continue
+
+            # ── 기존(고정폭 격자) 모드 ──────────────────────────────────────────
             starts = self._start_positions(zone_start, zone_end)
             if len(starts) == 0:
                 continue
-
-            scenario_id = spec.routing[dir_idx][latent_class]
-            sname       = _SCENARIO_NAMES[scenario_id]
 
             for start_qf in starts:
                 end_qf = start_qf + self.n2
@@ -188,8 +233,18 @@ class QFracWideSegmenter(Segmenter):
             class_names=["lo", "mid", "hi"],
             routing=_ROUTING,
             classifier_default="mlp_probe",
-            params={"n1": self.n1, "n2": self.n2, "n_samples": self.n_samples},
+            params={"n1": self.n1, "n2": self.n2, "n_samples": self.n_samples,
+                    "random_segment": self.random_segment, "seg_len_pts": self.seg_len_pts},
         )
+
+    def _rng_for(self, cell_id: str, cycle: int, direction: int) -> "np.random.Generator | None":
+        """random_segment 재현성: (seed, cell, cycle, direction) 기반 결정론적 rng."""
+        if not self.random_segment:
+            return None
+        import zlib
+        dir_key  = 0 if direction > 0 else 1   # 시드는 비음수여야 함
+        cell_key = zlib.crc32(str(cell_id).encode())   # 프로세스 무관 결정론적 해시
+        return np.random.default_rng([self.random_seed, cell_key, int(cycle), dir_key])
 
     def iter_segments(
         self,
@@ -209,17 +264,14 @@ class QFracWideSegmenter(Segmenter):
         # 방전
         if len(dis_v) >= self.min_pts:
             recs, seg_local = self._extract(
-                dis_v, dis_i, dis_dt, dis_q, -1, cell_id, cycle, seg_local)
+                dis_v, dis_i, dis_dt, dis_q, -1, cell_id, cycle, seg_local,
+                rand_rng=self._rng_for(cell_id, cycle, -1))
             yield from recs
 
         # 충전 (CC+CV 전체 사용 — 100% = 해당 사이클 실제 완충 용량과 일치시키기 위해
         # CV 구간 제거 로직을 비활성화함. cv_v_thresh/cv_cc_frac는 더 이상 쓰이지 않음.)
-        # cv_start = _detect_cv_start(chg_v, chg_i, self.cv_v_thresh, self.cv_cc_frac)
-        # cc_v  = chg_v[:cv_start]
-        # cc_i  = chg_i[:cv_start]
-        # cc_dt = chg_dt[:cv_start]
-        # cc_q  = chg_q[:cv_start]
         if chg_v is not None and len(chg_v) >= self.min_pts:
             recs, seg_local = self._extract(
-                chg_v, chg_i, chg_dt, chg_q, +1, cell_id, cycle, seg_local)
+                chg_v, chg_i, chg_dt, chg_q, +1, cell_id, cycle, seg_local,
+                rand_rng=self._rng_for(cell_id, cycle, +1))
             yield from recs

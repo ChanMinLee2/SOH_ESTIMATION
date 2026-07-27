@@ -109,7 +109,7 @@ A123 APR18650M1A 셀 기준 (공칭 용량 1.1–1.2Ah, 5mAh bin):
 
 ---
 
-## 4. 구현된 6가지 축
+## 4. 구현된 7가지 축
 
 모든 축은 `common/scenario/` 패키지 내 `Segmenter` ABC를 구현한다.
 
@@ -124,6 +124,7 @@ seg = get_segmenter("vwindow",      cfg={"vwindow":      {"n_windows": 3}})
 seg = get_segmenter("rcs",          cfg={"rcs":          {"n_samples": 6, "window": 0.3}})
 seg = get_segmenter("cluster",      cfg={"cluster":      {"n_fine": 10, "k_range": [2, 8]}})
 seg = get_segmenter("q_frac_wide",  cfg={"q_frac_wide":  {"n1": 0.4, "n2": 0.2, "n_samples": 4}})
+seg = get_segmenter("vqslope",      cfg={"vqslope":      {"mode": "dva", "n_samples": 1}})
 
 spec: ScenarioSpec = seg.get_spec()   # ScenarioSpec 반환
 ```
@@ -132,7 +133,7 @@ spec: ScenarioSpec = seg.get_spec()   # ScenarioSpec 반환
 ```python
 @dataclass
 class ScenarioSpec:
-    axis: str               # "qfrac" | "protocol" | "vwindow" | "rcs" | "cluster" | "q_frac_wide"
+    axis: str               # "qfrac" | "protocol" | "vwindow" | "rcs" | "cluster" | "q_frac_wide" | "vqslope"
     n_scenarios: int        # Stage B gate 개수
     scenario_names: list    # 길이 = n_scenarios
     n_classes: int          # Stage A 분류 클래스 수
@@ -620,6 +621,182 @@ python 5_model/train_scr.py --phase 1 --seg-axis q_frac_wide
 
 ---
 
+### 축 6: `vqslope` — 기울기(dV/dQ · dQ/dV) 형상 기반 세그멘터
+
+`common/scenario/vqslope.py` — `q_frac_wide`(누적 전하량 기반)의 **라벨 얽힘 한계**를 극복하기 위해 설계된 축. 존 경계를 "얼마나 진행됐는가(누적 Q)"가 아니라 **"지금 곡선 형상이 어떤 상태인가(순간 기울기)"**로 정의한다.
+
+#### 설계 동기 — 왜 누적량이 아니라 순간량인가
+
+`q_frac_wide`는 존 경계를 `q_frac = q / q_tot`로 정의한다. 그런데 이 세그먼트를 만들려면 이미 `q_tot`(해당 사이클의 실측 총 전하량 ≈ SOH와 1:1 대응)을 알아야 한다. 즉 **존 라벨 자체가 라벨(SOH)의 함수**로 만들어진다. 이 경우 Stage A 분류기가 형상으로 존을 잘 맞혀도, "형상에서 위치를 복원했다"인지 "형상에서 SOH 단서를 감지해 존을 우회 추정했다"인지 구분할 수 없다.
+
+세그멘테이션 축의 요건은 두 가지다:
+- **(i) 라벨의 함수가 아닐 것** — `q_frac`은 여기서 탈락
+- **(ii) 스니펫 내용만으로 존을 복원 가능할 것** — 그 복원 가능성을 측정하는 것이 정확히 Stage A 분류 정확도
+
+`vqslope`는 경계를 **플래토 진입/이탈이라는 상전이 이벤트의 위치**로 정의한다. `vwindow`(고정 전압 경계)가 노화에 강건한 것과 같은 이유로, LFP 플래토 진입/이탈 전압은 노화에서 거의 변하지 않는다. `vqslope`는 그 랜드마크를 절대 전압값이 아니라 **"기울기가 평탄한가/급한가"라는 형상 판정**으로 잡으므로, 미세한 전압 시프트에도 더 안정적일 것으로 기대된다.
+
+#### 존 정의 (곡선 진행 순서 = q_local 증가 방향)
+
+LFP 방전/충전 곡선은 **급경사 → 평탄(플래토) → 급경사** 순서다. 이 3상태로 3분할한다:
+
+| 존 | 정의 | 물리 | latent_class |
+|----|------|------|:---:|
+| **head** | 곡선 시작 ~ 플래토 진입 | 급경사 초입 (상단 숄더/니 진입) | 2 (hi) |
+| **plateau** | 플래토 진입 ~ 이탈 (`\|dV/dQ\| < θ_flat`) | LFP 2상 공존 평탄 구간 | 1 (mid) |
+| **tail** | 플래토 이탈 ~ 곡선 끝 | 급경사 말단 (하단 급강하/CV) | 0 (lo) |
+
+이 `(head=hi, plateau=mid, tail=lo)` 매핑은 `q_frac_wide`의 `(hi=[0,n1], mid=중앙, lo=[1-n1,1])` 컨벤션과 정확히 정렬되어, **모델 구조(n_scenarios=6, routing=[[0,1,2],[5,4,3]])를 그대로 재사용**한다. 하류(회귀기·분류기·평가) 코드 무수정.
+
+#### 모드 — DVA(dV/dQ) vs ICA(dQ/dV)
+
+두 모드 모두 "플래토의 q_local 범위 `[q_entry, q_exit]`"를 구하고, 이후 3분할은 공통이다. 플래토 범위를 찾는 방법만 다르다:
+
+| 모드 | 플래토 검출 방법 | 재사용 함수 |
+|------|-----------------|-----------|
+| **dva** (기본) | `\|dV/dQ\| < θ_flat`인 Q-빈들의 q 범위 | `_build_vq_curve` |
+| **ica** | dQ/dV 주 피크의 FWHM(v_left..v_right) 안에 드는 원시 포인트의 q 범위 | `_build_ica_seg`, `_peak_fwhm_asym` |
+
+> `θ_flat`는 `q_frac_wide`/`lfp_plateau_frac`이 쓰는 값과 동일한 `THETA_FLAT = 0.25 V/Ah`를 기본으로 하며, `common/scenario/_curves.py`에 단일 소스로 정의된다.
+
+#### 실측 검증 결과 (MIT 5셀 + HUST 5셀, n_samples=1)
+
+**DVA 모드 — 플래토 검출 실패 0건, 전 시나리오 생존율 99.5~100%.** `q_frac_wide`가 HUST `chg_mid`/`chg_hi`를 (짧은 n2에서) 완전히 누락(0%)시킨 문제가 `vqslope-dva`에서는 발생하지 않는다.
+
+| 모드 | MIT | HUST | 비고 |
+|------|-----|------|------|
+| **dva** | 전 시나리오 100% | 99.5~100% | 안정적 — **권장 기본 모드** |
+| **ica** | 99.8~100% | `dis_hi` **0%** (pts_median=2) | 방전 dis_hi에서 피크 FWHM이 과도하게 좁게 잡혀 plateau 존 붕괴 |
+
+→ **`mode: dva`를 기본으로 권장.** `ica`는 옵션으로 유지하되 위 약점(방향/구간별 피크 검출 불안정)을 감안해야 한다.
+
+#### 실패 모드 — 반드시 진단할 것
+
+플래토 미검출(짧은 창, 노이즈) 시 그 방향의 3존이 **통째로 스킵**된다. 이는 `q_frac_wide`의 `min_pts` 절벽과 형태만 다른 같은 성격의 표본 손실이다. `VQSlopeSegmenter`는 이를 위해 `n_plateau_fail`(방향별 검출 실패 수)과 `candidate_n_points`(q_frac_wide와 동일 인터페이스) 카운터를 제공한다.
+
+#### 파라미터
+
+| 파라미터 | 기본값 | 의미 |
+|---------|--------|------|
+| `mode` | `"dva"` | `"dva"`(dV/dQ) \| `"ica"`(dQ/dV) |
+| `n_samples` | `1` | 존당 세그먼트 수 (존 내부 q_local 균등 등분; 1이면 존 전체 1개) |
+| `theta_flat` | `0.25` | dva 플래토 임계값 `\|dV/dQ\| < θ` |
+| `min_pts` | `10` | 세그먼트 최소 원시 포인트 수 |
+
+#### 실행 방법
+
+```powershell
+# Step 4: HI 추출 (mode·n_samples 별 고유 경로: _4_data_hi/vqslope/{mode}_N-{ns}/)
+python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --axis-config '{"vqslope": {"mode": "dva", "n_samples": 1}}'
+
+# Step 5: 학습 (scr.yaml → scenario.axis: vqslope, axis_config: {mode: dva, n_samples: 1})
+python 5_model/train_scr.py --phase 1
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/MMDD_HHMM_p1_vqs_dva
+```
+
+> 데이터 경로 태그: `_4_data_hi/vqslope/{mode}_N-{n_samples}/{seg,cycle}` (예: `dva_N-1`). `q_frac_wide`와 동일하게 파라미터가 데이터 내용을 바꾸므로 파라미터별로 분리 저장된다.
+
+#### ScenarioSpec 예시
+
+```json
+{
+  "axis": "vqslope",
+  "n_scenarios": 6,
+  "scenario_names": ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"],
+  "n_classes": 3,
+  "class_names": ["lo", "mid", "hi"],
+  "routing": [[0, 1, 2], [5, 4, 3]],
+  "classifier_default": "mlp_probe",
+  "params": {"mode": "dva", "n_samples": 1, "theta_flat": 0.25}
+}
+```
+
+#### 장단점
+
+| 장점 | 단점 |
+|------|------|
+| **존 경계가 라벨(SOH)의 함수가 아님** — q_frac_wide의 라벨 얽힘 한계 극복 | 플래토 미검출 시 그 방향 3존 통째 스킵 (진단 필수) |
+| DVA 모드는 HUST 포함 전 시나리오 99.5%+ 생존 (q_frac_wide 절벽 없음) | ica 모드는 방향/구간별 피크 검출 불안정 (dis_hi 붕괴) |
+| n_scenarios=6, routing 동일 → 모델 하류 코드 무수정 재사용 | 존 길이가 데이터로 결정되어 사이클마다 가변 (고정 폭 아님) |
+| 순간 기울기 기반 → 배포 시 스니펫만으로 존 복원 가능성 측정(Stage A) | dV/dQ 계산이 짧은 창에서 노이즈 민감 (min_pts로 방어) |
+
+---
+
+### 공통 옵션: `random_segment` — 구간 내 고정길이 랜덤 창 (q_frac_wide · vqslope)
+
+`q_frac_wide`와 `vqslope` 두 축에 공통으로 제공되는 **옵션**이다. 기본값은 `False`(기존 격자/등분 방식 그대로)이며, 켜면 각 시나리오 구간(존)을 벗어나지 않는 범위에서 **랜덤 위치의 고정길이 세그먼트**를 추출한다. `common/scenario/_random_seg.py`의 `sample_random_windows`를 두 축이 공유한다.
+
+#### 설계 동기 — 세분화(n_samples↑) 시 짧은 존 붕괴 문제
+
+`n_samples`를 키워 존을 등분하면 짧은 존(특히 vqslope의 head, q_frac_wide의 좁은 구간)이 `min_pts`를 못 넘겨 붕괴한다. 실측(vqslope dva, MIT+HUST 전량)에서 n_samples=4부터 HUST `chg_hi`가 0%로 소멸했다. 랜덤 모드는 등분 대신 **고정 관측 포인트 길이 창**을 랜덤 위치로 뽑고, 존이 창보다 짧으면 존 전체를 1개로 쓰는 fallback을 취해 이 붕괴를 완화한다.
+
+#### 라벨(SOH) 독립성을 지키는 3대 원칙
+
+랜덤 모드가 vqslope의 라벨-독립 강점(및 q_frac_wide의 구조)을 훼손하지 않으려면 세 원칙을 지켜야 하며, 구현이 이를 강제한다:
+
+1. **창 길이 = 고정 관측 포인트 수(`seg_len_pts`)** — 그 사이클의 실측 총 용량 `q_tot`(≈SOH)을 참조하지 않는다. 스니펫 내용만으로 계산 가능하고 배포 시에도 동일 획득 가능하므로 라벨의 함수가 아니다.
+2. **클리핑 절대 금지** — 존이 창보다 짧아도 창 길이를 존에 맞춰 줄이지 않는다(줄이면 세그먼트 길이·위치가 SOH의 결정론적 함수가 되어 가짜 HI–SOH 상관 유입). 대신 존 전체 1개 fallback.
+3. **경계는 각 축 원래 방식 유지** — 존/구간 경계는 vqslope=형상 랜드마크, q_frac_wide=q_frac로 결정(랜덤 모드가 바꾸지 않음). 창 위치만 존 안에서 랜덤.
+
+> **리뷰어 방어 요지**: 유일한 약점은 "고정 포인트 수가 데이터셋 샘플링 밀도에 의존"하는 것인데, 이는 라벨 누수가 아니라 **데이터셋 편향**이고 창 위치가 아니라 창 폭에만 영향을 준다. 아래 누락 비율 공개로 투명하게 방어한다.
+
+#### 누락 비율(coverage) 기록
+
+랜덤 추출은 존의 일부 포인트를 어느 창에도 포함시키지 않을 수 있다. 이 **샘플링되지 못한 포인트 비율**을 시나리오별로 집계해 `_4_data_hi/{axis_dir}/coverage_stats.txt`에 저장한다(재현성·투명성). 형식:
+
+```
+[HUST]
+  시나리오        covered       total     커버율    누락율
+  chg_hi           41,536      54,892    75.7%    24.3%
+  chg_mid          61,263     219,472    27.9%    72.1%
+  ...
+```
+
+#### 파라미터
+
+| 파라미터 | 기본값 | 의미 |
+|---------|--------|------|
+| `random_segment` | `False` | True면 랜덤 창 모드 (False면 기존 격자/등분) |
+| `seg_len_pts` | `20` | 랜덤 창의 고정 관측 포인트 수 (`>= min_pts` 필수, q_tot 무관) |
+| `random_seed` | `42` | 재현성 시드 (`(seed, crc32(cell_id), cycle, dir)` 결정론적 — 멀티프로세싱 안전) |
+| `n_samples` | (축 기본) | 존당 뽑을 랜덤 창 개수 |
+
+#### 재현성
+
+시드는 `(random_seed, crc32(cell_id), cycle, direction)`로 결정된다. `crc32`를 쓰므로 Python `hash()`의 `PYTHONHASHSEED` 의존성이 없어 **멀티프로세싱 워커 간에도 동일 결과**를 보장한다.
+
+#### 저장 경로 구분
+
+`random_segment=True`면 데이터 경로 태그에 `_random-L{seg_len_pts}` suffix가 붙어 non-random 데이터와 분리 저장된다. 이 규칙은 `hi_correlation.py`·`train_scr.py`·`train_classifier.py` 세 곳에서 일관 적용된다.
+
+| | 데이터 경로 |
+|---|---|
+| vqslope non-random | `_4_data_hi/vqslope/dva_N-1/` |
+| vqslope random | `_4_data_hi/vqslope/dva_N-2_random-L20/` |
+| q_frac_wide random | `_4_data_hi/q_frac_wide/n1-45%_n2-20%_N-2_random-L30/` |
+
+#### 실행 방법 (PowerShell 단축 인자)
+
+```powershell
+# vqslope + random (따옴표 없이) — 데이터 → _4_data_hi/vqslope/dva_N-2_random-L20/
+python run_pipeline.py 4 --seg-axis vqslope --mode dva --n-samples 2 --random-segment --seg-len-pts 20
+
+# Step 4만 단독
+python 4_hi_analysis/hi_correlation.py --force --seg-axis vqslope --mode dva --n-samples 2 --random-segment --seg-len-pts 20 --workers 8
+```
+
+> ⚠️ **Step 4와 Step 5(학습)의 axis_config는 반드시 일치해야 한다.** Step 4를 옵션 없이 돌리면 non-random 기본 경로에 데이터가 생기는데, scr.yaml이 `random_segment: true`면 학습이 `_random-L{n}` 경로를 찾다가 "No data loaded"로 실패한다. `run_pipeline.py`로 단축 인자와 함께 한 번에 돌리면 Step 4~7에 동일 config가 전달되어 이 불일치가 원천 차단된다. (Step 4 시작 시 출력되는 "HI 추출 실행 조건"의 `데이터 저장 경로`가 scr.yaml 기대값과 같은지 눈으로 확인 가능)
+
+#### 장단점
+
+| 장점 | 단점 |
+|------|------|
+| 짧은 존 붕괴 완화 (fallback으로 최소 1개 보장) | 랜덤이라 존 일부가 학습에 미사용 (누락 비율 발생) |
+| 창 길이 고정 → 라벨(SOH) 독립성 유지 | 고정 포인트 수가 데이터셋 샘플링 밀도에 의존 (편향, 누수 아님) |
+| 데이터 증강 효과 (한 존에서 여러 랜덤 창) | seg_len_pts·n_samples 조합 탐색 필요 |
+| 두 축 공통 + 기존 구조 무손상(기본 False) | 누락 비율을 리뷰어에 반드시 보고해야 함 |
+
+---
+
 ## 5. 축 선택 및 실행 방법
 
 ### CLI 인터페이스
@@ -688,20 +865,25 @@ _4_data_hi/
 
 ## 6. 축 비교 요약
 
-| 항목 | `qfrac` | `protocol` | `vwindow` | `rcs` | `cluster` | `q_frac_wide` |
-|------|---------|------------|-----------|-------|-----------|--------------|
-| 경계 근거 | 임의 q_frac 분할 | 논문 프로토콜 CC 전환 | IC 전압 상전이 | 랜덤 샘플링 | K-means 클러스터 | 파라미터 구간 균등격자 |
-| n_scenarios | 6 | 6 (max_steps=3) | **7** (n_windows=3+cv) | 6 또는 2 | 가변 (k_range) | 6 |
-| 분류기 기본 | mlp_probe | rule | rule | mlp_probe | centroid | mlp_probe |
-| `fit()` 필요 | ✗ | ✗ | ✗ (LFP 고정 경계) | ✗ | ✓ | ✗ |
-| 열화 불변 경계 | ✗ | ✓ (프로토콜 고정) | ✓ (전압 고정) | ✓ | △ | ✓ |
-| MIT/HUST 경계 동일 | ✓ | 방향별 상이¹ | ✓ (동일 V범위) | ✓ | 데이터 의존 | ✓ (n1,n2 동일) |
-| 구간 겹침 | ✗ | ✗ | ✗ | △ (중심 binning) | — | ✓ (n1>0.5 시) |
-| 세그먼트 수/사이클 | 3–6 | max_steps×2 | (2n+1)×1 | n_samples | n_fine | 3×n_samples |
-| 리뷰어 설득력 | 기준선 | 높음 (논문 인용) | 높음 (물리 해석) | 중간 (Deng 재현) | 높음 (if 일치) | 중간 (rcs 개선) |
-| 구현 리스크 | **완료** | **완료** | **완료** | **완료** | **완료** | **완료** |
+| 항목 | `qfrac` | `protocol` | `vwindow` | `rcs` | `cluster` | `q_frac_wide` | `vqslope` |
+|------|---------|------------|-----------|-------|-----------|--------------|----------|
+| 경계 근거 | 임의 q_frac 분할 | 논문 프로토콜 CC 전환 | IC 전압 상전이 | 랜덤 샘플링 | K-means 클러스터 | 파라미터 구간 균등격자 | dV/dQ 플래토 진입/이탈 |
+| 경계 기준량 | 누적(Q) | 순간(I 전환) | 순간(V) | 누적(Q) | 형상 통계 | 누적(Q) | **순간(기울기)** |
+| n_scenarios | 6 | 6 (max_steps=3) | **7** (n_windows=3+cv) | 6 또는 2 | 가변 (k_range) | 6 | 6 |
+| 분류기 기본 | mlp_probe | rule | rule | mlp_probe | centroid | mlp_probe | mlp_probe |
+| `fit()` 필요 | ✗ | ✗ | ✗ (LFP 고정 경계) | ✗ | ✓ | ✗ | ✗ |
+| 열화 불변 경계 | ✗ | ✓ (프로토콜 고정) | ✓ (전압 고정) | ✓ | △ | ✓ | ✓ (플래토 전이) |
+| 라벨(SOH) 독립 경계² | ✗ | ✓ | ✓ | ✗ | △ | ✗ | ✓ |
+| MIT/HUST 경계 동일 | ✓ | 방향별 상이¹ | ✓ (동일 V범위) | ✓ | 데이터 의존 | ✓ (n1,n2 동일) | ✓ (형상 기준) |
+| 세그먼트 수/사이클 | 3–6 | max_steps×2 | (2n+1)×1 | n_samples | n_fine | 3×n_samples | 3×n_samples |
+| 리뷰어 설득력 | 기준선 | 높음 (논문 인용) | 높음 (물리 해석) | 중간 (Deng 재현) | 높음 (if 일치) | 중간 (rcs 개선) | 높음 (라벨 독립) |
+| 구현 리스크 | **완료** | **완료** | **완료** | **완료** | **완료** | **완료** | **완료** |
 
 > ¹ protocol 축: MIT는 chg_step1이 있고 dis_step2는 1개, HUST는 chg_step2=0. 두 데이터셋에서 시나리오 인덱스가 가리키는 물리 체계가 달라 크로스 DS 학습 시 step 레이블 혼선 위험.
+>
+> ² **라벨(SOH) 독립 경계**: 존 경계가 SOH의 함수인지 여부. 누적량(Q) 기반 축은 `q_tot`(≈SOH)을 알아야 세그먼트를 만들 수 있어 라벨 얽힘이 있고(Stage A가 위치 복원인지 SOH 우회추정인지 구분 불가), 순간량 기반 축(vwindow/vqslope/protocol)은 이 문제에서 자유롭다. §4 축 6 참조.
+>
+> ³ **`random_segment` 옵션**: `q_frac_wide`·`vqslope` 두 축은 구간 내 고정길이 랜덤 창 추출 옵션을 지원한다(기본 False). 세분화 시 짧은 존 붕괴 완화 + 데이터 증강용이며, 라벨 독립성을 지키는 3원칙(고정 포인트 창·클리핑 금지·경계 불변)과 누락 비율 공개를 갖춘다. §4 "공통 옵션: random_segment" 참조.
 
 ---
 
