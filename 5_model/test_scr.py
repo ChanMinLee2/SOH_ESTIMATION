@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,13 @@ def _parse_args() -> argparse.Namespace:
                         "미지정 시 run_dir/classifier/clf_best.pt 자동 탐색")
     p.add_argument("--rep-cells",       nargs="+", default=None)
     p.add_argument("--device",          default="auto")
+    p.add_argument("--charge-m",    type=int, default=None,
+                   help="충전 probe 상위 m개 (yaml classifier.charge_probe_m 오버라이드)")
+    p.add_argument("--discharge-m", type=int, default=None,
+                   help="방전 probe 상위 m개 (yaml classifier.discharge_probe_m 오버라이드)")
+    p.add_argument("--scen-k",      type=int, default=None,
+                   help="시나리오별 scen HI 수 (yaml regression.scen_k_count 오버라이드). "
+                        "다른 k로 학습된 checkpoint를 평가할 때 필요")
     return p.parse_args()
 
 
@@ -82,6 +90,14 @@ def main() -> None:
     print(f"[test] device={device}")
 
     cfg = load_config(str(PROJECT_ROOT / args.config))
+
+    # m/k 오버라이드 (다른 m/k로 학습된 checkpoint를 같은 --config로 평가할 때)
+    if args.charge_m is not None:
+        cfg.setdefault("classifier", {})["charge_probe_m"] = args.charge_m
+    if args.discharge_m is not None:
+        cfg.setdefault("classifier", {})["discharge_probe_m"] = args.discharge_m
+    if args.scen_k is not None:
+        cfg.setdefault("regression", {})["scen_k_count"] = args.scen_k
 
     output_dir = PROJECT_ROOT / cfg["data"]["output_dir"]
     ckpt_path  = (Path(args.checkpoint) if args.checkpoint
@@ -142,38 +158,73 @@ def main() -> None:
     auto_mk     = cfg.get("classifier", {}).get("is_auto_mk_selection",
                   cls_cfg.get("is_auto_mk_selection", False))
 
-    # gate 마스크 로드
-    ch_mask, dis_mask = _load_probe_masks(probe_json, charge_m, discharge_m, auto=auto_mk)
-    scen_masks        = _load_scen_masks(scen_json, spec.n_scenarios, N_HI, scen_k, auto=auto_mk)
-
-    if probe_json: print(f"[test] probe gate JSON: {probe_json}")
-    if scen_json:  print(f"[test] scen  gate JSON: {scen_json}")
-    if not probe_json and not scen_json:
-        print("[test] gates JSON 없음 — L0 게이트 그대로 사용")
-
-    # ------------------------------------------------------------------
-    # 모델 재구성
-    # ------------------------------------------------------------------
-    state_keys   = set(ckpt["model_state"].keys())
-    ckpt_has_l0  = ("charge_probe_gate.log_alpha" in state_keys or
-                    "probe_gate.log_alpha" in state_keys)   # legacy compat
-
     m_cfg = cfg_saved.get("model", cfg.get("model", {}))
-    model = SCRModel(
-        d_probe=m_cfg.get("d_probe", 64),
-        d_head=m_cfg.get("d_head", 128),
-        dropout=m_cfg.get("dropout", 0.1),
-        charge_probe_mask=ch_mask,
-        discharge_probe_mask=dis_mask,
-        scen_masks=scen_masks,
-        model_cfg=m_cfg,
-        spec=spec,
-    )
-    strict_load = not (ckpt_has_l0 and ch_mask is not None)
-    missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=strict_load)
-    if unexpected:
-        print(f"[test] gate 파라미터 무시 (JSON 마스크 사용): {len(unexpected)}개")
-    model.eval()
+    _is_raw_mode = m_cfg.get("regression_model") == "raw_mlp"
+
+    if _is_raw_mode:
+        # raw_mlp 모드: HI 게이트가 아예 없으므로 마스크 로드를 건너뛴다.
+        print("[test] raw_mlp 모드 checkpoint 감지 — HI 게이트/분류기 없이 RawMLPModel로 평가")
+        ch_mask = dis_mask = scen_masks = None
+
+        from models.raw_mlp_model import RawMLPModel
+        model = RawMLPModel(
+            d_head=m_cfg.get("d_head", 128),
+            dropout=m_cfg.get("dropout", 0.1),
+            model_cfg=m_cfg,
+            spec=spec,
+        )
+        model.load_state_dict(ckpt["model_state"], strict=True)
+        model.eval()
+    else:
+        # gate 마스크 로드
+        ch_mask, dis_mask = _load_probe_masks(probe_json, charge_m, discharge_m, auto=auto_mk)
+        scen_masks        = _load_scen_masks(scen_json, spec.n_scenarios, N_HI, scen_k, auto=auto_mk)
+
+        if probe_json: print(f"[test] probe gate JSON: {probe_json}")
+        if scen_json:  print(f"[test] scen  gate JSON: {scen_json}")
+        if not probe_json and not scen_json:
+            print("[test] gates JSON 없음 — L0 게이트 그대로 사용")
+
+        # ------------------------------------------------------------------
+        # 모델 재구성
+        # ------------------------------------------------------------------
+        state_keys   = set(ckpt["model_state"].keys())
+        ckpt_has_l0  = ("charge_probe_gate.log_alpha" in state_keys or
+                        "probe_gate.log_alpha" in state_keys)   # legacy compat
+
+        # cap_head 구조를 yaml이 아니라 checkpoint 가중치 자체에서 추론 — 예전 Phase 1
+        # checkpoint는 model_cfg가 누락된 채 학습돼(버그, train_scr.py에서 수정됨)
+        # mlp_hidden_dims와 무관하게 항상 [d_head, d_head//2] 기본 shape로 저장돼 있다.
+        # yaml의 mlp_hidden_dims를 그대로 믿고 재구성하면 size mismatch로 로드에 실패한다.
+        _cap_dims = sorted(
+            (int(_m.group(1)), ckpt["model_state"][k].shape[0])
+            for k in state_keys
+            if (_m := re.match(r"cap_head\.net\.(\d+)\.weight$", k))
+        )
+        _m_cfg_for_build = m_cfg
+        if _cap_dims:
+            _inferred_hidden = [d for _, d in _cap_dims[:-1]]  # 마지막 레이어(출력 dim=1) 제외
+            if _inferred_hidden and _inferred_hidden != list(m_cfg.get("mlp_hidden_dims") or []):
+                print(f"[test] cap_head 구조를 checkpoint 가중치에서 추론: "
+                      f"mlp_hidden_dims={_inferred_hidden} (yaml 설정과 다름 — 이 checkpoint는 "
+                      f"과거 구조로 학습됨)")
+                _m_cfg_for_build = {**m_cfg, "mlp_hidden_dims": _inferred_hidden}
+
+        model = SCRModel(
+            d_probe=m_cfg.get("d_probe", 64),
+            d_head=m_cfg.get("d_head", 128),
+            dropout=m_cfg.get("dropout", 0.1),
+            charge_probe_mask=ch_mask,
+            discharge_probe_mask=dis_mask,
+            scen_masks=scen_masks,
+            model_cfg=_m_cfg_for_build,
+            spec=spec,
+        )
+        strict_load = not (ckpt_has_l0 and ch_mask is not None)
+        missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=strict_load)
+        if unexpected:
+            print(f"[test] gate 파라미터 무시 (JSON 마스크 사용): {len(unexpected)}개")
+        model.eval()
 
     # ------------------------------------------------------------------
     # 대표 셀 선정
@@ -209,7 +260,11 @@ def main() -> None:
     rs_cfg = cfg.get("test", {})
     _clf_ckpt_path = (Path(args.classifier_ckpt) if args.classifier_ckpt
                       else run_dir / "classifier" / "clf_best.pt")
-    if _clf_ckpt_path.exists():
+    if _is_raw_mode:
+        # RawMLPModel은 seg_idx를 직접 입력받아 회귀 — 분류기 기반 라우팅이 무의미하므로
+        # 설령 classifier/clf_best.pt가 남아 있어도(예: Step 8 수동 실행) 무시하고 oracle만 평가.
+        print("[test] raw_mlp 모드 — 분류기 로드 생략, oracle 모드만 평가")
+    elif _clf_ckpt_path.exists():
         try:
             _clf_ckpt = torch.load(_clf_ckpt_path, map_location="cpu", weights_only=False)
         except TypeError:
@@ -270,13 +325,14 @@ def main() -> None:
     _curve_mode = "hard" if has_clf else "oracle"
     evaluator._plot_capacity_curves(test_modes[_curve_mode]["_pred"])
 
-    # Routing heatmap
-    probe_sel = _selected_from_masks(ch_mask, dis_mask)   # union for heatmap
-    scen_sel  = ({s: scen_masks[s].nonzero(as_tuple=False).squeeze(1).tolist()
-                  for s in range(spec.n_scenarios)} if scen_masks is not None else None)
-    evaluator.plot_routing_heatmap(routing_dir,
-                                   probe_sel=probe_sel,
-                                   scen_sel=scen_sel)
+    # Routing heatmap — raw_mlp는 HI 게이트/선택 자체가 없어 스킵 (heatmap이 무의미)
+    if not _is_raw_mode:
+        probe_sel = _selected_from_masks(ch_mask, dis_mask)   # union for heatmap
+        scen_sel  = ({s: scen_masks[s].nonzero(as_tuple=False).squeeze(1).tolist()
+                      for s in range(spec.n_scenarios)} if scen_masks is not None else None)
+        evaluator.plot_routing_heatmap(routing_dir,
+                                       probe_sel=probe_sel,
+                                       scen_sel=scen_sel)
 
     # Laplace UQ (train_scr.py Phase 2에서 uq.enabled=true 시 생성됨) — oracle 회귀 기준
     uq_ckpt = run_dir / "checkpoints" / "laplace_uq.pt"

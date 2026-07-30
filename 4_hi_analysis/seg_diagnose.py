@@ -139,6 +139,30 @@ def _rand_suffix_tag(axis_cfg: dict) -> str:
     return f"_random-L{int(axis_cfg.get('seg_len_pts', 20))}"
 
 
+def _adaptive_suffix_tag(axis_cfg: dict) -> str:
+    """adaptive_samples=True 면 태그 접미사(_adaptive-th{max_overlap%}), 아니면 빈 문자열.
+
+    q_abs 전용 — max_overlap이 다르면 존별 n_k가 달라져 결과가 달라지므로, 켜고 끄거나
+    max_overlap을 바꿔가며 비교할 때 출력 폴더가 서로 덮어쓰지 않도록 구분한다.
+    (hi_correlation.py._qabs_tag 등 하위 파이프라인에는 아직 이 태그가 반영되지 않음 —
+    adaptive_samples가 이번 세션에 새로 추가된 옵션이라 seg_diagnose 쪽만 우선 반영.)
+    """
+    if not axis_cfg.get("adaptive_samples", False):
+        return ""
+    ov = int(round(axis_cfg.get("max_overlap", 0.50) * 100))
+    return f"_adaptive-th{ov}"
+
+
+def _qabs_tag(axis_cfg: dict) -> str:
+    """q_abs 파라미터 → 파일/디렉터리 식별 태그. hi_correlation._qabs_tag와 동일 규칙
+    (+ adaptive_samples 접미사, 위 _adaptive_suffix_tag 참조)."""
+    ms = int(round(axis_cfg.get("mid_start", 0.20) * 100))
+    me = int(round(axis_cfg.get("mid_end", 0.50) * 100))
+    sl = int(round(axis_cfg.get("seg_len", 0.15) * 100))
+    ns = int(axis_cfg.get("n_samples", 4))
+    return f"ms-{ms}%_me-{me}%_sl-{sl}%_N-{ns}{_rand_suffix_tag(axis_cfg)}{_adaptive_suffix_tag(axis_cfg)}"
+
+
 def _condition_tag(axis: str, axis_cfg: dict) -> str:
     """--mode compare 조건 표시용 라벨.
 
@@ -150,6 +174,8 @@ def _condition_tag(axis: str, axis_cfg: dict) -> str:
         n2 = int(round(axis_cfg.get("n2", 0.2) * 100))
         ns = int(axis_cfg.get("n_samples", 4))
         return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix_tag(axis_cfg)}"
+    if axis == "q_abs":
+        return f"q_abs/{_qabs_tag(axis_cfg)}"
     if axis == "vqslope":
         mode = str(axis_cfg.get("mode", "dva")).lower()
         ns   = int(axis_cfg.get("n_samples", 1))
@@ -1613,6 +1639,16 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
     if axis == "q_frac_wide":
         dir_name = (f"q_frac_wide_n1-{int(round(seg.n1*100))}%"
                     f"_n2-{int(round(seg.n2*100))}%_N-{seg.n_samples}")
+    elif axis == "q_abs":
+        # seg(실제 생성된 segmenter)의 해석된 값을 쓴다 — q_frac_wide와 같은 패턴으로,
+        # axis_cfg에 값이 없을 때의 기본값이 _qabs_tag와 어긋날 위험을 없앤다.
+        adaptive_cfg = {"adaptive_samples": seg.adaptive_samples, "max_overlap": seg.max_overlap}
+        dir_name = (
+            f"q_abs_ms-{int(round(seg.mid_start*100))}%"
+            f"_me-{int(round(seg.mid_end*100))}%"
+            f"_sl-{int(round(seg.seg_len*100))}%_N-{seg.n_samples}"
+            f"{_adaptive_suffix_tag(adaptive_cfg)}"
+        )
     else:
         dir_name = axis
     out_dir = STEP_DIR / "outputs" / "seg_diagnose" / dir_name

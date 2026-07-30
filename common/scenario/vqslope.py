@@ -23,13 +23,13 @@ common/scenario/vqslope.py — 축: 기울기(dV/dQ · dQ/dV) 형상 기반 세�
   시프트에도 더 안정적일 것으로 기대된다.
 
 [존 정의 — 곡선 진행 순서(q_local 증가 방향)]
-  head    : 곡선 시작 ~ 플래토 진입    (|dV/dQ| 큼, 급경사 초입)  → latent_class 2 (hi)
+  head    : 곡선 시작 ~ 플래토 진입    (|dV/dQ| 큼, 급경사 초입)  → latent_class 2
   plateau : 플래토 진입 ~ 이탈          (|dV/dQ| < θ_flat, 평탄)   → latent_class 1 (mid)
-  tail    : 플래토 이탈 ~ 곡선 끝        (|dV/dQ| 큼, 급경사 말단)  → latent_class 0 (lo)
+  tail    : 플래토 이탈 ~ 곡선 끝        (|dV/dQ| 큼, 급경사 말단)  → latent_class 0
 
-  이 (head=hi, mid=mid, tail=lo) 매핑은 q_frac_wide 의 (hi=[0,n1], mid=중앙,
-  lo=[1-n1,1]) 컨벤션과 정확히 정렬되어, 모델 구조(n_scenarios=6, routing)를
-  그대로 재사용한다.
+  이 (head, mid, tail) 매핑은 q_frac_wide 의 (hi=[0,n1], mid=중앙, lo=[1-n1,1])
+  컨벤션과 정확히 정렬되어, 모델 구조(n_scenarios=6, routing)를 그대로 재사용한다
+  — routing 도 q_frac_wide 와 동일하게 SOC 정합성 수정을 적용했다(아래 참조).
 
 [모드] DVA(dV/dQ) vs ICA(dQ/dV)
   두 모드 모두 "플래토의 q_local 범위 [q_entry, q_exit]"를 구하고 이후 3분할은
@@ -37,9 +37,14 @@ common/scenario/vqslope.py — 축: 기울기(dV/dQ · dQ/dV) 형상 기반 세�
     dva : |dV/dQ| < θ_flat 인 Q-빈들의 q 범위.
     ica : dQ/dV 주 피크의 FWHM(v_left..v_right) 안에 드는 원시 포인트의 q 범위.
 
-[시나리오 구조 — q_frac_wide 와 동일]
+[시나리오 구조 — q_frac_wide 와 동일 (2026-07-30 routing SOC 정합성 수정 포함)]
   chg_lo(0) chg_mid(1) chg_hi(2) | dis_hi(3) dis_mid(4) dis_lo(5)
-  routing = [[0, 1, 2], [5, 4, 3]]
+  routing = [[2, 1, 0], [5, 4, 3]]
+  head(곡선 시작=충전 초반/방전 초반)는 충전이면 SOC 낮음(→chg_lo), 방전이면
+  SOC 높음(→dis_hi)이어야 한다. 예전 routing=[[0,1,2],[5,4,3]] 은 head(latent=2)를
+  충전에서 scenario_id=2="chg_hi" 로 배정해 이름과 실제 SOC가 반대였다(방전은
+  우연히 맞았음) — q_frac_wide 와 동일한 버그였다. routing[0]을 [2,1,0]으로
+  고쳐 head(latent=2)→chg_lo(0) 가 되도록 정정했다.
 
 [실패 모드 — 반드시 진단할 것]
   플래토 미검출(짧은 창, 노이즈) 시 그 방향의 3존이 통째로 스킵된다. 이는
@@ -62,7 +67,7 @@ from ._curves import _build_vq_curve, _build_ica_seg, _peak_fwhm_asym, THETA_FLA
 from ._random_seg import sample_random_windows
 
 _SCENARIO_NAMES = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
-_ROUTING = [[0, 1, 2], [5, 4, 3]]
+_ROUTING = [[2, 1, 0], [5, 4, 3]]  # SOC 정합성 수정 — 모듈 docstring 참조
 
 # (zone_name, latent_class) — 곡선 진행 순서(q_local 증가): head=hi, plateau=mid, tail=lo
 _ZONES: list[tuple[str, int]] = [

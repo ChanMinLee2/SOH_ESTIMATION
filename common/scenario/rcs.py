@@ -13,6 +13,16 @@ assign:
 이중 용도:
   - 학습 축으로 사용하거나
   - test_scr.py --eval-axis rcs --eval-n N 에서 임의 윈도우 강건성 샘플러로 재사용
+
+[SOC 정합성 — 2026-07-30 수정]
+  _bin_class 는 q_frac(그 방향 진행률) 중심값을 그대로 lo(0)/mid(1)/hi(2)에
+  매핑한다 — q_frac≈0(그 방향 시작점)이 lo. 충전이면 시작점=SOC 낮음이라 이름이
+  맞지만(chg_lo), 방전이면 시작점=배터리가 아직 꽉 찬 SOC 높은 시점이라 "lo"라는
+  이름이 반대가 된다. 예전 routing=[[0,1,2],[5,4,3]] 은 q_frac_wide 에서 가져온
+  것인데, q_frac_wide 는 정반대 컨벤션(q_frac≈0 이 hi)이라 그 routing 이 거기선
+  방전에서 맞았을 뿐 여기 재사용할 근거가 아니었다. routing[1]을 [3,4,5]로 고쳐
+  class0(lo, 방전 시작=SOC 높음)→dis_hi(3), class2(hi, 방전 끝=SOC 낮음)→dis_lo(5)
+  가 되도록 정정했다 — 충전(routing[0])은 원래도 맞았으므로 그대로 둠.
 """
 
 from __future__ import annotations
@@ -64,7 +74,7 @@ class RCSSegmenter(Segmenter):
         if self.assign == "position_bin":
             n_classes = 3
             class_names = ["lo", "mid", "hi"]
-            routing = [[0, 1, 2], [5, 4, 3]]
+            routing = [[0, 1, 2], [3, 4, 5]]  # SOC 정합성 수정 — 모듈 docstring 참조
             n_scenarios = 6
             scenario_names = ["chg_lo", "chg_mid", "chg_hi",
                               "dis_hi", "dis_mid", "dis_lo"]

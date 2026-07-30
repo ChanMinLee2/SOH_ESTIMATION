@@ -56,6 +56,18 @@ try:
 except Exception:
     pass
 
+try:
+    from .q_abs import QAbsSegmenter
+    REGISTRY["q_abs"] = QAbsSegmenter
+except Exception:
+    pass
+
+try:
+    from .full_cycle import FullCycleSegmenter
+    REGISTRY["full_cycle"] = FullCycleSegmenter
+except Exception:
+    pass
+
 
 def get_segmenter(name: str, cfg: dict | None = None) -> Segmenter:
     """
@@ -80,6 +92,7 @@ __all__ = [
     "Segmenter",
     "QFracSegmenter",
     "QFracWideSegmenter",
+    "QAbsSegmenter",
     "REGISTRY",
     "get_segmenter",
 ]

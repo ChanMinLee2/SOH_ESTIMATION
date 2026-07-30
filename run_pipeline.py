@@ -16,6 +16,7 @@ LFP SOH Prediction 전체 파이프라인 실행기.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MODEL_OUTPUT_DIR = ROOT / "_5_data_model_scr"
+_RUN_DIR_RE = re.compile(r"_p(\d+)_")  # train_scr.py 명명 규칙: {MMDD_HHMM}_p{phase}_...
 
 # (번호, 이름, 스크립트 경로, 기본 추가 인자, --workers 지원 여부)
 STEPS = [
@@ -54,15 +56,24 @@ def _snapshot_run_dirs() -> set[Path]:
     return {d for d in MODEL_OUTPUT_DIR.iterdir() if d.is_dir()}
 
 
-def _find_new_run_dir(before: set[Path]) -> Path | None:
-    """스냅샷 이후 새로 생긴 run 디렉터리 반환. 없으면 가장 최신 dir."""
+def _find_new_run_dir(before: set[Path], phase: int | None = None) -> Path | None:
+    """스냅샷 이후 새로 생긴 run 디렉터리 반환. 없으면 가장 최신 run 디렉터리.
+
+    train_scr.py가 만드는 run 디렉터리 이름 패턴('_p{phase}_' 포함)에 맞는 것만
+    후보로 삼는다 — 이 필터가 없으면 파이프라인 실행 도중 우연히 mtime이 더 최근으로
+    갱신된 무관한 폴더(사용자가 수동으로 정리/이동해 만든 폴더 등)를 잘못 골라
+    --gates-from/--run-dir/--checkpoint 에 엉뚱한 경로가 들어갈 수 있다.
+    phase 지정 시 해당 phase(_p{phase}_)만 후보로 제한.
+    """
     if not MODEL_OUTPUT_DIR.exists():
         return None
-    after = {d for d in MODEL_OUTPUT_DIR.iterdir() if d.is_dir()}
+    after = {d for d in MODEL_OUTPUT_DIR.iterdir() if d.is_dir() and _RUN_DIR_RE.search(d.name)}
+    if phase is not None:
+        after = {d for d in after if f"_p{phase}_" in d.name}
     new = after - before
     if new:
         return max(new, key=lambda d: d.stat().st_mtime)
-    # fallback: 가장 최근 수정 디렉터리
+    # fallback: 가장 최근 수정 run 디렉터리
     all_dirs = sorted(after, key=lambda d: d.stat().st_mtime)
     return all_dirs[-1] if all_dirs else None
 
@@ -175,13 +186,37 @@ def main():
                         help="q_frac_wide/vqslope 구간 내 고정길이 랜덤 창 (--axis-config 대체)")
     parser.add_argument("--seg-len-pts", type=int, default=None, dest="seg_len_pts",
                         help="random_segment 시 창의 고정 관측 포인트 수 (기본 20)")
+    # q_abs 전용 단축 인자 (정격용량 비율) — Step 4~7에 그대로 전달
+    parser.add_argument("--mid-start", type=float, default=None, dest="mid_start",
+                        help="q_abs mid 존 시작 (정격용량 비율, 기본 0.2, --axis-config 대체)")
+    parser.add_argument("--mid-end",   type=float, default=None, dest="mid_end",
+                        help="q_abs mid 존 끝 (정격용량 비율, 기본 0.5, --axis-config 대체)")
+    parser.add_argument("--seg-len",   type=float, default=None, dest="seg_len",
+                        help="q_abs 세그먼트 길이 (정격용량 비율, 기본 0.15, --axis-config 대체)")
+    parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
+                        help="충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외 (Step 4/6/7/8 전달). "
+                             "Step 4는 결과를 '_ccOnly' 접미사 경로에 저장하고, "
+                             "Step 6/7/8은 동일 접미사로 해당 데이터를 찾는다.")
+    # m/k 오버라이드 (Step 6~7에 그대로 전달 — train_scr.py --charge-m/--discharge-m/--scen-k)
+    parser.add_argument("--charge-m",    type=int, default=None,
+                        help="충전 probe 상위 m개 (yaml charge_probe_m 오버라이드, Step 6~7 전달)")
+    parser.add_argument("--discharge-m", type=int, default=None,
+                        help="방전 probe 상위 m개 (yaml discharge_probe_m 오버라이드, Step 6~7 전달)")
+    parser.add_argument("--scen-k",      type=int, default=None,
+                        help="시나리오별 scen HI 수 (yaml scen_k_count 오버라이드, Step 6~7 전달)")
+    parser.add_argument("--phase1-lr",   type=float, default=None,
+                        help="Phase 1 peak LR (yaml training.lr 오버라이드, Step 6에만 전달)")
+    parser.add_argument("--phase2-lr",   type=float, default=None,
+                        help="Phase 2 peak LR (yaml training.lr 오버라이드, Step 7에만 전달). "
+                             "Phase 1/2가 yaml lr을 공유하므로 Phase 2만 낮추고 싶을 때 사용")
     args = parser.parse_args()
 
     # 단축 인자 → args.axis_config(JSON) 로 합침. 이후 기존 --axis-config 전달 로직이
     # 모든 하위 스텝(4~7)에 올바른 JSON을 넘긴다. subprocess는 shell 없이 인자를 그대로
     # 전달하므로 PowerShell 따옴표 벗김 문제가 발생하지 않는다.
     if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
-            or args.mode is not None or args.random_segment or args.seg_len_pts is not None):
+            or args.mode is not None or args.random_segment or args.seg_len_pts is not None
+            or args.mid_start is not None or args.mid_end is not None or args.seg_len is not None):
         import json as _json
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
@@ -190,6 +225,9 @@ def main():
         if args.mode      is not None: _quick["mode"]      = args.mode
         if args.random_segment:        _quick["random_segment"] = True
         if args.seg_len_pts is not None: _quick["seg_len_pts"] = args.seg_len_pts
+        if args.mid_start is not None: _quick["mid_start"] = args.mid_start
+        if args.mid_end   is not None: _quick["mid_end"]   = args.mid_end
+        if args.seg_len   is not None: _quick["seg_len"]   = args.seg_len
         args.axis_config = _json.dumps(_quick)
 
     to_step = args.to_step if args.to_step is not None else len(STEPS)
@@ -217,6 +255,18 @@ def main():
         print(f"  gates-from  : {args.gates_from}")
     if args.checkpoint:
         print(f"  checkpoint  : {args.checkpoint}")
+    if args.exclude_cv:
+        print(f"  exclude-cv  : True")
+    if args.charge_m is not None:
+        print(f"  charge-m    : {args.charge_m}")
+    if args.discharge_m is not None:
+        print(f"  discharge-m : {args.discharge_m}")
+    if args.scen_k is not None:
+        print(f"  scen-k      : {args.scen_k}")
+    if args.phase1_lr is not None:
+        print(f"  phase1-lr   : {args.phase1_lr}")
+    if args.phase2_lr is not None:
+        print(f"  phase2-lr   : {args.phase2_lr}")
     print(f"  실행 스텝   :")
     for n, name, _, _, _ in selected:
         print(f"    Step {n}  {name}")
@@ -240,6 +290,25 @@ def main():
             if args.axis_config:
                 step_extra += ["--axis-config", args.axis_config]
 
+        # ── CV 제외 옵션 주입 (Step 4=추출, 6/7=학습, 8=분류기 — 모두 '_ccOnly' 경로 인지 필요) ──
+        if num in (4, 6, 7, 8) and args.exclude_cv:
+            step_extra += ["--exclude-cv"]
+
+        # ── m/k 오버라이드 주입 (Step 6~7) ──────────────────────────────────
+        if num in (6, 7):
+            if args.charge_m is not None:
+                step_extra += ["--charge-m", str(args.charge_m)]
+            if args.discharge_m is not None:
+                step_extra += ["--discharge-m", str(args.discharge_m)]
+            if args.scen_k is not None:
+                step_extra += ["--scen-k", str(args.scen_k)]
+
+        # ── phase별 lr 오버라이드 (Step 6=Phase1, 7=Phase2 각각 독립) ──────────
+        if num == 6 and args.phase1_lr is not None:
+            step_extra += ["--lr", str(args.phase1_lr)]
+        if num == 7 and args.phase2_lr is not None:
+            step_extra += ["--lr", str(args.phase2_lr)]
+
         # ── Phase 1 전: 스냅샷 ──────────────────────────────────────────────
         if num == 6:
             snapshot = _snapshot_run_dirs()
@@ -249,7 +318,7 @@ def main():
             snapshot = _snapshot_run_dirs()
             gates_src = args.gates_from or (str(p1_run_dir) if p1_run_dir else None)
             if gates_src is None:
-                latest = _find_new_run_dir(set())  # 전체 중 최신
+                latest = _find_new_run_dir(set(), phase=1)  # Phase 1 run 중 최신
                 gates_src = str(latest) if latest else None
             if gates_src:
                 step_extra += ["--gates-from", gates_src]
@@ -259,7 +328,7 @@ def main():
 
         # ── 분류기 학습 전: Phase 2 run_dir 주입 ────────────────────────────
         if num == 8:
-            clf_run = p2_run_dir or _find_new_run_dir(set())
+            clf_run = p2_run_dir or _find_new_run_dir(set(), phase=2)
             if clf_run:
                 step_extra += ["--run-dir", str(clf_run)]
                 print(f"\n  → run-dir (분류기): {clf_run}")
@@ -271,8 +340,8 @@ def main():
         if num == 9:
             ckpt = args.checkpoint or _find_checkpoint(p2_run_dir)
             if ckpt is None:
-                # fallback: 가장 최신 run의 best.pt
-                latest = _find_new_run_dir(set())
+                # fallback: 가장 최신 Phase 2 run의 best.pt
+                latest = _find_new_run_dir(set(), phase=2)
                 ckpt = _find_checkpoint(latest)
             if ckpt:
                 step_extra += ["--checkpoint", ckpt]
@@ -284,7 +353,7 @@ def main():
 
         # ── Phase 1 후: 신규 run dir 기록 ────────────────────────────────────
         if num == 6:
-            p1_run_dir = _find_new_run_dir(snapshot)
+            p1_run_dir = _find_new_run_dir(snapshot, phase=1)
             if p1_run_dir:
                 print(f"  → Phase 1 run dir: {p1_run_dir}")
             else:
@@ -292,7 +361,7 @@ def main():
 
         # ── Phase 2 후: 신규 run dir 기록 ────────────────────────────────────
         if num == 7:
-            p2_run_dir = _find_new_run_dir(snapshot)
+            p2_run_dir = _find_new_run_dir(snapshot, phase=2)
             if p2_run_dir:
                 print(f"  → Phase 2 run dir: {p2_run_dir}")
             else:

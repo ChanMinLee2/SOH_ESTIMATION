@@ -47,7 +47,7 @@ except ImportError:
 import torch
 from torch.utils.data import DataLoader
 
-from utils.io_utils import load_config, save_json
+from utils.io_utils import load_config, save_config, save_json
 from datasets.segment_dataset import build_datasets, collate_fn, FastTensorLoader
 from models.scr_model import SCRModel
 from training.scr_trainer import SCRTrainer
@@ -90,6 +90,13 @@ def _parse_args() -> argparse.Namespace:
                    help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}')")
     p.add_argument("--seed",        type=int, default=None,
                    help="재현성 시드 (yaml 오버라이드)")
+    p.add_argument("--lr",          type=float, default=None,
+                   help="peak LR (yaml training.lr 오버라이드). Phase 1/2 공용 필드라서 "
+                        "Phase 2만 따로 낮추고 싶을 때 이 옵션으로 지정")
+    p.add_argument("--exclude-cv",  action="store_true", dest="exclude_cv",
+                   help="hi_correlation.py --exclude-cv 로 추출된 '_ccOnly' 경로 사용 "
+                        "(data_dir/seg_data_dir 미지정 시 자동 경로에 접미사 추가). "
+                        "yaml data.exclude_cv 로도 설정 가능")
     return p.parse_args()
 
 
@@ -382,6 +389,10 @@ def main() -> None:
     phase = _resolve_phase(args, cfg)
     print(f"[train] ═══ Phase {phase} ═══")
 
+    # raw_mlp 모드: HI/게이트 없이 raw_v/raw_i(flatten)만으로 회귀하는 베이스라인
+    # (MODEL_DIRECTION.md B-4 계열 — "HI 추출 자체의 기여도" 측정용)
+    _is_raw_mode = cfg.get("model", {}).get("regression_model") == "raw_mlp"
+
     # CLI 오버라이드
     cls_cfg = cfg.setdefault("classifier", {})
     reg_cfg = cfg.setdefault("regression", {})
@@ -399,6 +410,9 @@ def main() -> None:
                   or cfg.get("scenario", {}).get("axis", "qfrac"))
     _axis_cfg_raw = args.axis_config or cfg.get("scenario", {}).get("axis_config", None)
     _axis_cfg: dict = json.loads(_axis_cfg_raw) if isinstance(_axis_cfg_raw, str) else (_axis_cfg_raw or {})
+    # CLI로 준 --seg-axis/--axis-config가 저장되는 config.yaml에도 보이도록 반영
+    cfg.setdefault("scenario", {})["axis"] = _axis_name
+    cfg["scenario"]["axis_config"] = _axis_cfg
     _segmenter = _get_segmenter(_axis_name, {_axis_name: _axis_cfg})
     spec = _segmenter.get_spec()
     print(f"[train] seg-axis={_axis_name}  n_scenarios={spec.n_scenarios}  n_classes={spec.n_classes}")
@@ -412,6 +426,13 @@ def main() -> None:
         _n2 = int(round(_axis_cfg.get("n2", 0.2) * 100))
         _ns = int(_axis_cfg.get("n_samples", 4))
         _axis_dir = f"q_frac_wide/n1-{_n1}%_n2-{_n2}%_N-{_ns}{_rand_sfx}"
+    elif _axis_name == "q_abs":
+        # q_abs: mid_start/mid_end/seg_len/n_samples 별 하위 디렉터리 (hi_correlation._qabs_tag 와 동일)
+        _ms = int(round(_axis_cfg.get("mid_start", 0.20) * 100))
+        _me = int(round(_axis_cfg.get("mid_end", 0.50) * 100))
+        _sl = int(round(_axis_cfg.get("seg_len", 0.15) * 100))
+        _ns = int(_axis_cfg.get("n_samples", 4))
+        _axis_dir = f"q_abs/ms-{_ms}%_me-{_me}%_sl-{_sl}%_N-{_ns}{_rand_sfx}"
     elif _axis_name == "vqslope":
         # vqslope: mode(dva/ica)·n_samples 별 하위 디렉터리
         _vqmode = str(_axis_cfg.get("mode", "dva")).lower()
@@ -420,27 +441,45 @@ def main() -> None:
     else:
         _axis_dir = _axis_name
 
+    # --exclude-cv: hi_correlation.py --exclude-cv 로 추출된 '_ccOnly' 경로 사용
+    # (CLI > yaml data.exclude_cv). 이 run의 cfg는 그대로 checkpoint에 저장되므로
+    # test_scr.py/finetune_scr.py는 별도 처리 없이 checkpoint에 담긴 경로를 그대로 재사용한다.
+    _exclude_cv = args.exclude_cv or bool(cfg.get("data", {}).get("exclude_cv", False))
+    if _exclude_cv:
+        _axis_dir = f"{_axis_dir}_ccOnly"
+
     # 데이터 경로: null → scenario.axis 기반 자동 결정
     _data_cfg = cfg["data"]
     if not _data_cfg.get("seg_data_dir"):
         _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
     if not _data_cfg.get("data_dir"):
         _data_cfg["data_dir"] = f"_4_data_hi/{_axis_dir}/cycle"
+    _data_cfg["exclude_cv"] = _exclude_cv  # checkpoint에 저장되는 cfg에 명시 (재현/추적용)
+    if args.gates_from is not None:
+        _data_cfg["gates_from"] = args.gates_from  # CLI --gates-from도 저장되는 config.yaml에 반영
     print(f"[train] data_dir={_data_cfg['data_dir']}")
     print(f"[train] seg_data_dir={_data_cfg['seg_data_dir']}")
+    print(f"[train] exclude_cv={_exclude_cv}")
 
     # seed 오버라이드
     if args.seed is not None:
         cfg.setdefault("training", {})["seed"] = args.seed
 
+    # lr 오버라이드 (Phase 1/2가 yaml training.lr을 공유하므로, 한쪽만 바꾸고 싶을 때 사용)
+    if args.lr is not None:
+        cfg.setdefault("training", {})["lr"] = args.lr
+        print(f"[train] lr override: {args.lr}")
+
     _AXIS_SHORT  = {"qfrac": "qfr", "protocol": "prot", "vwindow": "vwin",
                     "rcs": "rcs", "cluster": "clst", "q_frac_wide": "qfw",
-                    "vqslope": "vqs"}
+                    "q_abs": "qabs", "vqslope": "vqs"}
     _MODEL_SHORT = {"mlp": "mlp", "transformer": "tr", "i_transformer": "itr",
                     "resnet_tab": "res", "ft_transformer": "ftt"}
     _axis_short  = _AXIS_SHORT.get(_axis_name, _axis_name[:4])
     if _axis_name == "q_frac_wide":
         _axis_short += f"_{_n1}%_{_n2}%"
+    elif _axis_name == "q_abs":
+        _axis_short += f"_{_ms}-{_me}%"
     elif _axis_name == "vqslope":
         _axis_short += f"_{_vqmode}"
     if _rand_sfx:
@@ -458,7 +497,9 @@ def main() -> None:
     # run_dir에 spec 저장 (test_scr.py 재사용)
     spec.save(output_dir / "scenario_spec.json")
 
-    shutil.copy(str(PROJECT_ROOT / args.config), str(output_dir / "config.yaml"))
+    # 원본 yaml을 그대로 복사하지 않고, CLI 오버라이드(--n1/--n2/--scen-k/--exclude-cv 등)가
+    # 반영된 실제 실행 시점의 cfg를 저장 — 나중에 run_dir만 보고도 실행 조건을 알 수 있게 함.
+    save_config(cfg, output_dir / "config.yaml")
 
     probe_json_out = output_dir / "gates" / "classification_HIs.json"
     scen_json_out  = output_dir / "gates" / "regression_HIs.json"
@@ -471,8 +512,41 @@ def main() -> None:
     tr_cfg = cfg["training"]
     # FastTensorLoader: 사전 구축 텐서 슬라이싱 → per-sample collate 오버헤드 제거.
     # SCRModel 회귀 forward는 x_raw 미사용 → 학습 로더에서 제외 (메모리/전송 절감).
-    train_loader = FastTensorLoader(train_ds, tr_cfg["batch_size"], shuffle=True)
-    val_loader   = FastTensorLoader(val_ds,   tr_cfg["batch_size"], shuffle=False)
+    # raw_mlp 모드는 x_raw가 곧 유일한 모델 입력이므로 반드시 포함해야 한다.
+    train_loader = FastTensorLoader(train_ds, tr_cfg["batch_size"], shuffle=True,
+                                    include_raw=_is_raw_mode)
+    val_loader   = FastTensorLoader(val_ds,   tr_cfg["batch_size"], shuffle=False,
+                                    include_raw=_is_raw_mode)
+
+    # ------------------------------------------------------------------
+    # raw_mlp 모드: HI/게이트 완전히 우회 — Phase 1/2 구분이 무의미하므로
+    # 두 phase 모두 동일하게 RawMLPModel을 처음부터 학습한다(비용이 작아 재학습 허용).
+    # gates/ 디렉터리는 STEPS 호환을 위해 빈 채로 남긴다(probe_json_out/scen_json_out 미생성).
+    # ------------------------------------------------------------------
+    if _is_raw_mode:
+        from models.raw_mlp_model import RawMLPModel
+
+        print("[train] raw_mlp 모드 — HI/게이트 없이 raw_v/raw_i(flatten)만으로 직접 회귀 "
+              "(베이스라인, MODEL_DIRECTION.md B-4 계열)")
+        m_cfg = cfg.get("model", {})
+        model = RawMLPModel(
+            d_head=m_cfg.get("d_head", 128),
+            dropout=m_cfg.get("dropout", 0.1),
+            model_cfg=m_cfg,
+            spec=spec,
+        )
+        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[train] RawMLPModel  trainable params: {n_params:,}")
+
+        trainer = SCRTrainer(model, cfg, output_dir, device, normalizer=norm)
+        model   = trainer.fit(train_loader, val_loader)
+
+        from training.scr_trainer import _save_model as _save_ckpt
+        ckpt_path = output_dir / "checkpoints" / "final.pt"
+        _save_ckpt(model, ckpt_path, cfg, norm)
+        print(f"[train] Saved final checkpoint → {ckpt_path}")
+        print(f"[train] Phase {phase} 완료 (raw_mlp). run dir: {output_dir}")
+        return
 
     # ------------------------------------------------------------------
     # Phase 1: L0 gate 학습
@@ -488,12 +562,18 @@ def main() -> None:
         else:
             print("[train] single-objective: MSE only — probe_mlp 비활성화")
 
+        # Phase 1은 항상 MLPHead(design intent) — regression_model 선택은 Phase 2 전용이므로
+        # 강제로 "mlp"만 적용하되, mlp_hidden_dims 등 MLPHead 세부 설정은 반영한다
+        # (기존엔 model_cfg를 아예 안 넘겨서 mlp_hidden_dims가 무시되고 항상 [d_head, d_head//2]
+        # 기본값으로 cap_head가 지어짐 — Phase 2/test_scr.py의 구성과 어긋나는 버그였음).
+        _p1_model_cfg = {**cfg["model"], "regression_model": "mlp"}
         model = SCRModel(
             d_probe=cfg["model"]["d_probe"],
             d_head=cfg["model"]["d_head"],
             dropout=cfg["model"]["dropout"],
             spec=spec,
             with_probe_mlp=_with_probe_mlp,
+            model_cfg=_p1_model_cfg,
             # 마스크 없음 → HardConcreteGate 활성화
         )
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

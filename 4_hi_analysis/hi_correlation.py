@@ -108,6 +108,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from common.scenario._curves import (  # noqa: E402
     _build_vq_curve, _build_ica_seg, _peak_fwhm_asym,
 )
+# CC→CV 전환 검출 (--exclude-cv 옵션에서 재사용; vwindow 모듈의 기존 함수)
+from common.scenario.vwindow import _detect_cv_start  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HI 키 상수 정의
@@ -546,7 +548,7 @@ def _r_dc_from_chg(vc, ic, dtc):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _seg_stat(vs, ims, dts, qcs, seg):
-    """카테고리 A: 통계 기반 15종 (S01–S15)."""
+    """카테고리 A: 통계 기반 20종 (S01–S20)."""
     out = {f"stat_{k}_{seg}": np.nan for k in STAT_KEYS}
     n = len(vs)
     if n < 5:
@@ -638,7 +640,7 @@ def _seg_stat(vs, ims, dts, qcs, seg):
 
 
 def _seg_diff(vs, ims, dts, qcs, seg):
-    """카테고리 B: 미분 기반 15종 (D01–D15)."""
+    """카테고리 B: 미분 기반 20종 (D01–D20)."""
     out = {f"diff_{k}_{seg}": np.nan for k in DIFF_KEYS}
     n = len(vs)
     if n < 8:
@@ -754,7 +756,7 @@ def _seg_diff(vs, ims, dts, qcs, seg):
 
 
 def _seg_lfp(vs, ims, dts, qcs, seg):
-    """카테고리 C: LFP 특징 기반 15종 (L01–L15)."""
+    """카테고리 C: LFP 특징 기반 20종 (L01–L20)."""
     out = {f"lfp_{k}_{seg}": np.nan for k in LFP_KEYS}
     n = len(vs)
     if n < 8:
@@ -1840,8 +1842,11 @@ def _extract_one_cell(args) -> tuple:
     (기존 list 반환 → 튜플로 확장; 호출부 load_all이 언팩 처리)
     """
     _progress_q = None
-    if isinstance(args, tuple) and len(args) == 4:
-        pkl_path_str, _axis, _axis_cfg_json, _progress_q = args
+    _exclude_cv = False
+    if isinstance(args, tuple) and len(args) == 5:
+        pkl_path_str, _axis, _axis_cfg_json, _exclude_cv, _progress_q = args
+    elif isinstance(args, tuple) and len(args) == 4:
+        pkl_path_str, _axis, _axis_cfg_json, _exclude_cv = args
     elif isinstance(args, tuple):
         pkl_path_str, _axis, _axis_cfg_json = args
     else:
@@ -2001,9 +2006,17 @@ def _extract_one_cell(args) -> tuple:
                 # 충전 세그먼트 HI (CC 전환 갭 없는 경우만, segmenter 기반)
                 if not _chg_gap_seg and q_tc >= 0.05:
                     _empty = np.empty(0, dtype=float)
+                    # --exclude-cv: 세그먼터에 넘기는 사본만 CV 시작 지점에서 절단.
+                    # ce/cv_q_frac/cv_time_frac 등 위의 전역 충전 HI는 원본(vc/ic/dtc/qcc)을
+                    # 그대로 써야 하므로 여기서는 별도 변수(vc_s 등)로만 대체한다.
+                    if _exclude_cv:
+                        _cv_i = _detect_cv_start(vc, ic)
+                        vc_s, ic_s, dtc_s, qcc_s = vc[:_cv_i], ic[:_cv_i], dtc[:_cv_i], qcc[:_cv_i]
+                    else:
+                        vc_s, ic_s, dtc_s, qcc_s = vc, ic, dtc, qcc
                     for _rec in _segmenter.iter_segments(
                         cell_id, int(cyc), _empty, _empty, _empty, _empty,
-                        vc, ic, dtc, qcc,
+                        vc_s, ic_s, dtc_s, qcc_s,
                     ):
                         seg = _rec.meta.get("seg_name") or _spec_names[_rec.scenario_id]
                         vs_c = _rec.v; ims_c = _rec.i; dts_c = _rec.dt; qcs_c = _rec.q
@@ -2054,8 +2067,14 @@ def load_all(
     n_workers: int = 4,
     axis: str = "qfrac",
     axis_cfg: dict | None = None,
+    exclude_cv: bool = False,
 ) -> tuple:
-    """반환: (df, coverage). coverage는 random_segment 시에만 채워짐(그 외 빈 dict)."""
+    """반환: (df, coverage). coverage는 random_segment 시에만 채워짐(그 외 빈 dict).
+
+    exclude_cv=True: 충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간을 제외
+    (segmenter 자체는 수정 없음 — _extract_one_cell에서 세그먼터에 넘기는
+    배열만 절단, 전역 충전 HI는 영향 없음).
+    """
     # 사이클 수가 많은 셀(파일 크기 큰 순) 먼저 배정 → 워커 간 부하 균형 개선
     files = sorted(pkl_dir.glob("*.pkl"), key=lambda f: f.stat().st_size, reverse=True)
     cfg_json = json.dumps(axis_cfg or {})
@@ -2063,7 +2082,7 @@ def load_all(
     coverage: dict = {}
     if n_workers <= 1:
         for f in tqdm(files, desc=pkl_dir.name):
-            rows, cov = _extract_one_cell((str(f), axis, cfg_json))
+            rows, cov = _extract_one_cell((str(f), axis, cfg_json, exclude_cv))
             all_rec.extend(rows); _merge_coverage(coverage, cov)
     else:
         # 파일 완료 단위 tqdm(pbar)만으로는 큰 파일이 많이 배정된 초반에 진행률이
@@ -2090,7 +2109,7 @@ def load_all(
         _drain_thread.start()
 
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futs = {ex.submit(_extract_one_cell, (str(f), axis, cfg_json, _progress_q)): f
+            futs = {ex.submit(_extract_one_cell, (str(f), axis, cfg_json, exclude_cv, _progress_q)): f
                     for f in files}
             with tqdm(total=len(files), desc=pkl_dir.name, position=0) as pbar:
                 for fut in as_completed(futs):
@@ -2250,6 +2269,16 @@ def _qfw_tag(axis_cfg: dict) -> str:
     return f"n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix(axis_cfg)}"
 
 
+def _qabs_tag(axis_cfg: dict) -> str:
+    """q_abs 파라미터 → 파일/디렉터리 식별 태그.
+    (train_scr/train_classifier/visualize_results 와 동일 규칙)"""
+    ms = int(round(axis_cfg.get("mid_start", 0.20) * 100))
+    me = int(round(axis_cfg.get("mid_end", 0.50) * 100))
+    sl = int(round(axis_cfg.get("seg_len", 0.15) * 100))
+    ns = int(axis_cfg.get("n_samples", 4))
+    return f"ms-{ms}%_me-{me}%_sl-{sl}%_N-{ns}{_rand_suffix(axis_cfg)}"
+
+
 def _vqslope_tag(axis_cfg: dict) -> str:
     """vqslope 파라미터 → 파일/디렉터리 식별 태그. (train_scr._axis_dir_from_spec 와 동일 규칙)"""
     mode = str(axis_cfg.get("mode", "dva")).lower()
@@ -2301,8 +2330,13 @@ def load_or_extract(
     force: bool = False,
     axis: str = "qfrac",
     axis_cfg: dict | None = None,
+    exclude_cv: bool = False,
 ) -> pd.DataFrame:
-    """캐시가 있으면 로드, 없으면 전체 추출 후 저장."""
+    """캐시가 있으면 로드, 없으면 전체 추출 후 저장.
+
+    exclude_cv=True: 결과 캐시/저장 경로에 '_ccOnly' 접미사를 붙여 CV 포함
+    버전과 별도로 저장한다 (segmenter/axis_cfg 자체는 변경 없음, load_all 참고).
+    """
     axis_cfg = dict(axis_cfg or {})
 
     # q_frac_wide: 파라미터별 고유 경로 사용
@@ -2310,6 +2344,10 @@ def load_or_extract(
         _tag      = _qfw_tag(axis_cfg)
         _cache    = cache_path.parent / f"hi_features_{_tag}.pkl"
         _axis_dir = f"q_frac_wide/{_tag}"
+    elif axis == "q_abs":
+        _tag      = _qabs_tag(axis_cfg)
+        _cache    = cache_path.parent / f"hi_features_qabs_{_tag}.pkl"
+        _axis_dir = f"q_abs/{_tag}"
     elif axis == "vqslope":
         # vqslope: mode(dva/ica)·n_samples 별 고유 경로
         _tag      = _vqslope_tag(axis_cfg)
@@ -2321,6 +2359,10 @@ def load_or_extract(
     else:
         _cache    = cache_path.parent / f"hi_features_{axis}.pkl"
         _axis_dir = axis
+
+    if exclude_cv:
+        _cache    = _cache.with_name(_cache.stem + "_ccOnly.pkl")
+        _axis_dir = f"{_axis_dir}_ccOnly"
 
     if not force and _cache.exists():
         print(f"  캐시 로드: {_cache}")
@@ -2341,11 +2383,13 @@ def load_or_extract(
         print("[경고] cluster 축은 fit() 없이 실행 시 모든 세그먼트가 cluster 0으로 분류됩니다. "
               "HI는 추출되지만 시나리오 라우팅이 무의미합니다.")
 
-    print(f"=== MIT HI 추출 (axis={axis}) ===")
-    df_mit,  cov_mit  = load_all(MIT_DIR,  n_workers=n_workers, axis=axis, axis_cfg=axis_cfg)
+    print(f"=== MIT HI 추출 (axis={axis}, exclude_cv={exclude_cv}) ===")
+    df_mit,  cov_mit  = load_all(MIT_DIR,  n_workers=n_workers, axis=axis, axis_cfg=axis_cfg,
+                                  exclude_cv=exclude_cv)
     dc_mit,  ds_mit  = _save_per_cell_hi(df_mit,  "MIT",  axis=_axis_dir)
-    print(f"=== HUST HI 추출 (axis={axis}) ===")
-    df_hust, cov_hust = load_all(HUST_DIR, n_workers=n_workers, axis=axis, axis_cfg=axis_cfg)
+    print(f"=== HUST HI 추출 (axis={axis}, exclude_cv={exclude_cv}) ===")
+    df_hust, cov_hust = load_all(HUST_DIR, n_workers=n_workers, axis=axis, axis_cfg=axis_cfg,
+                                  exclude_cv=exclude_cv)
     dc_hust, ds_hust = _save_per_cell_hi(df_hust, "HUST", axis=_axis_dir)
     _save_sample_csvs(df_mit, df_hust)
 
@@ -2588,12 +2632,17 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
     # 데이터 저장 경로 태그 (load_or_extract 와 동일 규칙)
     if axis == "q_frac_wide":
         _axis_dir = f"q_frac_wide/{_qfw_tag(axis_cfg)}"
+    elif axis == "q_abs":
+        _axis_dir = f"q_abs/{_qabs_tag(axis_cfg)}"
     elif axis == "vqslope":
         _axis_dir = f"vqslope/{_vqslope_tag(axis_cfg)}"
     elif axis == "qfrac":
         _axis_dir = axis
     else:
         _axis_dir = axis
+    _exclude_cv = bool(getattr(args, "exclude_cv", False))
+    if _exclude_cv:
+        _axis_dir = f"{_axis_dir}_ccOnly"
 
     _is_rand = bool(axis_cfg.get("random_segment", False))
     w = 64
@@ -2608,6 +2657,8 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
              f"seed={int(axis_cfg.get('random_seed', 42))})" if _is_rand else "  (기존 격자 방식)"))
     print(f"  워커 수          : {getattr(args, 'workers', '?')}")
     print(f"  force 재추출     : {getattr(args, 'force', False)}")
+    print(f"  exclude_cv      : {_exclude_cv}"
+          + ("  (충전 세그먼트 HI는 CC 구간만 사용)" if _exclude_cv else ""))
     print(f"  데이터 저장 경로 : _4_data_hi/{_axis_dir}/{{seg,cycle}}/")
     if _is_rand:
         print(f"  누락비율 저장    : _4_data_hi/{_axis_dir}/coverage_stats.txt")
@@ -2643,7 +2694,8 @@ def main():
                         help="curve-debug 자동 선택 사이클 수 (기본: 5)")
     # ── 시나리오 축 ──────────────────────────────────────────────────────────
     parser.add_argument("--seg-axis", type=str, default="qfrac",
-                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster|q_frac_wide (기본: qfrac)")
+                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster|q_frac_wide|q_abs|vqslope|"
+                             "full_cycle(부분 사이클 대비 베이스라인, 방향당 전체 curve 1개) (기본: qfrac)")
     parser.add_argument("--axis-config", type=str, default="{}",
                         help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}'). "
                              "PowerShell에서는 --axis-config=$cfg 형태 또는 --n1/--n2/--n-samples 사용")
@@ -2657,14 +2709,26 @@ def main():
     parser.add_argument("--mode",     type=str, default=None,
                         help="vqslope: 플래토 검출 모드 dva|ica (기본 dva). --axis-config 대체")
     parser.add_argument("--random-segment", action="store_true", dest="random_segment",
-                        help="q_frac_wide/vqslope: 구간 내 고정길이 랜덤 창 추출. --axis-config 대체")
+                        help="q_frac_wide/vqslope/q_abs: 구간 내 고정길이 랜덤 창 추출. --axis-config 대체")
     parser.add_argument("--seg-len-pts", type=int, default=None, dest="seg_len_pts",
                         help="random_segment 시 창의 고정 관측 포인트 수 (기본 20)")
+    # q_abs 전용 단축 인자 (정격용량 비율)
+    parser.add_argument("--mid-start", type=float, default=None, dest="mid_start",
+                        help="q_abs: mid 존 시작 (정격용량 비율, 기본 0.2). --axis-config 대체")
+    parser.add_argument("--mid-end",   type=float, default=None, dest="mid_end",
+                        help="q_abs: mid 존 끝 (정격용량 비율, 기본 0.5). --axis-config 대체")
+    parser.add_argument("--seg-len",   type=float, default=None, dest="seg_len",
+                        help="q_abs: 세그먼트 길이 (정격용량 비율, 기본 0.15). --axis-config 대체")
+    parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
+                        help="충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간 제외 "
+                             "(segmenter는 무수정, 세그먼터에 넘기는 충전 배열만 CV 시작 지점에서 절단; "
+                             "결과는 '_ccOnly' 접미사 경로에 별도 저장)")
     args = parser.parse_args()
 
     # 단축 인자 → axis_config 자동 구성 (PowerShell JSON 우회)
     if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
-            or args.mode is not None or args.random_segment or args.seg_len_pts is not None):
+            or args.mode is not None or args.random_segment or args.seg_len_pts is not None
+            or args.mid_start is not None or args.mid_end is not None or args.seg_len is not None):
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
         if args.n2        is not None: _quick["n2"]        = args.n2
@@ -2672,6 +2736,9 @@ def main():
         if args.mode      is not None: _quick["mode"]      = args.mode
         if args.random_segment:        _quick["random_segment"] = True
         if args.seg_len_pts is not None: _quick["seg_len_pts"] = args.seg_len_pts
+        if args.mid_start is not None: _quick["mid_start"] = args.mid_start
+        if args.mid_end   is not None: _quick["mid_end"]   = args.mid_end
+        if args.seg_len   is not None: _quick["seg_len"]   = args.seg_len
         args.axis_config = json.dumps(_quick)
 
     _axis = args.seg_axis
@@ -2721,14 +2788,14 @@ def main():
     if args.plateau_summary:
         print("\n=== Plateau fraction 전체 요약 플롯 ===")
         df_s = load_or_extract(n_workers=args.workers, force=args.force,
-                               axis=_axis, axis_cfg=_axis_cfg)
+                               axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv)
         out_sum = STEP_DIR / "outputs" / "plateau_summary.png"
         plot_plateau_fraction_summary(df_s, out_path=out_sum)
         print("완료!")
         return
 
     df = load_or_extract(n_workers=args.workers, force=args.force,
-                         axis=_axis, axis_cfg=_axis_cfg)
+                         axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv)
     print(f"\n총 사이클: {len(df):,}")
 
     print("\n=== Spearman ρ 계산 ===")
@@ -2746,12 +2813,16 @@ def main():
 
     if _axis == "q_frac_wide":
         _dir_suffix = f"_qfw_{_qfw_tag(_axis_cfg)}"          # random suffix(_qfw_tag) 포함
+    elif _axis == "q_abs":
+        _dir_suffix = f"_qabs_{_qabs_tag(_axis_cfg)}"
     elif _axis == "vqslope":
         _dir_suffix = f"_vqslope_{_vqslope_tag(_axis_cfg)}"  # mode·random suffix 포함
     elif _axis != "qfrac":
         _dir_suffix = f"_{_axis}"
     else:
         _dir_suffix = ""
+    if args.exclude_cv:
+        _dir_suffix += "_ccOnly"
     hi_plot_dir = STEP_DIR / "hi_plot" / (date.today().strftime("%m%d") + _dir_suffix)
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
     out = hi_plot_dir / "hi_correlation.png"

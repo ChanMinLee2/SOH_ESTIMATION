@@ -16,9 +16,24 @@ common/scenario/q_frac_wide.py — 축: 파라미터 구간 균등격자 세그�
   s + n2 <= zone_end  (구간 경계 침범 없음).
   n_samples=1 이면 유효 범위의 중앙점 1개.
 
-시나리오 이름·라우팅 — rcs/qfrac 와 동일 컨벤션:
+시나리오 이름·라우팅:
   chg_lo(0) chg_mid(1) chg_hi(2) | dis_hi(3) dis_mid(4) dis_lo(5)
-  routing = [[0, 1, 2], [5, 4, 3]]
+  routing = [[2, 1, 0], [5, 4, 3]]
+
+  [SOC 정합성 — 2026-07-30 수정]
+  이름의 lo/mid/hi 는 항상 실측 SOC(전압) 수준을 가리켜야 한다: chg_lo=충전 초반
+  (SOC 낮음) ... chg_hi=충전 막판(SOC 높음), dis_hi=방전 초반(SOC 높음) ...
+  dis_lo=방전 막판(SOC 낮음) — 원조 qfrac.py 가 정확히 이렇게 구현돼 있다(방향별로
+  _CHG_SEGS/_DIS_SEGS 를 따로 정의).
+  본 파일은 방향 무관 단일 _ZONES(존 시작="hi", 존 끝="lo")를 쓰고 routing 반전으로
+  방향차를 보정하는 방식으로 일반화됐는데, 예전 routing=[[0,1,2],[5,4,3]] 는 방전만
+  올바르게 보정하고 충전은 못 채웠다(존 시작=q_frac≈0=충전 초반=SOC 낮음인데
+  latent=2 라 구 routing 에서 scenario_id=2="chg_hi" 로 배정 — 이름과 실제 SOC가
+  반대). 그 결과 이 파일로 생성된 모든 과거 런(예: `qfw_35%_20%` 등)의 chg_lo/chg_hi
+  라벨이 뒤바뀌어 있었다 — 숫자(RMSE 등)는 존 자체 정의가 안 바뀌었으므로 영향
+  없지만, "chg_hi 존"이라는 표현을 SOC 높은 쪽으로 해석했다면 그 해석만 틀렸다.
+  routing[0]을 [2,1,0]으로 뒤집어 존 시작(latent=2)→scenario_id=0="chg_lo" 가
+  되도록 고쳤다 — 방전(routing[1])은 원래도 맞았으므로 그대로 둠.
 
 사용 예:
   python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide \\
@@ -37,7 +52,10 @@ from ._random_seg import sample_random_windows
 # from .vwindow import _detect_cv_start
 
 _SCENARIO_NAMES = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
-_ROUTING = [[0, 1, 2], [5, 4, 3]]
+# routing[dir_idx][latent_class] = scenario_id — dir_idx 0=충전, 1=방전.
+# 충전: 존 시작(latent2)→chg_lo(0, SOC 낮음) ... 존 끝(latent0)→chg_hi(2, SOC 높음).
+# 방전: 존 시작(latent2)→dis_hi(3, SOC 높음) ... 존 끝(latent0)→dis_lo(5, SOC 낮음).
+_ROUTING = [[2, 1, 0], [5, 4, 3]]
 
 # (zone_name, latent_class) — lo=0, mid=1, hi=2
 _ZONES: list[tuple[str, int]] = [

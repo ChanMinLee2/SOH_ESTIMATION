@@ -61,6 +61,9 @@ def _parse_args() -> argparse.Namespace:
                    help="학습률 (yaml training.lr 오버라이드)")
     p.add_argument("--d-hidden", type=int, default=64,
                    help="MLPProbeClassifier hidden dim (기본 64)")
+    p.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
+                   help="train_scr.py --exclude-cv 로 학습된 run의 '_ccOnly' 데이터 경로 사용 "
+                        "(spec 기반 자동 경로 재구성에 접미사 추가). yaml data.exclude_cv 로도 설정 가능")
     return p.parse_args()
 
 
@@ -86,6 +89,12 @@ def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
         n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
         return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}"
+    if spec.axis == "q_abs":
+        ms = int(round(p.get("mid_start", 0.20) * 100))
+        me = int(round(p.get("mid_end", 0.50) * 100))
+        sl = int(round(p.get("seg_len", 0.15) * 100))
+        ns = int(p.get("n_samples", 4))
+        return f"q_abs/ms-{ms}%_me-{me}%_sl-{sl}%_N-{ns}{rand_sfx}"
     if spec.axis == "vqslope":
         mode = str(p.get("mode", "dva")).lower()
         ns   = int(p.get("n_samples", 1))
@@ -186,6 +195,16 @@ def main() -> None:
         )
     print(f"[clf] run_dir: {run_dir}")
 
+    # raw_mlp 모드 run — RawMLPModel은 seg_idx를 직접 입력받아 회귀하므로
+    # HI 기반 방향/시나리오 분류기가 의미가 없다. 학습을 건너뛴다.
+    _saved_cfg_path = run_dir / "config.yaml"
+    if _saved_cfg_path.exists():
+        _saved_cfg = load_config(str(_saved_cfg_path))
+        if _saved_cfg.get("model", {}).get("regression_model") == "raw_mlp":
+            print("[clf] raw_mlp 모드 run 감지 — 시나리오 분류기 학습 생략 "
+                  "(RawMLPModel은 라우팅이 필요 없음). test_scr.py는 자동으로 oracle만 평가합니다.")
+            return
+
     # spec 로드
     spec_path = run_dir / "scenario_spec.json"
     if spec_path.exists():
@@ -199,7 +218,14 @@ def main() -> None:
     _data_cfg = cfg.setdefault("data", {})
     _axis_dir = _axis_dir_from_spec(spec)
 
-    if spec.axis in ("q_frac_wide", "vqslope"):
+    # --exclude-cv: train_scr.py --exclude-cv 로 학습된 run은 '_ccOnly' 경로를 썼으므로
+    # spec 기반 재구성에도 동일 접미사를 붙여야 한다 (spec.params에는 이 정보가 없음 —
+    # segmenter 생성자 kwargs가 아니라서 저장되지 않으므로 CLI/yaml로 명시적으로 전달).
+    _exclude_cv = args.exclude_cv or bool(cfg.get("data", {}).get("exclude_cv", False))
+    if _exclude_cv:
+        _axis_dir = f"{_axis_dir}_ccOnly"
+
+    if spec.axis in ("q_frac_wide", "q_abs", "vqslope"):
         # spec.params에서 태그 재구성 — 저장된 config 경로(구버전)보다 항상 우선
         _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
         _data_cfg["data_dir"]     = f"_4_data_hi/{_axis_dir}/cycle"
@@ -215,6 +241,8 @@ def main() -> None:
             _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
         if not _data_cfg.get("data_dir"):
             _data_cfg["data_dir"] = f"_4_data_hi/{_axis_dir}/cycle"
+
+    print(f"[clf] data_dir={_data_cfg['data_dir']}  exclude_cv={_exclude_cv}")
 
     # 데이터 로드 (같은 config → Phase 2와 동일한 split/정규화)
     train_ds, val_ds, _, norm = build_datasets(cfg, spec=spec)

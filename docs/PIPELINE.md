@@ -67,8 +67,238 @@ python run_pipeline.py --workers 4
 - Step 7 완료 → 신규 run dir 자동 감지 → Step 8에 `--run-dir` 주입, Step 9에 `--checkpoint` 주입
 - **yaml의 `data.gates_from`보다 자동 감지된 CLI `--gates-from`이 우선**
 
-세그멘테이션 축 (`--seg-axis`): `qfrac` (기본) / `protocol` / `vwindow` / `rcs` / `cluster`  
-축 변경 시 Step 4와 Step 5 모두 동일한 `--seg-axis` 인수를 사용해야 함.
+세그멘테이션 축 (`--seg-axis`): `qfrac`(기본) / `protocol` / `vwindow` / `rcs` / `cluster` / `q_frac_wide` / `vqslope` / `full_cycle`  
+축 변경 시 Step 4~7이 모두 동일한 `--seg-axis`(및 `--axis-config`)를 사용해야 데이터 경로가 일치한다.
+
+---
+
+## 스크립트별 CLI 옵션 전체 목록
+
+> 이 절은 Step 4 이후 스크립트와 보조 진단/비교 도구의 **모든** 커맨드라인 옵션을 한 곳에 모은 빠른 참조다.
+> Step 1~3(`1_convert`/`2_preprocess`/`3_integrity`)의 옵션은 각 절(§1~§3)에 이미 정리되어 있으므로 생략한다.
+
+### 공통: 축 단축 인자 (`--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts`)
+
+`run_pipeline.py`, `hi_correlation.py`, `hi_segment_viz.py` 세 스크립트가 동일한 패턴을 공유한다 — PowerShell이
+`--axis-config '{"n1":0.4,...}'`의 따옴표를 벗겨버려 JSON 파싱이 깨지는 문제를 우회하기 위해, 자주 쓰는
+q_frac_wide/vqslope 파라미터를 개별 플래그로도 받을 수 있게 했다. 아래 플래그 중 하나라도 지정되면
+내부적으로 JSON으로 합쳐져 `--axis-config`를 대체한다(둘 다 주면 이 단축 인자들이 우선).
+
+| 플래그 | 타입 | 대상 축 | 의미 |
+|---|---|---|---|
+| `--n1` | float | q_frac_wide | 구간 크기(q_frac 비율, `[0.35, 0.45]`) — hi=`[0,n1]`, mid=중앙 n1폭, lo=`[1-n1,1]` |
+| `--n2` | float | q_frac_wide | 세그먼트 길이(q_frac 비율, `0 < n2 < n1`) |
+| `--n-samples` | int | q_frac_wide / vqslope | 구간(존)당 세그먼트 수 |
+| `--mode` | str | vqslope | 플래토 검출 모드 `dva`\|`ica` (기본 `dva`) |
+| `--random-segment` | flag | q_frac_wide / vqslope | 구간 내 고정길이 랜덤 창 추출 옵션 켜기 (기본 `False`) |
+| `--seg-len-pts` | int | q_frac_wide / vqslope | `--random-segment` 시 창의 고정 관측 포인트 수 (기본 20) |
+
+`--random-segment`를 켜면 각 존(hi/mid/lo 또는 head/plateau/tail) 경계 자체는 그대로 두고, 그 안에서
+`seg_len_pts` 길이의 창을 `n_samples`개 랜덤 위치에서 뽑는다(클리핑 금지 — 존이 창보다 짧으면 존 전체를
+1개 세그먼트로 사용). 존 전체 대비 어느 창에도 안 뽑힌 포인트 비율은 `_4_data_hi/{axis}/{tag}/coverage_stats.txt`에
+저장된다. 자세한 설계 근거는 `docs/SCENARIO_STRATEGY.md`의 "공통 옵션: random_segment" 절 참조.
+
+```powershell
+# 예: q_frac_wide, n1=45%, n2=20%, 구간당 4개, 랜덤 창(20포인트 고정) 사용
+python run_pipeline.py 4 --seg-axis q_frac_wide --n1 0.45 --n2 0.2 --n-samples 4 --random-segment --seg-len-pts 20
+
+# 예: vqslope, ica 모드, 구간당 2개
+python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --mode ica --n-samples 2
+```
+
+### `run_pipeline.py` (오케스트레이터)
+
+위치 인자:
+
+| 인자 | 타입/기본값 | 설명 |
+|---|---|---|
+| `from_step` | int, 기본 1 | 시작 스텝 번호 (1~9) |
+
+옵션:
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--to-step` | int, 기본 None(끝까지) | 종료 스텝 번호(포함) |
+| `--workers` | int, 기본 `min(8, cpu_count)` | 데이터 스텝(1~5)에 전달할 병렬 프로세스 수 |
+| `--model-config` | str, 기본 `5_model/config/scr.yaml` | 모델 학습/평가 설정 파일 |
+| `--gates-from` | str, 기본 None | Phase 2(Step 7) gates 디렉터리 직접 지정 (미지정 시 Step 6 출력 자동 탐색 — **7부터 단독 실행 시 반드시 명시**, 안 그러면 `_5_data_model_scr` 전체에서 최근 수정 폴더를 잘못 집을 수 있음) |
+| `--checkpoint` | str, 기본 None | 평가(Step 9) 체크포인트 직접 지정 (미지정 시 Step 7 출력 자동 탐색) |
+| `--seg-axis` | str, 기본 None | 세그멘테이션 축, Step 4~7에 전달 |
+| `--axis-config` | str(JSON), 기본 None | 축 파라미터 JSON, Step 4~7에 전달 |
+| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체(PowerShell 호환) |
+
+```powershell
+python run_pipeline.py                      # 전체(Step 1~9)
+python run_pipeline.py 6                    # 학습+평가만(Step 6~9)
+python run_pipeline.py 6 --to-step 7         # Phase 1~2만
+python run_pipeline.py 8 --to-step 8         # 분류기 학습만
+python run_pipeline.py 9 --checkpoint _5_data_model_scr/.../checkpoints/best.pt   # 평가만
+python run_pipeline.py --workers 4           # 병렬 수 지정(Step 1~5 전용)
+```
+
+### Step 4 — `4_hi_analysis/hi_correlation.py`
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`\|`q_frac_wide`\|`vqslope`\|`full_cycle`(부분 사이클 대비 베이스라인, 방향당 전체 curve 1개) |
+| `--axis-config` | str(JSON), 기본 `"{}"` | 축 파라미터 JSON 문자열. PowerShell에서는 `--axis-config=$cfg` 형태 또는 아래 단축 인자 사용 |
+| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체 |
+| `--workers` | int, 기본 `cpu_count-2` | 병렬 프로세스 수 |
+| `--force` | flag | 캐시 무시하고 HI 재추출 |
+| `--dataset` | str, 기본 `MIT` | 디버그/시각화 대상 데이터셋(`MIT`\|`HUST`) |
+| `--cell` | str, 기본 `""` | 디버그 시각화 대상 셀 ID |
+| `--cycle` | int, 기본 0 | 디버그 시각화 대상 사이클(0=첫 유효 사이클) |
+| `--n-top` | int, 기본 4 | 산점도에 표시할 상위 HI 수 |
+| `--plateau-debug` | flag | 단일 사이클 플래토 판정 디버그 플롯 생성 후 종료 |
+| `--plateau-summary` | flag | 전체 데이터 plateau_frac 요약 플롯 생성 후 종료 |
+| `--curve-debug` | flag | 6-세그먼트 × 5-커브 시각화(HI 유효성 검증) |
+| `--cycles` | str, 기본 `""` | `--curve-debug` 대상 사이클(쉼표 구분, 예: `1,100,300,500`) — 미지정 시 `--n-cycles` 개수만큼 자동 선택 |
+| `--n-cycles` | int, 기본 5 | `--curve-debug` 자동 선택 사이클 수 |
+
+```powershell
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_wide --force --workers 8
+python 4_hi_analysis/hi_correlation.py --seg-axis full_cycle --force --workers 8
+python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --mode dva --n-samples 1
+```
+
+### Step 5 — `4_hi_analysis/hi_segment_viz.py`
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`(q_frac_wide/vqslope도 단축 인자로 지원) |
+| `--axis-config` | str(JSON), 기본 `"{}"` | 축 파라미터 JSON |
+| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체 |
+| `--workers` | int, 기본 4 | HI 추출 병렬 워커 수 |
+| `--n-cycles` | int, 기본 4 | 세그먼트 cuts 플롯 대표 사이클 수 |
+| `--force` | flag | 캐시 무시하고 HI 재추출 |
+
+### Step 6/7 — `5_model/train_scr.py`
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--config` | str, 기본 `5_model/config/scr.yaml` | 설정 파일 |
+| `--phase` | int, `{1,2}`, 기본 None | 1=Gate 학습(HI 서브셋 선정), 2=분류·회귀 정밀 학습. 미지정 시 `--no-gates`/yaml `gates_from` 유무로 자동 결정 |
+| `--charge-m` | int, 기본 None | Phase 2 충전 probe 상위 m개 (yaml `charge_probe_m` 오버라이드) |
+| `--discharge-m` | int, 기본 None | Phase 2 방전 probe 상위 m개 (yaml `discharge_probe_m` 오버라이드) |
+| `--scen-k` | int, 기본 None | 시나리오별 scen HI 수 오버라이드 (yaml `scen_k_count`) |
+| `--gates-from` | str, 기본 None | Phase 2 시 이전 run 폴더 경로(gates JSON 자동 탐색). 미지정 시 yaml `data.gates_from` 사용 |
+| `--no-gates` | flag | [legacy] `--phase 1`과 동일 |
+| `--seg-axis` | str, 기본 None | 세그멘테이션 축. 미지정 시 yaml `scenario.axis` 또는 `qfrac` |
+| `--axis-config` | str(JSON), 기본 None | 축 파라미터 JSON |
+| `--seed` | int, 기본 None | 재현성 시드(yaml 오버라이드) |
+| `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
+
+`model.regression_model` 값에 따라 회귀 헤드가 바뀐다(yaml `model:` 섹션, CLI 옵션 아님):
+`mlp`(기본) / `transformer` / `i_transformer` / `resnet_tab` / `ft_transformer` / `raw_mlp`(HI 없이 raw_v/raw_i만
+사용하는 베이스라인 — §"베이스라인 비교" 1-B 참조).
+
+```powershell
+python 5_model/train_scr.py --phase 1
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0708_1533
+python 5_model/train_scr.py --phase 1 --charge-m 3 --discharge-m 1 --scen-k 5
+```
+
+### Step 8 — `5_model/train_classifier.py`
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--config` | str, 기본 `5_model/config/scr.yaml` | 설정 파일 |
+| `--run-dir` | str, 기본 None | Phase 2 run 폴더 경로(분류기를 `{run_dir}/classifier/`에 저장). 미지정 시 `output_dir` 내 최신 폴더 |
+| `--epochs` | int, 기본 None | 최대 에폭(yaml `training.epochs` 오버라이드) |
+| `--lr` | float, 기본 None | 학습률(yaml `training.lr` 오버라이드) |
+| `--d-hidden` | int, 기본 64 | `MLPProbeClassifier` hidden dim |
+| `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
+
+`raw_mlp` 모드 run(`config.yaml`의 `model.regression_model == "raw_mlp"`)이면 라우팅 자체가 무의미해
+자동으로 학습을 건너뛴다(§"베이스라인 비교" 1-B 참조).
+
+### Step 9 — `5_model/test_scr.py`
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--config` | str, 기본 `5_model/config/scr.yaml` | 설정 파일 |
+| `--checkpoint` | str, 기본 None | 평가할 체크포인트(미지정 시 최신 run 자동 탐색) |
+| `--classifier-ckpt` | str, 기본 None | 시나리오 분류기 체크포인트. 미지정 시 `run_dir/classifier/clf_best.pt` 자동 탐색 |
+| `--rep-cells` | str 여러 개(`nargs="+"`), 기본 None | 용량 곡선 플롯용 대표 셀 ID 목록 |
+| `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
+
+분류기 체크포인트가 있으면 oracle/hard/soft 3모드를 모두 평가하고, 없으면(또는 `raw_mlp` run이면) 자동으로
+oracle 모드만 실행한다. `test.random_segment_test: true`(yaml)면 test_rs 데이터로 동일 3모드를 추가 평가한다.
+
+### 보조 도구 — `4_hi_analysis/seg_diagnose.py` (세그먼트 진단·비교)
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--seg-axis` | str, 기본 None | 세그멘테이션 축(미지정 시 `hi_features*.pkl` 자동 탐색해 모든 축 순회) |
+| `--axis-config` | str(JSON), 기본 `"{}"` | 축 파라미터 JSON |
+| `--dataset` | str, 기본 `MIT`, `choices=[MIT,HUST,mit,hust]` | 통계 스캔 대상 데이터셋 |
+| `--cell` | str, 기본 `""` | 사이클 플롯 대상 셀 ID(미지정 시 첫 번째 셀) |
+| `--cycle` | int, 기본 0 | 사이클 플롯 대상 사이클(0=첫 유효 사이클) |
+| `--mode` | str, 기본 `segment`, `choices=[segment,ic,vqzone,compare,all]` | `segment`(기본, V-t/V-Q 세그먼트 밴드) \| `ic`(IC 커브+창 경계) \| `vqzone`(vqslope 존 분리 근거, vqslope 전용) \| `compare`(여러 축/파라미터 조건 비교, `--cell` 필수) \| `all` |
+| `--compare-config` | str, 기본 None | `--mode compare` 전용: 비교 조건 목록 JSON 경로(기본 `4_hi_analysis/compare_conditions.json`) — `[{"axis":..., "axis_config":{...}, "label":"(선택)"}]` 형식 |
+| `--n-cycles` | int, 기본 6 | `ic` 모드 대표 사이클 수 |
+| `--n-random` | int, 기본 10 | `--cell` 미지정 시 사용할 랜덤 셀 수 |
+| `--seed` | int, 기본 42 | 랜덤 셀/사이클 선택 재현성 시드 |
+| `--no-stats` | flag | 통계 수집·출력 생략 |
+| `--no-plot` | flag | 사이클 시각화 생략 |
+| `--survival-stats` | flag | q_frac_wide 전용: MIT+HUST 생존율/시간길이/전압길이 비교 통계(`--seg-axis q_frac_wide` 필수, `--dataset`/`--no-plot` 무시) |
+| `--n1`/`--n2`/`--n-samples` | float/float/int, 기본 None | `--survival-stats`용 q_frac_wide 파라미터 |
+
+```powershell
+# 동일 셀·사이클을 여러 조건(축/파라미터)으로 나란히 비교
+python 4_hi_analysis/seg_diagnose.py --mode compare --dataset MIT --cell b1c11 --cycle 400
+
+# vqslope의 head/plateau/tail 분리 근거 시각화
+python 4_hi_analysis/seg_diagnose.py --seg-axis vqslope --mode vqzone --cell 10-1 --cycle 500
+```
+
+### 보조 도구 — `5_model/visualize_results.py` (다중 run 비교)
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--runs` | str 여러 개(`nargs="+"`), 필수 | 비교할 run 폴더 경로 2개 이상(동일 축·`scenario_names`이어야 함) |
+| `--labels` | str 여러 개, 기본 None | run별 표시 이름(미지정 시 폴더명, `--runs`와 개수 일치 필요) |
+| `--with-jacobian` | flag | 실 데이터 기반 Jacobian(gradient) 코사인 유사도 패널 추가(느림 — 데이터셋 재구축 필요) |
+| `--checkpoint-name` | str, 기본 `best.pt` | run별 사용할 체크포인트 파일명(없으면 `final.pt` 폴백) |
+| `--infer-batch-size` | int, 기본 256 | 인퍼런스 벤치마크 배치 크기 |
+| `--infer-warmup` | int, 기본 10 | 인퍼런스 벤치마크 워밍업 반복 수 |
+| `--infer-reps` | int, 기본 50 | 인퍼런스 벤치마크 측정 반복 수 |
+| `--jacobian-max-samples` | int, 기본 300 | 시나리오/전체당 gradient 계산 최대 샘플 수 |
+| `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
+| `--out-name` | str, 기본 None | 결과 폴더명 오버라이드(기본 `<MMDD_HHMM>_result_comparison`) |
+
+결과 PNG는 RMSE/MAE/MAPE(시나리오별) + 스칼라 지표 7종 + 선정 HI 자카드 유사도(이진/확률 가중 2종,
+run별 시나리오×시나리오 행렬) [+ `--with-jacobian` 시 Jacobian 코사인 유사도]로 구성된다.
+
+```powershell
+python 5_model/visualize_results.py --runs _5_data_model_scr/RUN1 _5_data_model_scr/RUN2 --labels mlp resnet
+```
+
+### 보조 도구 — `5_model/finetune_scr.py` (Few-shot fine-tuning)
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--checkpoint` | str, 필수 | Phase 2 체크포인트 경로(`best.pt`) |
+| `--finetune-dataset` | str, 기본 `MIT` | fine-tuning 대상 데이터셋 |
+| `--finetune-cells` | int, 기본 5 | few-shot 학습에 사용할 셀 수(N-shot) |
+| `--val-split` | float, 기본 0.2 | 나머지 셀 중 검증용 비율 |
+| `--epochs` | int, 기본 100 | fine-tuning 에폭 수 |
+| `--lr` | float, 기본 1e-4 | 학습률 |
+| `--seed` | int, 기본 42 | 재현성 시드 |
+| `--config` | str, 기본 None | yaml 오버라이드(미지정 시 체크포인트에 저장된 config 사용) |
+| `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
+
+### 보조 도구 — `5_model/clustering.py` (HI 클러스터링·mRMR 분석)
+
+| 플래그 | 타입/기본값 | 설명 |
+|---|---|---|
+| `--k-max` | int, 기본 9 | K-Means 최대 k |
+| `--n-init` | int, 기본 5 | `MiniBatchKMeans` n_init |
+| `--knn` | int, 기본 10 | KNN Purity 이웃 수 |
+| `--mrmr-m` | int, 기본 20 | mRMR로 선택할 최대 HI 수 |
+| `--no-plot` | flag | 플롯 생성 생략 |
+| `--n-jobs` | int, 기본 -1 | joblib 병렬 수(-1=전체 코어) |
+| `--out` | str, 기본 `docs/_clustering_results.json` | 결과 JSON 경로 |
 
 ---
 
@@ -1642,6 +1872,75 @@ python 5_model/finetune_scr.py --checkpoint ... --finetune-dataset MIT --finetun
 | XGBoost (hand-crafted HI) | 트리 앙상블 | `data_HI/{axis}/*.pkl` → xgb.train() | 피처 중요도 vs SCR gate 비교 가능 |
 | LSTM (raw V-I-t 시계열) | Deep | PyTorch LSTM, 전체 방전 곡선 입력 | raw signal 모델 상한선 |
 | Single-segment (probe-only) | SCR 어블레이션 | scen gate 비활성, probe만 → MLP head | 라우팅 효용 검증 |
+
+> 위 표는 아직 미구현 계획 목록이다. 아래 두 베이스라인(`full_cycle`, `raw_mlp`)은 **이미 구현·검증 완료**된 상태이며,
+> 각각 "부분 사이클 관측"과 "HI 추출" — 이 프레임워크의 두 핵심 설계 선택 — 이 실제로 기여하는지를 직접 검증한다.
+
+##### 1-A. `full_cycle` 베이스라인 — 부분 관측의 비용(손실폭) 측정
+
+**검증 대상**: q_frac_wide/vqslope 등은 사이클의 일부(예: n2=9~20%)만 관측하는 "부분 사이클" 조건이다.
+"그럼 전체 사이클을 다 보면 얼마나 더 잘 맞히는가"를 재는 **상한선(ceiling) 베이스라인**이 없으면,
+"부분 사이클로 충분하다"는 논문 핵심 주장의 손실폭 자체를 아무도 검증할 수 없다.
+
+**구현**: `common/scenario/full_cycle.py`의 `FullCycleSegmenter` — 구간 분할을 전혀 하지 않고 방향(충전/방전)당
+전체 curve 1개를 그대로 세그먼트로 사용한다. 시나리오는 `chg_full`(0)/`dis_full`(1) 2개뿐이고, 시나리오가
+방향만으로 100% 결정되므로 분류 자체가 무의미해 `n_classes=1`, `classifier_default="none"`으로 등록했다
+(`common/scenario/test_rs.py`와 동일한 패턴). HI 계산 코드(`5_model/hi_compute.py`)는 그대로 재사용 —
+seg가 훨씬 길어져도 morph(DTW/Fréchet) 계열 HI는 고정 50포인트 그리드로 보간 후 계산하므로 연산량이
+늘지 않는다(실측: MIT 1개 셀 778 세그먼트, 28초).
+
+**실행**:
+```bash
+# Step 4: HI 추출 (전체 MIT+HUST, 방향당 curve 전체를 1개 세그먼트로 HI 계산)
+python 4_hi_analysis/hi_correlation.py --seg-axis full_cycle --force --workers 8
+
+# Step 6~9: 학습~평가 (run_pipeline로 한 번에, 다른 축과 동일하게 동작)
+python run_pipeline.py 6 --seg-axis full_cycle --to-step 9
+```
+데이터 경로: `_4_data_hi/full_cycle/{seg,cycle}/` — 축 파라미터가 없어 q_frac_wide/vqslope처럼 하위
+태그 폴더가 붙지 않고 axis 이름 그대로 쓰인다(`hi_correlation.py`/`train_scr.py`/`train_classifier.py`
+모두 "그 외 축" 폴백 규칙을 그대로 타므로 코드 수정이 필요 없었다).
+
+**해석 방법**: `full_cycle`의 test RMSE/R²를 같은 조건(축 설정 외 동일 config)의 q_frac_wide 결과와
+나란히 비교한다(`visualize_results.py --runs full_cycle_run q_frac_wide_run`). 그 차이가 "부분 관측으로
+인한 정확도 손실"이며, 작을수록 "부분 사이클 관측만으로 충분하다"는 주장이 강해진다.
+
+**주의**: 세그먼트 길이가 훨씬 길어(전체 충/방전 curve) `stat`/`diff`/`lfp` HI의 절대 스케일이 부분
+세그먼트와 다를 수 있다 — HI 값 자체를 직접 비교하지 말고 최종 SOH 예측 성능(RMSE/R²)만 비교할 것.
+
+##### 1-B. `raw_mlp` 베이스라인 — HI 추출 자체의 기여도 측정
+
+**검증 대상**: "수작업 HI 64개를 뽑는 게 실제로 가치가 있는가, 아니면 raw 곡선을 그냥 학습기에 넣어도
+비슷한가?"라는 질문. CNN(B-4/B-5 계열)을 쓰면 "raw 입력"과 "CNN 아키텍처"가 뒤섞여 원인 구분이
+안 되므로, **같은 MLP 구조**에 입력만 HI(게이트로 고른 64차원) 대신 raw로 바꿔 비교한다.
+
+**구현**: `5_model/models/raw_mlp_model.py`의 `RawMLPModel` — HI/게이트를 완전히 우회하고, 이미
+`SegmentDataset`이 만들어 두는 `x_raw`(raw_v/raw_i 48포인트 리샘플, 2채널=96차원)를 flatten해
+direction/cap_init과 concat한 뒤 평범한 2-hidden-layer MLP로 SOH를 직접 회귀한다. `SCRModel`과 동일한
+batch/출력 dict 계약(`cap_pred`/`level_logits`/`probe_z`/`scen_z`)을 따르고, `_fixed_probe=True`/
+`_fixed_scen=True`/`probe_mlp=None`으로 선언해 `SCRLoss`의 L0·CE 항이 자동으로 비활성화되므로
+**`SCRTrainer`/`SCREvaluator`를 코드 수정 없이 그대로 재사용**한다.
+
+**실행**: `scr.yaml`에 한 줄만 바꾸면 어떤 축(q_frac_wide/vqslope/full_cycle 무엇이든)에도 적용된다.
+```yaml
+model:
+  regression_model: "raw_mlp"   # 기본값 "mlp" 대신
+```
+```bash
+python run_pipeline.py 6 --seg-axis <원하는 축> --model-config 5_model/config/scr.yaml --to-step 9
+```
+- Step 6/7(Phase 1/2): raw_mlp는 게이트가 없어 phase 구분이 무의미 — 두 phase 모두 동일하게
+  `RawMLPModel`을 처음부터 학습한다(모델이 작아 재학습 비용이 낮음, `train_scr.py`).
+- Step 8(분류기 학습): `train_classifier.py`가 run의 `config.yaml`에서 `regression_model: raw_mlp`를
+  감지하면 "라우팅이 필요 없다"는 메시지와 함께 자동으로 건너뛴다.
+- Step 9(평가): `test_scr.py`가 raw_mlp 체크포인트를 감지하면 `RawMLPModel`로 재구성하고, 분류기
+  로딩·HI 게이트 로딩·routing heatmap을 모두 스킵한 뒤 **oracle 전용**으로 자동 평가한다(hard/soft
+  라우팅은 HI 기반 시나리오 분류 개념이 있어야 의미가 있는데 raw_mlp는 seg_idx를 직접 입력받으므로
+  해당 없음).
+
+**해석 방법**: raw_mlp 결과를 같은 축의 HI 기반 SCR 결과와 비교한다. HI 기반이 확연히 좋으면
+"수작업 HI 추출이 실제로 정보를 압축·정제하는 가치가 있다"는 근거가 되고, raw_mlp가 비슷하거나
+더 좋으면 HI 설계(선택된 카테고리/통계량)를 재검토해야 한다는 신호다.
 
 #### 2. 양방향 크로스-데이터셋 평가
 

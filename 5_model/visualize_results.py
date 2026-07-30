@@ -14,17 +14,29 @@ routing/routing_table.csv / checkpoints/*.pt 를 읽어 하나의 비교 플롯�
   Row 4   : 스칼라 지표 7종 — R²(hard, overall) / 분류 정확도(hard) / 인퍼런스
             시간(ms/sample) / 학습 파라미터 수 / oracle→hard RMSE 저하율(라우팅
             비용) / 평균 HI 비용(avg_cost) / random-seg(E2) RMSE(있으면)
-  Row 5   : 선정 HI 자카드(Jaccard) 유사도 히트맵 — run별로 1개씩, probe(방향게이트) +
+  Row 5   : 선정 HI 자카드(Jaccard) 유사도 히트맵(이진) — run별로 1개씩, probe(방향게이트) +
             시나리오 간 (scenario × scenario) 행렬. 한 run 안에서 시나리오마다 얼마나
             다른 HI 서브셋을 선정했는지 보기 위함 (대각선=1.0, 낮을수록 시나리오 간
-            HI 선택이 서로 다름). routing_table.csv의 이진 마스크만 사용(모델 재로딩 불요).
-  Row 6   : (--with-jacobian 지정 시) 선정 HI 자코비안(gradient) 코사인 유사도
+            HI 선택이 서로 다름). routing_table.csv의 이진(top-k 컷오프 후) 마스크만
+            사용(모델 재로딩 불요).
+  Row 6   : 확률 가중 Jaccard(Ruzicka 유사도) 히트맵 — Row 5와 같은 레이아웃이지만
+            gates/classification_HIs.json·regression_HIs.json의 top-k로 자르기 전
+            원본 gate 확률을 사용한다. 이진 버전은 top-k 경계에서 아깝게 탈락한 HI를
+            무조건 "안 겹침"으로 취급하지만, 이 버전은 min(p,q)/max(p,q) 가중으로
+            그 "거의 선택될 뻔한" 정도까지 반영한다(이진 마스크를 넣으면 Row 5와 동일).
+  Row 7   : (--with-jacobian 지정 시) 선정 HI 자코비안(gradient) 코사인 유사도
             히트맵 — Overall + 시나리오별. 실제 테스트 샘플에서
             d(cap_pred)/d(x_hi) 를 시나리오별로 평균한 벡터끼리 비교 —
             "같은 HI를 골랐어도 실제로 비슷하게 쓰는가"까지 검증.
 
-전제: 비교 대상 run들은 동일한 시나리오 축(scenario_spec.json의 axis / n_scenarios /
-      scenario_names)을 공유해야 한다. 다르면 명확한 에러로 중단한다.
+전제: 비교 대상 run들이 동일한 시나리오 축(scenario_spec.json의 axis / n_scenarios /
+      scenario_names)을 공유하면 위 Row 1-3/5-7에 시나리오별 서브플롯·히트맵이 모두 나온다.
+      축이 서로 다르면(예: q_frac_wide vs vqslope vs q_abs) 시나리오 이름·개수 자체가
+      의미상 대응되지 않으므로 에러를 내지 않고 "축 간 비교 모드"로 자동 전환한다 —
+      Row 1-3은 Overall만 남기고 시나리오별 열을 생략하며, Row 5-7(시나리오×시나리오
+      Jaccard/자코비안 히트맵)은 축마다 시나리오 구조가 달라 비교 자체가 성립하지
+      않으므로 생략한다. 대표 셀 용량곡선 비교(capacity_curve_compare_*.png)도 이 경우
+      시나리오별 행 대신 시나리오 평균 1개 행으로 그린다.
 
 결과 저장 위치:
   _5_data_model_scr/comparison/<MMDD_HHMM>_result_comparison/
@@ -42,6 +54,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -115,6 +128,20 @@ def _resolve_device(s: str) -> torch.device:
     return torch.device(s)
 
 
+def _normalize_legacy_metrics(metrics: dict) -> None:
+    """2026-07-23 oracle/hard/soft 통합 평가 이전(protocol/vwindow/rcs 등 구형 run)
+    metrics.json은 test.{capacity,breakdown,scenario,efficiency}를 최상위에 바로 두고
+    분류기(classifier) 자체가 없었다(scenario.disabled=true) — oracle/hard 라우팅
+    구분이 없다. 이런 run을 축 간 비교에 섞을 수 있도록, test.capacity를
+    test.oracle.capacity로 감싸 새 스키마와 동일한 모양으로 맞춘다(in-place).
+    test.hard가 없으므로 has_clf=False로 남아 hard 관련 필드는 그대로 None 처리된다.
+    """
+    test = metrics.get("test")
+    if not isinstance(test, dict) or "oracle" in test or "capacity" not in test:
+        return
+    test["oracle"] = {"capacity": test["capacity"], "classification": {}}
+
+
 # =============================================================================
 # Run bundle 로딩
 # =============================================================================
@@ -132,10 +159,12 @@ class RunBundle:
         self.metrics: dict = json.loads(
             (run_dir / "metrics" / "metrics.json").read_text(encoding="utf-8")
         )
+        _normalize_legacy_metrics(self.metrics)
         self.has_clf = "hard" in self.metrics.get("test", {})
 
         self.pred_rows = self._load_predictions()
         self.routing_sets = self._load_routing_table()
+        self.gate_probs = self._load_gate_probs()
 
         eff_path = run_dir / "random_seg_test" / "metrics.json"
         self.random_seg: dict | None = (
@@ -154,9 +183,13 @@ class RunBundle:
         with open(path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 rows.append({
-                    "seg_name": r["seg_name"],
-                    "soh_true": float(r["soh_true"]),
-                    "soh_pred": float(r["soh_pred"]),
+                    "cell_id":     r["cell_id"],
+                    "cycle":       int(r["cycle"]),
+                    "seg_name":    r["seg_name"],
+                    "soh_true":    float(r["soh_true"]),
+                    "soh_pred":    float(r["soh_pred"]),
+                    "cap_true_Ah": float(r["cap_true_Ah"]),
+                    "cap_pred_Ah": float(r["cap_pred_Ah"]),
                 })
         return rows
 
@@ -171,6 +204,38 @@ class RunBundle:
                 gate_name = row[0]
                 active = {hi_names[i] for i, v in enumerate(row[1:]) if v == "1"}
                 out[gate_name] = active
+        return out
+
+    def _load_gate_probs(self) -> dict[str, np.ndarray]:
+        """gates/*.json의 0/1로 자르기 전 원본 gate 확률을 HI 인덱스(0..N_HI-1) 정렬
+        벡터로 복원한다. routing_sets(이진)와 같은 라벨 체계(probe + 시나리오명)를 쓴다 —
+        확률 가중 Jaccard(Ruzicka 유사도) 계산용. gates/*.json이 없으면 빈 dict."""
+        out: dict[str, np.ndarray] = {}
+
+        cls_path = self.run_dir / "gates" / "classification_HIs.json"
+        if cls_path.exists():
+            data = json.loads(cls_path.read_text(encoding="utf-8"))
+            ch  = np.zeros(N_HI, dtype=np.float64)
+            dis = np.zeros(N_HI, dtype=np.float64)
+            for idx, p in zip(data.get("charge_ranked", []), data.get("charge_probs", [])):
+                ch[idx] = p
+            for idx, p in zip(data.get("discharge_ranked", []), data.get("discharge_probs", [])):
+                dis[idx] = p
+            out["probe"] = np.maximum(ch, dis)   # routing_table.csv의 union(probe) 규칙과 동일
+
+        reg_path = self.run_dir / "gates" / "regression_HIs.json"
+        if reg_path.exists():
+            data = json.loads(reg_path.read_text(encoding="utf-8"))
+            for s in range(self.spec.n_scenarios):
+                ranked = data.get(f"seg_{s}_ranked")
+                probs  = data.get(f"seg_{s}_probs")
+                if ranked is None or probs is None:
+                    continue
+                vec = np.zeros(N_HI, dtype=np.float64)
+                for idx, p in zip(ranked, probs):
+                    vec[idx] = p
+                sname = data.get(f"seg_{s}_seg_name", self.spec.scenario_names[s])
+                out[sname] = vec
         return out
 
 
@@ -190,16 +255,24 @@ def _load_bundles(run_dirs: list[str], labels: list[str] | None) -> list[RunBund
     return bundles
 
 
-def _validate_same_axis(bundles: list[RunBundle]) -> None:
+def _check_cross_axis(bundles: list[RunBundle]) -> bool:
+    """비교 대상 run들의 시나리오 축이 서로 다른지 확인한다.
+
+    과거엔 축이 다르면 즉시 에러로 중단했지만, 축 자체가 다른 run들을 나란히 보고
+    싶은 경우(예: protocol/vwindow/rcs/q_frac_wide/vqslope/q_abs 전체 비교)가 실제로
+    있어 — 시나리오 이름/개수가 대응되지 않는 시나리오별 서브플롯·히트맵만 생략하고
+    Overall 지표는 계속 비교할 수 있도록 완화했다. True를 반환하면 호출부가
+    "축 간 비교 모드"로 렌더링한다.
+    """
     ref = bundles[0].spec
-    for b in bundles[1:]:
-        if b.spec.axis != ref.axis or b.spec.scenario_names != ref.scenario_names:
-            raise ValueError(
-                "비교 대상 run들의 시나리오 축이 다릅니다 — 같은 축(axis)으로 학습된 "
-                "run들만 비교할 수 있습니다.\n"
-                f"  [{ref.axis}] {bundles[0].label}: {ref.scenario_names}\n"
-                f"  [{b.spec.axis}] {b.label}: {b.spec.scenario_names}"
-            )
+    diffs = [b for b in bundles[1:] if b.spec.axis != ref.axis or b.spec.scenario_names != ref.scenario_names]
+    if diffs:
+        print("[viz] 비교 대상 run들의 시나리오 축이 서로 다릅니다 — 축 간 비교 모드(Overall만) 사용:")
+        print(f"  [{ref.axis}] {bundles[0].label}: {ref.scenario_names}")
+        for b in diffs:
+            print(f"  [{b.spec.axis}] {b.label}: {b.spec.scenario_names}")
+        return True
+    return False
 
 
 # =============================================================================
@@ -380,6 +453,13 @@ def _axis_dir_from_spec(spec: ScenarioSpec) -> str:
         n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
         return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}"
+    if spec.axis == "q_abs":
+        p = spec.params or {}
+        ms = int(round(p.get("mid_start", 0.20) * 100))
+        me = int(round(p.get("mid_end", 0.50) * 100))
+        sl = int(round(p.get("seg_len", 0.15) * 100))
+        ns = int(p.get("n_samples", 4))
+        return f"q_abs/ms-{ms}%_me-{me}%_sl-{sl}%_N-{ns}"
     return spec.axis
 
 
@@ -458,6 +538,17 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(u) if u else 1.0
 
 
+def _weighted_jaccard(a: "np.ndarray | None", b: "np.ndarray | None") -> float:
+    """확률 가중 Jaccard(Ruzicka 유사도) — a/b가 이진(0/1) 벡터면 _jaccard와 동일한 값.
+    0/1 top-k 컷오프 전 원본 gate 확률을 쓰면, top-k 경계 근처에서 아깝게 탈락한 HI도
+    "일부만 겹친 것"으로 반영된다(이진 Jaccard는 컷오프 반대편이면 무조건 0 취급)."""
+    if a is None or b is None:
+        return float("nan")
+    num = float(np.minimum(a, b).sum())
+    den = float(np.maximum(a, b).sum())
+    return num / den if den > 1e-12 else 1.0
+
+
 def _cosine(a: np.ndarray | None, b: np.ndarray | None) -> float:
     if a is None or b is None:
         return float("nan")
@@ -484,7 +575,7 @@ def _sim_matrix(bundles: list[RunBundle], key: str, kind: str) -> np.ndarray:
 
 
 def _scenario_sim_matrix(bundle: RunBundle, labels: list[str]) -> np.ndarray:
-    """단일 run 내부에서 라벨(probe/시나리오)끼리 선정 HI 자카드 유사도.
+    """단일 run 내부에서 라벨(probe/시나리오)끼리 선정 HI 자카드 유사도(이진, top-k 컷오프 후).
     낮을수록 그 두 라벨이 서로 다른 HI 서브셋을 쓴다는 뜻 — "시나리오별로 얼마나
     다른 HI를 골랐는가"를 보기 위한 행렬(대각선은 항상 1.0)."""
     n = len(labels)
@@ -494,6 +585,19 @@ def _scenario_sim_matrix(bundle: RunBundle, labels: list[str]) -> np.ndarray:
             ai = bundle.routing_sets.get(labels[i], set())
             aj = bundle.routing_sets.get(labels[j], set())
             m[i, j] = _jaccard(ai, aj)
+    return m
+
+
+def _scenario_sim_matrix_weighted(bundle: RunBundle, labels: list[str]) -> np.ndarray:
+    """_scenario_sim_matrix의 확률 가중(Ruzicka) 버전 — top-k로 자르기 전 원본 gate
+    확률(bundle.gate_probs)을 사용해 top-k 경계 근처 HI의 "부분 겹침"까지 반영한다."""
+    n = len(labels)
+    m = np.full((n, n), np.nan)
+    for i in range(n):
+        for j in range(n):
+            ai = bundle.gate_probs.get(labels[i])
+            aj = bundle.gate_probs.get(labels[j])
+            m[i, j] = _weighted_jaccard(ai, aj)
     return m
 
 
@@ -559,12 +663,16 @@ def _heatmap_row(fig, gs_row, col_labels: list[str], bundles: list[RunBundle],
 
 
 def _scenario_heatmap_row(fig, gs_row_spec, bundles: list[RunBundle],
-                           labels: list[str], title_prefix: str):
-    """run별로 하나씩(열=run) labels×labels(probe+시나리오) 자카드 행렬을 그린다.
+                           labels: list[str], title_prefix: str,
+                           matrix_fn=_scenario_sim_matrix):
+    """run별로 하나씩(열=run) labels×labels(probe+시나리오) 유사도 행렬을 그린다.
 
     _heatmap_row(kind="jaccard")는 "같은 시나리오를 run끼리 비교"(run×run)했지만,
     이 함수는 "한 run 안에서 시나리오끼리 비교"(scenario×scenario) — 시나리오별로
     실제로 다른 HI를 선정했는지 보기 위한 본래 의도에 맞춘 버전.
+
+    matrix_fn: _scenario_sim_matrix(이진 Jaccard, 기본) 또는
+               _scenario_sim_matrix_weighted(확률 가중 Ruzicka) 중 선택.
     """
     n_runs = len(bundles)
     inner = gridspec.GridSpecFromSubplotSpec(1, n_runs, subplot_spec=gs_row_spec, wspace=0.7)
@@ -572,7 +680,7 @@ def _scenario_heatmap_row(fig, gs_row_spec, bundles: list[RunBundle],
     im = None
     for c, b in enumerate(bundles):
         ax = fig.add_subplot(inner[0, c])
-        m = _scenario_sim_matrix(b, labels)
+        m = matrix_fn(b, labels)
         im = ax.imshow(m, vmin=0, vmax=1, cmap="RdYlGn")
         ax.set_xticks(range(n_lab)); ax.set_xticklabels(labels, rotation=90, fontsize=6)
         ax.set_yticks(range(n_lab)); ax.set_yticklabels(labels, fontsize=6)
@@ -605,11 +713,16 @@ def _scalar_bar_row(fig, gs_row, defs: list[tuple[str, str, str]],
         ax.set_xticks([]); ax.set_title(title, fontsize=8.2); ax.tick_params(axis="y", labelsize=7)
 
 
-def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path):
-    scen_names = bundles[0].spec.scenario_names
+def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path, cross_axis: bool = False):
+    if cross_axis:
+        # 축이 다르면 시나리오 이름 자체가 대응되지 않으므로 Overall 열만 남긴다.
+        scen_names: list[str] = []
+        col_labels = ["Overall"]
+    else:
+        scen_names = bundles[0].spec.scenario_names
+        col_labels = ["Overall"] + list(scen_names)
     n_scen = len(scen_names)
-    n_cols = n_scen + 1
-    col_labels = ["Overall"] + list(scen_names)
+    metric_n_cols = len(col_labels)  # RMSE/MAE/MAPE 열 수 — cross_axis면 Overall 1개뿐
     jaccard_labels = ["probe"] + list(scen_names)
 
     scalar_defs_all = [
@@ -621,16 +734,24 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path):
         ("avg_cost", "평균 HI 비용", "{:.1f}"),
         ("random_seg_rmse", "Random-seg E2 RMSE", "{:.4f}"),
     ]
-    n_scalar_rows = -(-len(scalar_defs_all) // n_cols)  # ceil div — 열이 부족한 축이면 자동으로 여러 줄에 배치
+    # 스칼라 지표는 애초에 시나리오와 무관(전역값)이므로 metric_n_cols와 별개로 자체 열 수를 갖는다
+    # — cross_axis로 metric_n_cols=1이 되어도 스칼라 행이 세로로 7줄씩 늘어지지 않게 한다.
+    grid_n_cols = max(metric_n_cols, min(len(scalar_defs_all), 4))
+    n_scalar_rows = -(-len(scalar_defs_all) // grid_n_cols)  # ceil div
 
-    # 행 구성: RMSE, MAE, MAPE(3) + 스칼라(n_scalar_rows) + Jaccard(1) [+ Jacobian(1)]
-    row_plan = ["rmse", "mae", "mape"] + ["scalar"] * n_scalar_rows + ["jaccard"]
-    if with_jacobian:
+    # 행 구성: RMSE, MAE, MAPE(3) + 스칼라(n_scalar_rows) [+ Jaccard(1) + weighted Jaccard(1)] [+ Jacobian(1)]
+    # Jaccard/자코비안 행은 시나리오×시나리오 구조에 의존하므로 축이 다르면(cross_axis) 생략한다.
+    row_plan = ["rmse", "mae", "mape"] + ["scalar"] * n_scalar_rows
+    if not cross_axis:
+        row_plan += ["jaccard", "jaccard_weighted"]
+    if with_jacobian and not cross_axis:
         row_plan.append("jacobian")
+    elif with_jacobian and cross_axis:
+        print("[viz] 축 간 비교 모드에서는 시나리오별 자코비안 히트맵을 생략합니다(--with-jacobian 무시).")
     total_rows = len(row_plan)
 
-    fig = plt.figure(figsize=(2.7 * max(n_cols, 7), 2.5 * total_rows))
-    gs = gridspec.GridSpec(total_rows, n_cols, figure=fig, hspace=0.9, wspace=0.5)
+    fig = plt.figure(figsize=(2.7 * max(grid_n_cols, 7), 2.5 * total_rows))
+    gs = gridspec.GridSpec(total_rows, grid_n_cols, figure=fig, hspace=0.9, wspace=0.5)
 
     cap_cache: dict[str, dict[str, dict[str, float]]] = {b.label: _compute_capacity_panels(b) for b in bundles}
 
@@ -647,31 +768,32 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path):
 
     row_i = 0
     scalar_row_i = 0
-    im1 = im2 = None
+    im1 = im1b = im2 = None
     for kind in row_plan:
         if kind in metric_row_defs:
             prefix, ylabel, fmt = metric_row_defs[kind]
-            _bar_row(fig, [gs[row_i, c] for c in range(n_cols)], col_labels, bundles,
+            _bar_row(fig, [gs[row_i, c] for c in range(metric_n_cols)], col_labels, bundles,
                      _get(kind), prefix, ylabel, fmt=fmt)
         elif kind == "scalar":
-            chunk = scalar_defs_all[scalar_row_i * n_cols:(scalar_row_i + 1) * n_cols]
+            chunk = scalar_defs_all[scalar_row_i * grid_n_cols:(scalar_row_i + 1) * grid_n_cols]
             _scalar_bar_row(fig, [gs[row_i, c] for c in range(len(chunk))], chunk, bundles, scalar_cache)
             scalar_row_i += 1
         elif kind == "jaccard":
-            im1 = _scenario_heatmap_row(fig, gs[row_i, :], bundles, jaccard_labels, "")
+            im1 = _scenario_heatmap_row(fig, gs[row_i, :], bundles, jaccard_labels, "",
+                                        matrix_fn=_scenario_sim_matrix)
+        elif kind == "jaccard_weighted":
+            im1b = _scenario_heatmap_row(fig, gs[row_i, :], bundles, jaccard_labels, "weighted ",
+                                         matrix_fn=_scenario_sim_matrix_weighted)
         elif kind == "jacobian":
-            im2 = _heatmap_row(fig, [gs[row_i, c] for c in range(n_cols)], col_labels, bundles,
+            im2 = _heatmap_row(fig, [gs[row_i, c] for c in range(metric_n_cols)], col_labels, bundles,
                                 "jacobian", "Jacobian cos — ")
         row_i += 1
 
-    if im1 is not None:
-        jaccard_row = row_plan.index("jaccard")
-        top = 1 - jaccard_row / total_rows
-        fig.colorbar(im1, cax=fig.add_axes([0.92, top - 1 / total_rows + 0.02, 0.012, 1 / total_rows - 0.04]))
-    if im2 is not None:
-        jacobian_row = row_plan.index("jacobian")
-        top = 1 - jacobian_row / total_rows
-        fig.colorbar(im2, cax=fig.add_axes([0.92, top - 1 / total_rows + 0.02, 0.012, 1 / total_rows - 0.04]))
+    for im, row_key in ((im1, "jaccard"), (im1b, "jaccard_weighted"), (im2, "jacobian")):
+        if im is not None:
+            row_idx = row_plan.index(row_key)
+            top = 1 - row_idx / total_rows
+            fig.colorbar(im, cax=fig.add_axes([0.92, top - 1 / total_rows + 0.02, 0.012, 1 / total_rows - 0.04]))
 
     # ── 공유 범례 (run 라벨 ↔ 색상) ──────────────────────────────────────
     legend_handles = [plt.Rectangle((0, 0), 1, 1, color=_COLORS[i % len(_COLORS)])
@@ -680,8 +802,12 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path):
     fig.legend(legend_handles, legend_texts, loc="upper center",
                ncol=min(len(bundles), 5), bbox_to_anchor=(0.5, 1.0), fontsize=9)
 
+    if cross_axis:
+        axis_desc = "axis=여러 개(축 간 비교 — 시나리오별 서브플롯/히트맵 생략)"
+    else:
+        axis_desc = f"axis={bundles[0].spec.axis}, n_scenarios={n_scen}"
     fig.suptitle(
-        f"SCR 모델 비교 — axis={bundles[0].spec.axis}, n_scenarios={n_scen}  "
+        f"SCR 모델 비교 — {axis_desc}  "
         f"(RMSE/MAE/MAPE: hard routing, test_predictions.csv 기준)",
         fontsize=12, y=1.03,
     )
@@ -691,6 +817,117 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path):
     print(f"[viz] 저장 → {out_path}")
 
     return cap_cache, scalar_cache
+
+
+# =============================================================================
+# 용량 곡선 비교 (MIT/HUST 대표 셀, 시나리오별 서브플롯)
+# =============================================================================
+
+_MIT_CELL_RE  = re.compile(r"^b\d+c\d+$")     # 예: b1c0, b2c32
+_HUST_CELL_RE = re.compile(r"^\d+-\d+$")      # 예: 1-7, 10-8
+
+
+def _pick_rep_cells(bundles: list[RunBundle], pattern: "re.Pattern", n: int = 3) -> list[str]:
+    """모든 run의 test_predictions.csv에 공통으로 존재하는 셀 중, 패턴에 맞는 것을
+    최대 n개 고른다(알파벳순) — 비교 대상 run마다 test 분할이 살짝 달라도(축·파라미터
+    차이로 인한 min_pts 탈락 등) 모든 run에 실제로 존재하는 셀이어야 공정한 비교가 된다."""
+    common: set[str] | None = None
+    for b in bundles:
+        ids = {r["cell_id"] for r in b.pred_rows if pattern.match(r["cell_id"])}
+        common = ids if common is None else (common & ids)
+        if not common:
+            return []
+    return sorted(common)[:n] if common else []
+
+
+def _plot_capacity_curve_comparison(
+    bundles: list[RunBundle], cell_id: str, out_path: Path, cross_axis: bool = False,
+) -> None:
+    """지정한 셀 하나에 대해, (시나리오 × run) 조합마다 독립된 서브플롯(x=사이클,
+    y=용량 Ah)을 그린다 — 행=시나리오, 열=run. 각 칸엔 실측 용량(회색) + 그 run
+    하나만의 예측 곡선(해당 run 색상)만 들어간다.
+
+    이전 버전은 한 시나리오 서브플롯에 모든 run의 예측을 겹쳐 그렸는데, 곡선끼리
+    겹치면 어느 run이 어떻게 다른지 구분이 잘 안 됐다 — run당 칸을 분리해서
+    "같은 셀·시나리오에서 이 run은 정확히 어떻게 예측했는가"를 서로 간섭 없이 보게 한다.
+
+    cross_axis=True(비교 대상 run들의 시나리오 축이 서로 다름)면 시나리오 이름이
+    run마다 대응되지 않으므로, 시나리오별 행 대신 셀당 1행(같은 사이클에 여러
+    세그먼트가 있으면 평균)으로 축소해 "시나리오 평균" 곡선만 비교한다.
+    """
+    spec = bundles[0].spec
+
+    if cross_axis:
+        row_names: list[tuple[str, str | None]] = [("", None)]
+    else:
+        seg_names = spec.scenario_names
+        # 방향별로 묶어 행 순서를 정함(충전 시나리오들 먼저, 방전 시나리오들 다음)
+        chg_names = [seg_names[s] for s in spec.charge_scenario_ids]
+        dis_names = [seg_names[s] for s in spec.discharge_scenario_ids]
+        row_names = [("Charge", n) for n in chg_names] + [("Discharge", n) for n in dis_names]
+    n_rows = len(row_names)
+    n_cols = len(bundles)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.6 * n_cols, 2.6 * n_rows), squeeze=False)
+
+    for r, (dir_label, sname) in enumerate(row_names):
+        for c, b in enumerate(bundles):
+            ax = axes[r][c]
+            if sname is None:
+                rows = [row for row in b.pred_rows if row["cell_id"] == cell_id]
+            else:
+                rows = [row for row in b.pred_rows
+                        if row["cell_id"] == cell_id and row["seg_name"] == sname]
+            if not rows:
+                ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center",
+                        transform=ax.transAxes, color="gray", fontsize=8)
+            else:
+                if sname is None:
+                    # 시나리오 평균: 같은 사이클에 세그먼트(시나리오)가 여러 개면 평균낸다
+                    by_cycle: dict[int, list] = {}
+                    for row in rows:
+                        by_cycle.setdefault(row["cycle"], []).append(row)
+                    cyc      = sorted(by_cycle)
+                    cap_true = [float(np.mean([rr["cap_true_Ah"] for rr in by_cycle[cy]])) for cy in cyc]
+                    cap_pred = [float(np.mean([rr["cap_pred_Ah"] for rr in by_cycle[cy]])) for cy in cyc]
+                else:
+                    rows.sort(key=lambda row: row["cycle"])
+                    cyc      = [row["cycle"] for row in rows]
+                    cap_true = [row["cap_true_Ah"] for row in rows]
+                    cap_pred = [row["cap_pred_Ah"] for row in rows]
+                ax.plot(cyc, cap_true, color="0.3", lw=1.8, ls="-", zorder=1, label="실측(true)")
+                ax.plot(cyc, cap_pred, color=_COLORS[c % len(_COLORS)], lw=1.3,
+                        alpha=0.9, zorder=2, label=_short_label(b.label))
+
+            if r == 0:
+                ax.set_title(_short_label(b.label, maxlen=20), fontsize=8.5)
+            if c == 0:
+                row_label = "시나리오 평균" if sname is None else f"{dir_label}\n{sname}"
+                ax.set_ylabel(f"{row_label}\nCapacity [Ah]", fontsize=7.5)
+            if r == n_rows - 1:
+                ax.set_xlabel("Cycle", fontsize=8)
+            ax.tick_params(labelsize=6.5)
+            ax.grid(alpha=0.3)
+
+    # 공유 범례 (run 라벨 + 실측) — 전체 서브플롯 핸들 취합
+    handles, labels = [], []
+    for ax_row in axes:
+        for ax in ax_row:
+            h, l = ax.get_legend_handles_labels()
+            for hh, ll in zip(h, l):
+                if ll not in labels:
+                    handles.append(hh); labels.append(ll)
+    fig.legend(handles, labels, loc="upper center", ncol=min(len(labels), 6),
+               bbox_to_anchor=(0.5, 1.0 + 0.5 / (2.6 * n_rows)), fontsize=8.5)
+
+    axis_desc = "축 간 비교 — 시나리오 평균" if cross_axis else f"axis={spec.axis}"
+    fig.suptitle(f"SOH 예측 곡선 비교 — {cell_id}  ({axis_desc})", fontsize=12,
+                 y=1.0 + 1.0 / (2.6 * n_rows))
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[viz] 저장 → {out_path}")
 
 
 # =============================================================================
@@ -706,23 +943,38 @@ def main() -> None:
         raise ValueError("--runs 는 2개 이상 지정해야 비교가 의미 있습니다.")
 
     bundles = _load_bundles(args.runs, args.labels)
-    _validate_same_axis(bundles)
+    cross_axis = _check_cross_axis(bundles)
 
     for b in bundles:
         _build_model_for_run(b, device, args.checkpoint_name)
         _benchmark_inference(b, device, args.infer_batch_size, args.infer_warmup, args.infer_reps)
-        if args.with_jacobian:
+        if args.with_jacobian and not cross_axis:
             _compute_jacobian_profiles(b, device, args.jacobian_max_samples)
 
     ts = datetime.now().strftime("%m%d_%H%M")
     out_dir = OUT_ROOT / (args.out_name or f"{ts}_result_comparison")
     out_path = out_dir / "result_comparison.png"
 
-    cap_cache, scalar_cache = _plot_all(bundles, args.with_jacobian, out_path)
+    cap_cache, scalar_cache = _plot_all(bundles, args.with_jacobian, out_path, cross_axis=cross_axis)
+
+    # ── 대표 셀 SOH 예측 곡선 비교 (데이터셋당 최대 3셀, 시나리오×run 그리드) ──────
+    for ds_name, pattern in (("MIT", _MIT_CELL_RE), ("HUST", _HUST_CELL_RE)):
+        cells = _pick_rep_cells(bundles, pattern, n=3)
+        if not cells:
+            print(f"[viz] {ds_name} 대표 셀 없음(모든 run에 공통인 {ds_name} 셀 미발견) — 곡선 비교 생략")
+            continue
+        for cell in cells:
+            _plot_capacity_curve_comparison(
+                bundles, cell, out_dir / f"capacity_curve_compare_{ds_name}_{cell}.png",
+                cross_axis=cross_axis,
+            )
 
     summary = {
-        "axis": bundles[0].spec.axis,
-        "scenario_names": bundles[0].spec.scenario_names,
+        "cross_axis": cross_axis,
+        "axis": bundles[0].spec.axis if not cross_axis else [b.spec.axis for b in bundles],
+        "scenario_names": bundles[0].spec.scenario_names if not cross_axis else {
+            b.label: b.spec.scenario_names for b in bundles
+        },
         "runs": {
             b.label: {
                 "run_dir": str(b.run_dir),

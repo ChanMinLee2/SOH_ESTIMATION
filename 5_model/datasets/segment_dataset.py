@@ -577,6 +577,14 @@ def build_datasets(
             spec=spec,
         )
 
+    # 방향 필터 ("charge"|"discharge"|None) — direction: +1.0=충전, -1.0=방전
+    direction_filter = data_cfg.get("direction_filter")
+    if direction_filter and "direction" in df.columns:
+        _dir_val = 1.0 if direction_filter == "charge" else -1.0
+        _n_before = len(df)
+        df = df[df["direction"] == _dir_val].reset_index(drop=True)
+        print(f"[dataset] direction_filter={direction_filter!r} 적용: {_n_before:,} → {len(df):,} rows")
+
     # ------------------------------------------------------------------
     # Split
     # ------------------------------------------------------------------
