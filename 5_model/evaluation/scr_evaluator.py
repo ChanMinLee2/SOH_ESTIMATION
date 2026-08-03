@@ -527,8 +527,8 @@ class SCREvaluator:
         with open(path, "w", encoding="utf-8") as f:
             _json.dump(m, f, indent=2)
         print(f"[eval] saved {path}")
-        print(f"[eval] UQ — picp_90={m['picp_90']:.3f}  mpiw_90={m['mpiw_90']:.5f}"
-              f"  nll={m['nll']:.4f}  mean_σ={m['mean_std']:.5f}")
+        print(f"[eval] UQ - picp_90={m['picp_90']:.3f}  mpiw_90={m['mpiw_90']:.5f}"
+              f"  nll={m['nll']:.4f}  mean_std={m['mean_std']:.5f}")
 
     def plot_uq(self, pred_dict: dict, figures_dir: Path) -> None:
         """캘리브레이션 곡선 + σ 분포 히스토그램을 figures/calibration.png 에 저장한다."""

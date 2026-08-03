@@ -97,6 +97,18 @@ def _parse_args() -> argparse.Namespace:
                    help="hi_correlation.py --exclude-cv 로 추출된 '_ccOnly' 경로 사용 "
                         "(data_dir/seg_data_dir 미지정 시 자동 경로에 접미사 추가). "
                         "yaml data.exclude_cv 로도 설정 가능")
+    p.add_argument("--with-raw-cnn", action="store_true", dest="with_raw_cnn",
+                   help="Phase 2 전용(REGRESSION_UPGRADE.md §5/§8): 회귀 헤드에 raw V/|I| "
+                        "CNN 임베딩 융합(yaml model.with_raw_cnn 오버라이드). Phase 1은 "
+                        "무조건 비활성화되므로 이 플래그를 줘도 무시됨")
+    p.add_argument("--raw-cnn-pretrained-from", default=None, dest="raw_cnn_pretrained_from",
+                   help="--with-raw-cnn과 함께: classifier clf_best.pt 경로를 주면 그 RawCNN을 "
+                        "얼려서 재사용(방안 a). 미지정 시 랜덤 초기화 후 Phase2와 함께 학습(방안 b). "
+                        "(yaml model.raw_cnn_pretrained_from 오버라이드)")
+    p.add_argument("--with-raw-flat", action="store_true", dest="with_raw_flat",
+                   help="Phase 2 전용(REGRESSION_UPGRADE.md §2 방안1): 회귀 헤드에 raw V/|I| "
+                        "곡선을 압축 없이 flatten(96D) 결합(yaml model.with_raw_flat 오버라이드). "
+                        "with_raw_cnn과 동시 사용 불가. Phase 1은 무조건 비활성화")
     return p.parse_args()
 
 
@@ -389,9 +401,24 @@ def main() -> None:
     phase = _resolve_phase(args, cfg)
     print(f"[train] ═══ Phase {phase} ═══")
 
+    # with_raw_cnn/raw_cnn_pretrained_from CLI 오버라이드 (run_pipeline.py가 분류기 run_dir을
+    # 자동 주입할 때 사용 — yaml에 값이 없어도 파이프라인 한 번에 이어붙일 수 있게 함).
+    _m_cfg_cli = cfg.setdefault("model", {})
+    if args.with_raw_cnn:
+        _m_cfg_cli["with_raw_cnn"] = True
+    if args.raw_cnn_pretrained_from is not None:
+        _m_cfg_cli["raw_cnn_pretrained_from"] = args.raw_cnn_pretrained_from
+    if args.with_raw_flat:
+        _m_cfg_cli["with_raw_flat"] = True
+
     # raw_mlp 모드: HI/게이트 없이 raw_v/raw_i(flatten)만으로 회귀하는 베이스라인
     # (MODEL_DIRECTION.md B-4 계열 — "HI 추출 자체의 기여도" 측정용)
     _is_raw_mode = cfg.get("model", {}).get("regression_model") == "raw_mlp"
+    # with_raw_cnn: 회귀 헤드에 raw CNN 임베딩 융합(REGRESSION_UPGRADE.md §5/§8, 방안2) — Phase 2 전용.
+    # with_raw_flat: 회귀 헤드에 raw를 압축 없이 flatten 융합(REGRESSION_UPGRADE.md §2, 방안1) — Phase 2 전용.
+    # 둘 다 Phase 1은 아래에서 _p1_model_cfg가 강제로 False 처리한다(게이트 선정과 무관한 옵션).
+    _use_raw_cnn  = bool(cfg.get("model", {}).get("with_raw_cnn", False))
+    _use_raw_flat = bool(cfg.get("model", {}).get("with_raw_flat", False))
 
     # CLI 오버라이드
     cls_cfg = cfg.setdefault("classifier", {})
@@ -416,6 +443,29 @@ def main() -> None:
     _segmenter = _get_segmenter(_axis_name, {_axis_name: _axis_cfg})
     spec = _segmenter.get_spec()
     print(f"[train] seg-axis={_axis_name}  n_scenarios={spec.n_scenarios}  n_classes={spec.n_classes}")
+
+    # Phase 2: gates_from의 scenario_spec.json으로 spec을 여기서 바로 확정한다.
+    # (2026-07-31 버그 수정) 이전엔 이 재할당이 build_datasets/spec.save() 이후, Phase 2
+    # 분기 안에서야 일어났다 — 그 사이에 이미 spec.save()가 "지금 코드 기준" spec을
+    # 파일로 저장해버려서, 저장된 scenario_spec.json이 실제로 이 run의 학습에 쓰인
+    # spec(gates_from 시점 것)과 어긋날 수 있었다. 시나리오 축 코드(예: _ROUTING)가
+    # gates_from run 이후 바뀌면, test_scr.py가 나중에 그 "어긋난" 파일을 읽어 "구"
+    # 모델(옛 routing으로 학습됨)을 "신" routing으로 잘못 해석해 평가하게 되고, hard
+    # 라우팅·분류 정확도·routing_gap_pct가 전부 깨진다(oracle은 seg_idx를 직접 쓰므로
+    # 영향 없음 — docs/260731_RESULTS.md에서 실측으로 확인됨). build_datasets/spec.save
+    # 전에 최종 spec을 먼저 확정해 이 어긋남 자체를 없앤다.
+    _gates_dir: "Path | None" = None
+    if phase == 2:
+        _gates_dir = _resolve_gates_dir(args.gates_from, cfg)
+        if _gates_dir is None:
+            raise RuntimeError(
+                "Phase 2는 gates JSON이 필요합니다. "
+                "--gates-from <run_dir> 또는 yaml의 gates_from을 설정하세요."
+            )
+        _p2_spec_path = _gates_dir.parent / "scenario_spec.json"
+        if _p2_spec_path.exists():
+            spec = ScenarioSpec.load(_p2_spec_path)
+            print(f"[train] Phase 2 spec loaded: {_p2_spec_path}")
 
     # random_segment=True 면 태그에 _random-L{seg_len_pts} suffix (hi_correlation._rand_suffix 와 동일)
     _rand_sfx = (f"_random-L{int(_axis_cfg.get('seg_len_pts', 20))}"
@@ -511,12 +561,14 @@ def main() -> None:
 
     tr_cfg = cfg["training"]
     # FastTensorLoader: 사전 구축 텐서 슬라이싱 → per-sample collate 오버헤드 제거.
-    # SCRModel 회귀 forward는 x_raw 미사용 → 학습 로더에서 제외 (메모리/전송 절감).
-    # raw_mlp 모드는 x_raw가 곧 유일한 모델 입력이므로 반드시 포함해야 한다.
+    # SCRModel 회귀 forward는 기본적으로 x_raw 미사용 → 학습 로더에서 제외(메모리/전송 절감).
+    # raw_mlp 모드는 x_raw가 곧 유일한 모델 입력이라, with_raw_cnn/with_raw_flat 모드는
+    # cap_head 융합에 x_raw가 필요하므로 반드시 포함해야 한다.
+    _include_raw = _is_raw_mode or _use_raw_cnn or _use_raw_flat
     train_loader = FastTensorLoader(train_ds, tr_cfg["batch_size"], shuffle=True,
-                                    include_raw=_is_raw_mode)
+                                    include_raw=_include_raw)
     val_loader   = FastTensorLoader(val_ds,   tr_cfg["batch_size"], shuffle=False,
-                                    include_raw=_is_raw_mode)
+                                    include_raw=_include_raw)
 
     # ------------------------------------------------------------------
     # raw_mlp 모드: HI/게이트 완전히 우회 — Phase 1/2 구분이 무의미하므로
@@ -566,7 +618,10 @@ def main() -> None:
         # 강제로 "mlp"만 적용하되, mlp_hidden_dims 등 MLPHead 세부 설정은 반영한다
         # (기존엔 model_cfg를 아예 안 넘겨서 mlp_hidden_dims가 무시되고 항상 [d_head, d_head//2]
         # 기본값으로 cap_head가 지어짐 — Phase 2/test_scr.py의 구성과 어긋나는 버그였음).
-        _p1_model_cfg = {**cfg["model"], "regression_model": "mlp"}
+        # with_raw_cnn/with_raw_flat도 같은 이유로 Phase 1에서는 강제 비활성화한다 —
+        # 게이트(HI 서브셋) 선정과 무관한 Phase 2 전용 옵션이라 Phase 1에 흘러들어가면 안 된다.
+        _p1_model_cfg = {**cfg["model"], "regression_model": "mlp",
+                          "with_raw_cnn": False, "with_raw_flat": False}
         model = SCRModel(
             d_probe=cfg["model"]["d_probe"],
             d_head=cfg["model"]["d_head"],
@@ -612,28 +667,13 @@ def main() -> None:
     # Phase 2: 고정 게이트 재학습 (분류 + 회귀 정밀 학습)
     # ------------------------------------------------------------------
     else:  # phase == 2
-        gates_dir     = _resolve_gates_dir(args.gates_from, cfg)
-        probe_json_in = None
-        scen_json_in  = None
-
-        if gates_dir:
-            probe_json_in = _find_json(gates_dir, "classification_HIs.json",
-                                       "scenario_classification_HIs.json")
-            scen_json_in  = _find_json(gates_dir, "regression_HIs.json",
-                                       "scenario_regression_HIs.json")
-            print(f"[train] gates_from: {gates_dir}")
-        else:
-            raise RuntimeError(
-                "Phase 2는 gates JSON이 필요합니다. "
-                "--gates-from <run_dir> 또는 yaml의 gates_from을 설정하세요."
-            )
-
-        # Phase 2 spec 결정: gates_from/scenario_spec.json 우선, 없으면 현재 CLI spec
-        _p2_spec_path = gates_dir.parent / "scenario_spec.json"
-        if _p2_spec_path.exists():
-            spec = ScenarioSpec.load(_p2_spec_path)
-            print(f"[train] Phase 2 spec loaded: {_p2_spec_path}")
-        # (else: spec already set from CLI / yaml above)
+        # gates_dir/spec은 위(spec 최초 생성 직후)에서 이미 확정했다 — 여기서 재계산하지 않는다.
+        gates_dir = _gates_dir
+        probe_json_in = _find_json(gates_dir, "classification_HIs.json",
+                                   "scenario_classification_HIs.json")
+        scen_json_in  = _find_json(gates_dir, "regression_HIs.json",
+                                   "scenario_regression_HIs.json")
+        print(f"[train] gates_from: {gates_dir}")
 
         charge_mask, discharge_mask = _load_probe_masks_from_json(
             probe_json_in, charge_m, discharge_m, auto=auto_mk,

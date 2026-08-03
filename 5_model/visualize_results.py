@@ -88,7 +88,7 @@ import matplotlib.gridspec as gridspec
 plt.rcParams["font.family"] = "Malgun Gothic"
 plt.rcParams["axes.unicode_minus"] = False
 
-from utils.hi_schema import N_HI
+from utils.hi_schema import N_HI, RAW_CH, RAW_N
 from models.scr_model import SCRModel
 from common.scenario.base import ScenarioSpec
 
@@ -119,6 +119,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="auto")
     p.add_argument("--out-name", default=None,
                    help="결과 폴더명 오버라이드 (기본 <MMDD_HHMM>_result_comparison)")
+    p.add_argument("--rep-cells", nargs="+", default=None,
+                   help="SOH 예측 곡선 비교(capacity_curve_compare_*.png)에 쓸 셀 ID를 "
+                        "직접 지정 (예: b1c0). 미지정 시 기존처럼 MIT/HUST 각각 최대 3개를 "
+                        "자동 선정. 지정하면 데이터셋 무관하게 정확히 그 셀들만 그린다.")
     return p.parse_args()
 
 
@@ -422,6 +426,12 @@ def _benchmark_inference(b: RunBundle, device: torch.device,
         "direction": direction.to(device), "seg_idx": seg_idx.to(device),
         "cap_init": cap_init.to(device),
     }
+    # with_raw_cnn/with_raw_flat 모델(REGRESSION_UPGRADE.md §2/§5/§8/§10)은 forward에서
+    # batch["x_raw"]를 읽으므로, 합성 벤치마크 입력에도 같은 shape(B, RAW_CH, RAW_N)의
+    # 더미를 채워줘야 한다.
+    if getattr(model, "raw_cnn", None) is not None or getattr(model, "with_raw_flat", False):
+        x_raw = torch.randn(batch_size, RAW_CH, RAW_N, generator=g)
+        batch["x_raw"] = x_raw.to(device)
 
     is_cuda = device.type == "cuda"
     with torch.no_grad():
@@ -514,6 +524,10 @@ def _compute_jacobian_profiles(b: RunBundle, device: torch.device, max_samples: 
             "seg_idx": test_ds.seg_idx[sel_idx].to(device),
             "cap_init": test_ds.cap_init[sel_idx].to(device),
         }
+        # with_raw_cnn/with_raw_flat 모델은 forward에서 batch["x_raw"]를 읽음 — SegmentDataset은
+        # include_raw 여부와 무관하게 항상 x_raw를 보유하므로 그대로 슬라이싱해서 넣는다.
+        if getattr(model, "raw_cnn", None) is not None or getattr(model, "with_raw_flat", False):
+            batch["x_raw"] = test_ds.x_raw[sel_idx].to(device)
         out = model(batch)
         grad, = torch.autograd.grad(out["cap_pred"].sum(), x_hi)
         return grad.mean(dim=0).detach().cpu().numpy()
@@ -957,17 +971,25 @@ def main() -> None:
 
     cap_cache, scalar_cache = _plot_all(bundles, args.with_jacobian, out_path, cross_axis=cross_axis)
 
-    # ── 대표 셀 SOH 예측 곡선 비교 (데이터셋당 최대 3셀, 시나리오×run 그리드) ──────
-    for ds_name, pattern in (("MIT", _MIT_CELL_RE), ("HUST", _HUST_CELL_RE)):
-        cells = _pick_rep_cells(bundles, pattern, n=3)
-        if not cells:
-            print(f"[viz] {ds_name} 대표 셀 없음(모든 run에 공통인 {ds_name} 셀 미발견) — 곡선 비교 생략")
-            continue
-        for cell in cells:
+    # ── 대표 셀 SOH 예측 곡선 비교 (시나리오×run 그리드) ──────────────────────────
+    if args.rep_cells:
+        # 사용자가 직접 지정한 셀만 정확히 그린다 (데이터셋 자동판별/개수제한 없음).
+        for cell in args.rep_cells:
             _plot_capacity_curve_comparison(
-                bundles, cell, out_dir / f"capacity_curve_compare_{ds_name}_{cell}.png",
+                bundles, cell, out_dir / f"capacity_curve_compare_{cell}.png",
                 cross_axis=cross_axis,
             )
+    else:
+        for ds_name, pattern in (("MIT", _MIT_CELL_RE), ("HUST", _HUST_CELL_RE)):
+            cells = _pick_rep_cells(bundles, pattern, n=3)
+            if not cells:
+                print(f"[viz] {ds_name} 대표 셀 없음(모든 run에 공통인 {ds_name} 셀 미발견) — 곡선 비교 생략")
+                continue
+            for cell in cells:
+                _plot_capacity_curve_comparison(
+                    bundles, cell, out_dir / f"capacity_curve_compare_{ds_name}_{cell}.png",
+                    cross_axis=cross_axis,
+                )
 
     summary = {
         "cross_axis": cross_axis,

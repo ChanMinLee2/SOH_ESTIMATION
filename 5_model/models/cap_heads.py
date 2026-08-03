@@ -17,9 +17,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from utils.hi_schema import N_HI
+from utils.hi_schema import N_HI, RAW_CH, RAW_N
 
 _HEAD_IN = N_HI + N_HI + 1 + 1  # 64+64+1+1 = 130
+_D_CNN = 64  # RawCNN 출력 차원 — raw_cnn.py의 d_out 기본값과 동일(HI 64D와 정렬)
+_HEAD_IN_WITH_CNN = N_HI + N_HI + _D_CNN + 1 + 1  # 64+64+64+1+1 = 194 (REGRESSION_UPGRADE.md §5)
+_D_RAW_FLAT = RAW_CH * RAW_N  # 2*48=96 — 방안1(REGRESSION_UPGRADE.md §2 방안1): raw_v‖raw_i flatten
+_HEAD_IN_WITH_RAW_FLAT = N_HI + N_HI + _D_RAW_FLAT + 1 + 1  # 64+64+96+1+1 = 226
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +44,12 @@ class MLPHead(nn.Module):
         d_head: int = 128,
         dropout: float = 0.1,
         mlp_hidden_dims: list[int] | None = None,
+        head_in: int = _HEAD_IN,
     ):
         super().__init__()
         hidden = mlp_hidden_dims if mlp_hidden_dims is not None else [d_head, d_head // 2]
         layers: list[nn.Module] = []
-        in_d = _HEAD_IN
+        in_d = head_in
         for i, h in enumerate(hidden):
             layers.append(nn.Linear(in_d, h))
             layers.append(nn.ReLU())
@@ -65,10 +70,18 @@ class MLPHead(nn.Module):
 
 class TransformerHead(nn.Module):
     """
-    130-dim 입력을 3개의 semantic 토큰으로 분할해 Transformer Encoder에 입력한다.
+    130-dim(with_raw_cnn=True면 194-dim, with_raw_flat=True면 226-dim) 입력을
+    semantic 토큰으로 분할해 Transformer Encoder에 입력한다.
       Token 0: probe_x  (64-dim)  — 방향별 probe gate 출력
       Token 1: scen_x   (64-dim)  — 시나리오 gate 출력
-      Token 2: meta     (2-dim)   — direction + cap_init
+      Token 2: (with_raw_cnn=True) cnn_emb (64-dim) — raw V/|I| CNN 임베딩,
+               64개 스칼라로 쪼개지 않고 통째로 한 토큰(REGRESSION_UPGRADE.md §3.2)
+               또는 (with_raw_flat=True) raw_flat(96-dim) — raw_v‖raw_i를 압축 없이
+               통째로 한 토큰으로 선형 투영(방안1, REGRESSION_UPGRADE.md §2). 96개
+               개별 스칼라 토큰화는 어텐션 비용이 급증해(§3.2) 피하고, cnn_emb와
+               동일하게 "토큰 1개" 취급으로 통일 — with_raw_cnn/with_raw_flat 동시
+               활성은 금지(build_cap_head에서 검증).
+      마지막 Token: meta (2-dim) — direction + cap_init
 
     각 토큰을 d_model로 선형 투영 후 TransformerEncoder → mean pool → 스칼라 출력.
     """
@@ -80,11 +93,19 @@ class TransformerHead(nn.Module):
         n_layers: int = 2,
         d_ff: int = 256,
         dropout: float = 0.1,
+        with_raw_cnn: bool = False,
+        with_raw_flat: bool = False,
     ):
         super().__init__()
+        assert not (with_raw_cnn and with_raw_flat), \
+            "with_raw_cnn과 with_raw_flat을 동시에 켤 수 없습니다."
+        self.with_raw_cnn = with_raw_cnn
+        self.with_raw_flat = with_raw_flat
         self.probe_embed = nn.Linear(N_HI, d_model)
         self.scen_embed  = nn.Linear(N_HI, d_model)
         self.meta_embed  = nn.Linear(2, d_model)
+        self.cnn_embed   = nn.Linear(_D_CNN, d_model) if with_raw_cnn else None
+        self.raw_flat_embed = nn.Linear(_D_RAW_FLAT, d_model) if with_raw_flat else None
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -98,19 +119,31 @@ class TransformerHead(nn.Module):
         self.output  = nn.Linear(d_model, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 130)
-        probe_x = x[:, :N_HI]           # (B, 64)
-        scen_x  = x[:, N_HI: 2 * N_HI] # (B, 64)
-        meta    = x[:, 2 * N_HI:]       # (B, 2)
+        # x: (B, 130) 또는 (B, 194)/(B, 226) — with_raw_cnn/with_raw_flat 여부에 따라
+        probe_x = x[:, :N_HI]                                # (B, 64)
+        scen_x  = x[:, N_HI: 2 * N_HI]                       # (B, 64)
 
-        t0 = self.probe_embed(probe_x).unsqueeze(1)  # (B, 1, d)
-        t1 = self.scen_embed(scen_x).unsqueeze(1)    # (B, 1, d)
-        t2 = self.meta_embed(meta).unsqueeze(1)      # (B, 1, d)
+        t0 = self.probe_embed(probe_x).unsqueeze(1)          # (B, 1, d)
+        t1 = self.scen_embed(scen_x).unsqueeze(1)            # (B, 1, d)
+        tokens = [t0, t1]
+        offset = 2 * N_HI
 
-        tokens = torch.cat([t0, t1, t2], dim=1)      # (B, 3, d)
-        out    = self.encoder(tokens)                 # (B, 3, d)
-        pooled = out.mean(dim=1)                      # (B, d)
-        return self.output(pooled).squeeze(-1)        # (B,)
+        if self.with_raw_cnn:
+            cnn_emb = x[:, offset: offset + _D_CNN]           # (B, 64)
+            offset += _D_CNN
+            tokens.append(self.cnn_embed(cnn_emb).unsqueeze(1))
+        elif self.with_raw_flat:
+            raw_flat = x[:, offset: offset + _D_RAW_FLAT]     # (B, 96)
+            offset += _D_RAW_FLAT
+            tokens.append(self.raw_flat_embed(raw_flat).unsqueeze(1))
+
+        meta = x[:, offset:]                                  # (B, 2)
+        tokens.append(self.meta_embed(meta).unsqueeze(1))
+
+        tokens = torch.cat(tokens, dim=1)             # (B, 3/4, d)
+        out    = self.encoder(tokens)                  # (B, 3/4, d)
+        pooled = out.mean(dim=1)                       # (B, d)
+        return self.output(pooled).squeeze(-1)         # (B,)
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +166,16 @@ class ITransformerHead(nn.Module):
         n_layers: int = 2,
         d_ff: int = 256,
         dropout: float = 0.1,
+        with_raw_cnn: bool = False,
     ):
         super().__init__()
+        if with_raw_cnn:
+            raise NotImplementedError(
+                "i_transformer + with_raw_cnn은 아직 미구현입니다 — cnn_emb(64D)를 개별 "
+                "스칼라 토큰 64개로 쪼갤지, 압축된 임베딩 하나로 넣을지 설계가 필요합니다 "
+                "(REGRESSION_UPGRADE.md §5 표 참조). 현재는 mlp/transformer/resnet_tab만 "
+                "with_raw_cnn을 지원합니다."
+            )
         self.n_feat     = _HEAD_IN                          # 130
         self.value_proj = nn.Linear(1, d_model)             # scalar → d_model
         self.feat_emb   = nn.Embedding(_HEAD_IN, d_model)   # 피처 ID positional emb
@@ -205,10 +246,11 @@ class ResNetTabHead(nn.Module):
         d_hidden_factor: float = 2.0,
         n_blocks: int = 4,
         dropout: float = 0.1,
+        head_in: int = _HEAD_IN,
     ):
         super().__init__()
         d_hidden = int(d * d_hidden_factor)
-        self.input_proj = nn.Linear(_HEAD_IN, d)
+        self.input_proj = nn.Linear(head_in, d)
         self.blocks = nn.ModuleList(
             [_ResBlock(d, d_hidden, dropout) for _ in range(n_blocks)]
         )
@@ -257,8 +299,16 @@ class FTTransformerHead(nn.Module):
         n_layers: int = 2,
         d_ff: int = 256,
         dropout: float = 0.1,
+        with_raw_cnn: bool = False,
     ):
         super().__init__()
+        if with_raw_cnn:
+            raise NotImplementedError(
+                "ft_transformer + with_raw_cnn은 아직 미구현입니다 — cnn_emb(64D)를 sparse "
+                "attention mask(L0 게이트 0=비활성) 체계에 어떻게 편입할지 설계가 필요합니다 "
+                "(cnn_emb는 게이트로 걸러지는 값이 아니라 항상 유효하므로 mask 규칙이 달라짐). "
+                "현재는 mlp/transformer/resnet_tab만 with_raw_cnn을 지원합니다."
+            )
         self.n_feat     = _HEAD_IN                                   # 130
         self.n_hi       = N_HI * 2                                   # 128 (probe+scen)
         self.value_proj = nn.Linear(1, d_model)                      # scalar → d_model
@@ -324,20 +374,39 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> 
     n_layers = model_cfg.get("tr_n_layers", 2)
     d_ff     = model_cfg.get("tr_d_ff",     d_head * 2)
 
+    with_raw_cnn  = bool(model_cfg.get("with_raw_cnn", False))
+    with_raw_flat = bool(model_cfg.get("with_raw_flat", False))
+    if with_raw_cnn and with_raw_flat:
+        raise ValueError("with_raw_cnn과 with_raw_flat을 동시에 켤 수 없습니다 (방안2 vs 방안1).")
+    if with_raw_flat and rtype not in ("mlp", "transformer", "resnet_tab"):
+        raise NotImplementedError(
+            f"with_raw_flat은 아직 mlp/transformer/resnet_tab만 지원합니다 (rtype={rtype}). "
+            "i_transformer/ft_transformer는 96개 raw 스칼라의 개별 토큰화 설계가 필요합니다 "
+            "(REGRESSION_UPGRADE.md §3.2)."
+        )
+    head_in = (
+        _HEAD_IN_WITH_CNN if with_raw_cnn else
+        _HEAD_IN_WITH_RAW_FLAT if with_raw_flat else
+        _HEAD_IN
+    )
+
     if rtype == "mlp":
         return MLPHead(d_head=d_head, dropout=dropout,
-                       mlp_hidden_dims=model_cfg.get("mlp_hidden_dims"))
+                       mlp_hidden_dims=model_cfg.get("mlp_hidden_dims"),
+                       head_in=head_in)
 
     if rtype == "transformer":
         return TransformerHead(
             d_model=d_head, n_heads=n_heads,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
+            with_raw_cnn=with_raw_cnn, with_raw_flat=with_raw_flat,
         )
 
     if rtype in ("i_transformer", "itransformer"):
         return ITransformerHead(
             d_model=d_head, n_heads=n_heads,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
+            with_raw_cnn=with_raw_cnn,
         )
 
     if rtype == "resnet_tab":
@@ -346,12 +415,14 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> 
             d_hidden_factor=model_cfg.get("resnet_d_hidden_factor", 2.0),
             n_blocks=model_cfg.get("resnet_n_blocks", 4),
             dropout=dropout,
+            head_in=head_in,
         )
 
     if rtype in ("ft_transformer", "fttransformer"):
         return FTTransformerHead(
             d_model=d_head, n_heads=n_heads,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
+            with_raw_cnn=with_raw_cnn,
         )
 
     raise ValueError(

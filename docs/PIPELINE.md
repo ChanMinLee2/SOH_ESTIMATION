@@ -17,9 +17,14 @@ raw data
                         → _4_data_hi/{axis}/scenario_spec.json
   ↓ [5_model]
       Phase 1 : L0 HardConcrete gate → probe/scen HI 선택 → gates/*.json
-      Phase 2 : 고정 gate + 회귀 전용 → checkpoints/best.pt
-      Clf     : 독립 시나리오 분류기 학습 → classifier/clf_best.pt  ← B안 추가
+      Clf     : 독립 시나리오 분류기 학습 → (Phase 1 run_dir)/classifier/clf_best.pt  ← B안
                 classifier.type = mlp(HI) | cnn(원시 V/I CNN + HI 융합)  ← CNN 옵션
+                (2026-07-30부터 Phase 2보다 먼저 학습 — Phase 2가 이 CNN을 재사용 가능하게)
+      Phase 2 : 고정 gate + 회귀 전용 → checkpoints/best.pt
+                model.with_raw_cnn=true 시 회귀 헤드에 raw V/|I| CNN 임베딩 융합(방안2,
+                  분류기 CNN 재사용 또는 신규 학습 — REGRESSION_UPGRADE.md §5/§8/§10/§11)
+                model.with_raw_flat=true 시 raw V/|I|를 압축 없이 flatten 융합(방안1,
+                  REGRESSION_UPGRADE.md §2/§11 — with_raw_cnn과 동시 사용 불가)
   ↓ [test_scr]   통합 평가 (분류 → 라우팅 → 회귀, 분류기 있으면 자동 all-mode):
       oracle : 정답 seg_idx 라우팅 → 회귀 상한선 (분류기 없어도 항상 실행)
       hard   : 분류기 argmax 라우팅 → 실배포 시나리오
@@ -38,9 +43,19 @@ raw data
 | 4 | HI 상관 분석 | `4_hi_analysis/hi_correlation.py` |
 | 5 | HI 세그먼트 시각화 | `4_hi_analysis/hi_segment_viz.py` |
 | 6 | SCR Phase 1 학습 | `5_model/train_scr.py --phase 1` |
-| 7 | SCR Phase 2 학습 | `5_model/train_scr.py --phase 2` |
-| **8** | **시나리오 분류기 학습** | **`5_model/train_classifier.py`** |
+| 7 | 시나리오 분류기 학습 | `5_model/train_classifier.py` |
+| 8 | SCR Phase 2 학습 | `5_model/train_scr.py --phase 2` |
 | 9 | SCR 평가 | `5_model/test_scr.py` |
+
+> **2026-07-30 재배치**: 분류기(구 Step 8)와 Phase 2(구 Step 7) 순서를 바꿨다. 분류기는
+> Phase 1 게이트만 있으면 학습되고 회귀와 완전히 분리돼 있는데, Phase 2가
+> `--with-raw-cnn`으로 그 분류기의 RawCNN을 재사용하려면 분류기가 먼저 학습돼 있어야
+> 한다 — 순서를 바꾸지 않으면 "먼저 평범하게 Phase 2 학습 → 분류기 학습 →
+> with_raw_cnn으로 Phase 2 재학습"처럼 Phase 2를 두 번 돌려야 했다. 지금은
+> Step 6→7→8→9가 항상 한 방향으로 흐른다. 분류기 체크포인트 저장 위치도 Phase 1
+> run_dir 안(`(p1_run_dir)/classifier/clf_best.pt`)으로 옮겨갔다(레거시 run은
+> Phase 2 폴더 안에 저장돼 있고, `test_scr.py`가 두 위치 모두 자동 탐색한다 —
+> §5-10 `_resolve_classifier_ckpt` 참조).
 
 ```powershell
 # 전체 파이프라인 (Step 1~9)
@@ -49,11 +64,14 @@ python run_pipeline.py
 # 학습+평가만 (Step 6~9)
 python run_pipeline.py 6
 
-# Phase 1~2만 (분류기·평가 제외)
-python run_pipeline.py 6 --to-step 7
+# Phase1→분류기→Phase2만 (평가 제외)
+python run_pipeline.py 6 --to-step 8
 
 # 분류기 학습만
-python run_pipeline.py 8 --to-step 8
+python run_pipeline.py 7 --to-step 7
+
+# Phase1→분류기→Phase2→평가, Phase 2에 raw CNN 융합(방안 a, 분류기 CNN 자동 재사용)
+python run_pipeline.py 6 --with-raw-cnn
 
 # 평가만 (체크포인트 직접 지정)
 python run_pipeline.py 9 --checkpoint _5_data_model_scr/0716_1200_p2_mlp_prot/checkpoints/best.pt
@@ -63,12 +81,18 @@ python run_pipeline.py --workers 4
 ```
 
 **Phase 간 자동 핸드오프:**
-- Step 6 완료 → 신규 run dir 자동 감지 → Step 7에 `--gates-from` 주입
-- Step 7 완료 → 신규 run dir 자동 감지 → Step 8에 `--run-dir` 주입, Step 9에 `--checkpoint` 주입
+- Step 6(Phase 1) 완료 → 신규 run dir 자동 감지 → Step 7(분류기)에 `--run-dir` 주입
+- Step 8(Phase 2) 진입 시 → Step 6에서 감지한 Phase 1 run dir을 `--gates-from`으로 주입
+  (`--with-raw-cnn` 지정 시 그 폴더의 `classifier/clf_best.pt`를
+  `--raw-cnn-pretrained-from`으로 자동 연결 — 없으면 랜덤 초기화 후 방안 b로 폴백)
+- Step 8 완료 → 신규 run dir 자동 감지 → Step 9에 `--checkpoint` 주입
 - **yaml의 `data.gates_from`보다 자동 감지된 CLI `--gates-from`이 우선**
+- `--seg-axis`/`--axis-config`(및 `--n1`/`--n2`/`--mid-start` 등 단축 인자)는 Step
+  4~6, 8에 전달된다 — 분류기(Step 7)는 CLI로 축 정보를 받지 않고 `run_dir/
+  scenario_spec.json`(=Phase 1이 저장한 값)에서 읽는다.
 
-세그멘테이션 축 (`--seg-axis`): `qfrac`(기본) / `protocol` / `vwindow` / `rcs` / `cluster` / `q_frac_wide` / `vqslope` / `full_cycle`  
-축 변경 시 Step 4~7이 모두 동일한 `--seg-axis`(및 `--axis-config`)를 사용해야 데이터 경로가 일치한다.
+세그멘테이션 축 (`--seg-axis`): `qfrac`(기본) / `protocol` / `vwindow` / `rcs` / `cluster` / `q_frac_wide` / `vqslope` / `q_abs` / `full_cycle`  
+축 변경 시 Step 4~6, 8이 모두 동일한 `--seg-axis`(및 `--axis-config`)를 사용해야 데이터 경로가 일치한다.
 
 ---
 
@@ -81,7 +105,7 @@ python run_pipeline.py --workers 4
 
 `run_pipeline.py`, `hi_correlation.py`, `hi_segment_viz.py` 세 스크립트가 동일한 패턴을 공유한다 — PowerShell이
 `--axis-config '{"n1":0.4,...}'`의 따옴표를 벗겨버려 JSON 파싱이 깨지는 문제를 우회하기 위해, 자주 쓰는
-q_frac_wide/vqslope 파라미터를 개별 플래그로도 받을 수 있게 했다. 아래 플래그 중 하나라도 지정되면
+q_frac_wide/vqslope/q_abs 파라미터를 개별 플래그로도 받을 수 있게 했다. 아래 플래그 중 하나라도 지정되면
 내부적으로 JSON으로 합쳐져 `--axis-config`를 대체한다(둘 다 주면 이 단축 인자들이 우선).
 
 | 플래그 | 타입 | 대상 축 | 의미 |
@@ -92,6 +116,13 @@ q_frac_wide/vqslope 파라미터를 개별 플래그로도 받을 수 있게 했
 | `--mode` | str | vqslope | 플래토 검출 모드 `dva`\|`ica` (기본 `dva`) |
 | `--random-segment` | flag | q_frac_wide / vqslope | 구간 내 고정길이 랜덤 창 추출 옵션 켜기 (기본 `False`) |
 | `--seg-len-pts` | int | q_frac_wide / vqslope | `--random-segment` 시 창의 고정 관측 포인트 수 (기본 20) |
+| `--mid-start` | float | q_abs | mid 존 시작(정격용량=BOL 첫 사이클 용량 비율, 기본 0.2) |
+| `--mid-end` | float | q_abs | mid 존 끝(정격용량 비율, 기본 0.5) |
+| `--seg-len` | float | q_abs | 세그먼트 길이(정격용량 비율, 기본 0.15) |
+
+`q_abs`는 `q_frac_wide`와 달리 그 사이클 자신의 실측 총 용량(`q_tot`)이 아니라 **그 셀의 BOL(첫
+사이클) 용량을 고정 기준**으로 존 경계를 잡는다 — 실배포 시 `q_tot`을 몰라도(세션이 안 끝나도)
+적용 가능하도록 설계됐다. 자세한 설계 근거는 `docs/SCENARIO_STRATEGY.md`의 "축: q_abs" 절 참조.
 
 `--random-segment`를 켜면 각 존(hi/mid/lo 또는 head/plateau/tail) 경계 자체는 그대로 두고, 그 안에서
 `seg_len_pts` 길이의 창을 `n_samples`개 랜덤 위치에서 뽑는다(클리핑 금지 — 존이 창보다 짧으면 존 전체를
@@ -104,6 +135,9 @@ python run_pipeline.py 4 --seg-axis q_frac_wide --n1 0.45 --n2 0.2 --n-samples 4
 
 # 예: vqslope, ica 모드, 구간당 2개
 python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --mode ica --n-samples 2
+
+# 예: q_abs, mid 존 [20%,50%], 세그먼트 길이 15%, 존당 4개
+python 4_hi_analysis/hi_correlation.py --seg-axis q_abs --mid-start 0.2 --mid-end 0.5 --seg-len 0.15 --n-samples 4
 ```
 
 ### `run_pipeline.py` (오케스트레이터)
@@ -121,17 +155,23 @@ python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --mode ica --n-samples
 | `--to-step` | int, 기본 None(끝까지) | 종료 스텝 번호(포함) |
 | `--workers` | int, 기본 `min(8, cpu_count)` | 데이터 스텝(1~5)에 전달할 병렬 프로세스 수 |
 | `--model-config` | str, 기본 `5_model/config/scr.yaml` | 모델 학습/평가 설정 파일 |
-| `--gates-from` | str, 기본 None | Phase 2(Step 7) gates 디렉터리 직접 지정 (미지정 시 Step 6 출력 자동 탐색 — **7부터 단독 실행 시 반드시 명시**, 안 그러면 `_5_data_model_scr` 전체에서 최근 수정 폴더를 잘못 집을 수 있음) |
-| `--checkpoint` | str, 기본 None | 평가(Step 9) 체크포인트 직접 지정 (미지정 시 Step 7 출력 자동 탐색) |
-| `--seg-axis` | str, 기본 None | 세그멘테이션 축, Step 4~7에 전달 |
-| `--axis-config` | str(JSON), 기본 None | 축 파라미터 JSON, Step 4~7에 전달 |
+| `--gates-from` | str, 기본 None | 분류기 학습(Step 7)/Phase 2 학습(Step 8) 시 gates 디렉터리(=Phase 1 run) 직접 지정 (미지정 시 Step 6 출력 자동 탐색 — **7 또는 8부터 단독 실행 시 반드시 명시**, 안 그러면 `_5_data_model_scr` 전체에서 최근 수정 폴더를 잘못 집을 수 있음) |
+| `--checkpoint` | str, 기본 None | 평가(Step 9) 체크포인트 직접 지정 (미지정 시 Step 8 출력 자동 탐색) |
+| `--seg-axis` | str, 기본 None | 세그멘테이션 축, Step 4~6, 8에 전달(분류기 Step 7은 run_dir의 `scenario_spec.json`에서 읽으므로 불필요) |
+| `--axis-config` | str(JSON), 기본 None | 축 파라미터 JSON, Step 4~6, 8에 전달 |
 | `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체(PowerShell 호환) |
+| `--mid-start`/`--mid-end`/`--seg-len` | 위 "공통: 축 단축 인자" 참고 | q_abs 전용, `--axis-config` 대체 |
+| `--exclude-cv` | flag | Step 4/6/7/8에 전달 — 충전 세그먼트에서 CC→CV 전환 이후 구간 제외(`_ccOnly` 경로 사용) |
+| `--charge-m`/`--discharge-m`/`--scen-k` | 위 §5-8 참고 | Step 6/8에 전달(분류기 Step 7은 이 CLI가 없음) |
+| `--phase1-lr`/`--phase2-lr` | float, 기본 None | Phase 1(Step 6)/Phase 2(Step 8) peak LR 각각 독립 오버라이드 |
+| `--with-raw-cnn` | flag | Step 8(Phase 2)에 raw CNN 융합 적용(방안2) — Step 7에서 학습된 분류기의 RawCNN을 자동으로 얼려 재사용(방안 a). REGRESSION_UPGRADE.md §5/§8/§10 |
 
 ```powershell
 python run_pipeline.py                      # 전체(Step 1~9)
 python run_pipeline.py 6                    # 학습+평가만(Step 6~9)
-python run_pipeline.py 6 --to-step 7         # Phase 1~2만
-python run_pipeline.py 8 --to-step 8         # 분류기 학습만
+python run_pipeline.py 6 --to-step 8         # Phase1→분류기→Phase2만(평가 제외)
+python run_pipeline.py 7 --to-step 7         # 분류기 학습만
+python run_pipeline.py 6 --with-raw-cnn      # Phase1→분류기→Phase2(raw CNN 재사용)→평가
 python run_pipeline.py 9 --checkpoint _5_data_model_scr/.../checkpoints/best.pt   # 평가만
 python run_pipeline.py --workers 4           # 병렬 수 지정(Step 1~5 전용)
 ```
@@ -140,7 +180,7 @@ python run_pipeline.py --workers 4           # 병렬 수 지정(Step 1~5 전용
 
 | 플래그 | 타입/기본값 | 설명 |
 |---|---|---|
-| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`\|`q_frac_wide`\|`vqslope`\|`full_cycle`(부분 사이클 대비 베이스라인, 방향당 전체 curve 1개) |
+| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`\|`q_frac_wide`\|`vqslope`\|`q_abs`\|`full_cycle`(부분 사이클 대비 베이스라인, 방향당 전체 curve 1개) |
 | `--axis-config` | str(JSON), 기본 `"{}"` | 축 파라미터 JSON 문자열. PowerShell에서는 `--axis-config=$cfg` 형태 또는 아래 단축 인자 사용 |
 | `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체 |
 | `--workers` | int, 기본 `cpu_count-2` | 병렬 프로세스 수 |
@@ -165,14 +205,14 @@ python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --mode dva --n-samples
 
 | 플래그 | 타입/기본값 | 설명 |
 |---|---|---|
-| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`(q_frac_wide/vqslope도 단축 인자로 지원) |
+| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`(q_frac_wide/vqslope/q_abs도 단축 인자로 지원) |
 | `--axis-config` | str(JSON), 기본 `"{}"` | 축 파라미터 JSON |
 | `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체 |
 | `--workers` | int, 기본 4 | HI 추출 병렬 워커 수 |
 | `--n-cycles` | int, 기본 4 | 세그먼트 cuts 플롯 대표 사이클 수 |
 | `--force` | flag | 캐시 무시하고 HI 재추출 |
 
-### Step 6/7 — `5_model/train_scr.py`
+### Step 6/8 — `5_model/train_scr.py`
 
 | 플래그 | 타입/기본값 | 설명 |
 |---|---|---|
@@ -185,25 +225,35 @@ python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --mode dva --n-samples
 | `--no-gates` | flag | [legacy] `--phase 1`과 동일 |
 | `--seg-axis` | str, 기본 None | 세그멘테이션 축. 미지정 시 yaml `scenario.axis` 또는 `qfrac` |
 | `--axis-config` | str(JSON), 기본 None | 축 파라미터 JSON |
+| `--exclude-cv` | flag | 충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외(`_ccOnly` 경로) |
+| `--lr` | float, 기본 None | peak LR(yaml `training.lr` 오버라이드, Phase 1/2 공용 필드) |
 | `--seed` | int, 기본 None | 재현성 시드(yaml 오버라이드) |
 | `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
+| `--with-raw-cnn` | flag | Phase 2 전용: 회귀 헤드에 raw CNN 임베딩 융합(방안2, yaml `model.with_raw_cnn` 오버라이드). Phase 1은 무조건 비활성화됨 |
+| `--raw-cnn-pretrained-from` | str, 기본 None | `--with-raw-cnn`과 함께: classifier `clf_best.pt` 경로 지정 시 그 RawCNN을 얼려 재사용(방안 a), 미지정 시 랜덤 초기화 후 Phase2와 함께 학습(방안 b) |
+
+`--with-raw-flat`(회귀 헤드에 raw를 압축 없이 flatten 융합, 방안1)는 대응 CLI가 없어
+yaml `model.with_raw_flat`로만 설정한다(§5-4/§5-8, REGRESSION_UPGRADE.md §2/§11).
 
 `model.regression_model` 값에 따라 회귀 헤드가 바뀐다(yaml `model:` 섹션, CLI 옵션 아님):
 `mlp`(기본) / `transformer` / `i_transformer` / `resnet_tab` / `ft_transformer` / `raw_mlp`(HI 없이 raw_v/raw_i만
-사용하는 베이스라인 — §"베이스라인 비교" 1-B 참조).
+사용하는 베이스라인 — §"베이스라인 비교" 1-B 참조). `i_transformer`/`ft_transformer`는
+`with_raw_cnn`/`with_raw_flat`와 함께 쓸 수 없다(`NotImplementedError`, §5-4).
 
 ```powershell
 python 5_model/train_scr.py --phase 1
 python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0708_1533
 python 5_model/train_scr.py --phase 1 --charge-m 3 --discharge-m 1 --scen-k 5
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0708_1533 \
+  --with-raw-cnn --raw-cnn-pretrained-from _5_data_model_scr/0708_1533/classifier/clf_best.pt
 ```
 
-### Step 8 — `5_model/train_classifier.py`
+### Step 7 — `5_model/train_classifier.py`
 
 | 플래그 | 타입/기본값 | 설명 |
 |---|---|---|
 | `--config` | str, 기본 `5_model/config/scr.yaml` | 설정 파일 |
-| `--run-dir` | str, 기본 None | Phase 2 run 폴더 경로(분류기를 `{run_dir}/classifier/`에 저장). 미지정 시 `output_dir` 내 최신 폴더 |
+| `--run-dir` | str, 기본 None | run 폴더 경로(분류기를 `{run_dir}/classifier/`에 저장). `run_pipeline.py`로 실행 시 Phase 1 폴더가 자동 주입됨(2026-07-30 재배치, §5-9). 미지정·직접 실행 시 `output_dir` 내 최신 폴더 |
 | `--epochs` | int, 기본 None | 최대 에폭(yaml `training.epochs` 오버라이드) |
 | `--lr` | float, 기본 None | 학습률(yaml `training.lr` 오버라이드) |
 | `--d-hidden` | int, 기본 64 | `MLPProbeClassifier` hidden dim |
@@ -218,7 +268,8 @@ python 5_model/train_scr.py --phase 1 --charge-m 3 --discharge-m 1 --scen-k 5
 |---|---|---|
 | `--config` | str, 기본 `5_model/config/scr.yaml` | 설정 파일 |
 | `--checkpoint` | str, 기본 None | 평가할 체크포인트(미지정 시 최신 run 자동 탐색) |
-| `--classifier-ckpt` | str, 기본 None | 시나리오 분류기 체크포인트. 미지정 시 `run_dir/classifier/clf_best.pt` 자동 탐색 |
+| `--classifier-ckpt` | str, 기본 None | 시나리오 분류기 체크포인트. 미지정 시 `_resolve_classifier_ckpt`가 `run_dir/classifier/clf_best.pt`(레거시) → 없으면 `config.yaml`의 `gates_from` 폴더의 `classifier/clf_best.pt`(2026-07-30 재배치 이후) 순으로 자동 탐색(§5-10) |
+| `--charge-m`/`--discharge-m`/`--scen-k` | int, 기본 None | 다른 m/k로 학습된 checkpoint를 같은 `--config`로 평가할 때 오버라이드 |
 | `--rep-cells` | str 여러 개(`nargs="+"`), 기본 None | 용량 곡선 플롯용 대표 셀 ID 목록 |
 | `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
 
@@ -266,12 +317,19 @@ python 4_hi_analysis/seg_diagnose.py --seg-axis vqslope --mode vqzone --cell 10-
 | `--jacobian-max-samples` | int, 기본 300 | 시나리오/전체당 gradient 계산 최대 샘플 수 |
 | `--device` | str, 기본 `auto` | `auto`\|`cpu`\|`cuda` |
 | `--out-name` | str, 기본 None | 결과 폴더명 오버라이드(기본 `<MMDD_HHMM>_result_comparison`) |
+| `--rep-cells` | str 여러 개, 기본 None | (2026-08-02 신규) SOH 예측 곡선 비교(`capacity_curve_compare_*.png`)에 쓸 셀 ID 직접 지정(예: `b1c0`). 미지정 시 기존처럼 MIT/HUST 각각 최대 3개 자동 선정 |
 
 결과 PNG는 RMSE/MAE/MAPE(시나리오별) + 스칼라 지표 7종 + 선정 HI 자카드 유사도(이진/확률 가중 2종,
-run별 시나리오×시나리오 행렬) [+ `--with-jacobian` 시 Jacobian 코사인 유사도]로 구성된다.
+run별 시나리오×시나리오 행렬) + 대표 셀 SOH 예측 곡선 비교(`capacity_curve_compare_{cell}.png`,
+행=시나리오·열=run, `--rep-cells` 미지정 시 데이터셋당 최대 3셀 자동 선정) [+ `--with-jacobian`
+시 Jacobian 코사인 유사도]로 구성된다. `with_raw_cnn`/`with_raw_flat` run이 섞여 있으면
+벤치마크/Jacobian용 합성 배치에 `x_raw`를 자동으로 채운다(§5-0(E) 참조 — 안 채우면 `KeyError`).
 
 ```powershell
 python 5_model/visualize_results.py --runs _5_data_model_scr/RUN1 _5_data_model_scr/RUN2 --labels mlp resnet
+
+# 같은 조합(축·모델 동일)의 baseline/frozen(a)/separated(b) 3-way를 셀 하나로 비교
+python 5_model/visualize_results.py --runs RUN_base RUN_a RUN_b --labels baseline frozen_a separated_b --rep-cells b1c0
 ```
 
 ### 보조 도구 — `5_model/finetune_scr.py` (Few-shot fine-tuning)
@@ -907,7 +965,8 @@ python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --no-plot --dataset HUST
 핵심 설정:
 ```yaml
 scenario:
-  axis: protocol        # 세그멘테이션 축: qfrac | protocol | vwindow | rcs | cluster
+  axis: protocol        # 세그멘테이션 축: qfrac | protocol | vwindow | rcs | cluster |
+                         #   q_frac_wide | vqslope | q_abs | full_cycle
   axis_config: {}       # 축별 파라미터 (예: vwindow: {n_windows: 3})
 
 data:
@@ -928,8 +987,14 @@ regression:
   scen_k_count: 55      # 시나리오별 regression HI 수 (Phase 2) — 64→55: L0 sparsity 유효화
 
 model:
-  regression_model: "mlp"       # mlp / transformer / i_transformer / resnet_tab
+  regression_model: "mlp"       # mlp / transformer / i_transformer / resnet_tab / ft_transformer
   mlp_hidden_dims: [512, 256, 128, 64]
+  # 회귀 헤드 raw 융합(§5-4) — 둘 다 기본 false, 동시 사용 불가, mlp/transformer/resnet_tab만 지원
+  with_raw_cnn: false            # true: raw V/|I| 곡선을 RawCNN(64D)로 압축해 융합(방안2)
+  raw_cnn_pretrained_from: null  # with_raw_cnn=true일 때: classifier clf_best.pt 경로 지정 시
+                                  #   그 RawCNN을 얼려서 재사용(방안 a), null이면 랜덤 초기화 후
+                                  #   Phase2와 함께 학습(방안 b)
+  with_raw_flat: false           # true: raw V/|I|를 압축 없이 flatten(96D)해 그대로 융합(방안1)
 
 loss:
   lambda_scen: 0.01     # CE 손실 활성 (MSE 스케일과 균형; 0이면 CE 비활성)
@@ -953,18 +1018,24 @@ test:
 ```
 _5_data_model_scr/
   MMDD_HHMM_p1_{axis}               ← Phase 1 (예: 0716_1149_p1_prot)
-  MMDD_HHMM_p2_{model}_{axis}       ← Phase 2 (예: 0716_1200_p2_mlp_prot)
-    ├── checkpoints/best.pt
     ├── gates/classification_HIs.json  (Phase 1 출력)
     ├── gates/regression_HIs.json      (Phase 1 출력)
-    ├── classifier/clf_best.pt         (Step 8 출력 — B안)
+    ├── classifier/clf_best.pt         (Step 7 출력 — B안. 2026-07-30 재배치 이후
+    │                                    Phase 1 폴더 안에 저장된다 — §5-9 참조)
     ├── scenario_spec.json
+    └── config.yaml
+  MMDD_HHMM_p2_{model}_{axis}       ← Phase 2 (예: 0716_1200_p2_mlp_prot)
+    ├── checkpoints/best.pt
+    ├── scenario_spec.json             (gates_from의 spec을 그대로 복사 — §5-8)
     └── config.yaml
 ```
 
 > `data_dir` / `seg_data_dir` 는 `null` 로 두면 `scenario.axis` 기준으로 자동 결정된다.  
 > `--seg-axis` CLI 인수가 yaml보다 우선.  
-> `run_pipeline.py`로 실행 시 `gates_from` / `--run-dir` / `--checkpoint` 는 자동 주입된다.
+> `run_pipeline.py`로 실행 시 `gates_from` / `--run-dir` / `--checkpoint` 는 자동 주입된다.  
+> **레거시 run**(2026-07-30 재배치 이전 생성)은 `classifier/clf_best.pt`가 Phase 2 폴더
+> 안에 저장돼 있다 — `test_scr.py`가 두 위치를 모두 자동 탐색하므로(§5-10) 별도
+> 마이그레이션은 필요 없다.
 
 ---
 
@@ -1061,8 +1132,13 @@ batch = {
 }
 ```
 
-> `x_raw`는 CNN 분류기(`classifier.type: cnn`)에서만 사용. SCRModel 회귀 forward는 이 키를
-> 읽지 않고 무시하므로 기존 회귀 경로는 완전히 불변.
+> `x_raw`는 CNN 분류기(`classifier.type: cnn`)와, **`model.with_raw_cnn`/`model.with_raw_flat`
+> 가 켜진 SCRModel 회귀 forward**에서 사용된다(§5-4, REGRESSION_UPGRADE.md §2/§5/§8/§11).
+> 둘 다 기본 `false`일 때만 기존 회귀 경로가 완전히 불변이다 — `SegmentDataset`은
+> 항상 `x_raw`를 갖고 있으므로(§5-2) `test_scr.py`/`SCREvaluator`는 이 스위치들에
+> 대해 추가 코드 변경이 필요 없지만, 직접 배치를 구성하는 코드(예:
+> `visualize_results.py`의 벤치마크/Jacobian용 합성 배치)는 `model.raw_cnn is not
+> None or model.with_raw_flat`일 때 `x_raw`를 채워 넣어야 한다.
 
 ---
 
@@ -1075,6 +1151,7 @@ batch = {
   direction (B,)
   seg_idx   (B,)
   cap_init  (B,)
+  x_raw   (B, 2, 48)       — with_raw_cnn/with_raw_flat일 때만 사용
 
 ─── 전처리 ───────────────────────────────────────────────
 x = x_hi × nan_mask                          (B, 64)  [NaN 위치 → 0]
@@ -1096,14 +1173,31 @@ probe_z (B, 64)   — gate 확률 벡터 (0/1 혼합 또는 이진)
 scen_x (B, 64)   — 시나리오 gate 출력
 scen_z (B, 64)   — gate 확률 벡터
 
-─── Capacity head 입력 구성 ──────────────────────────────
-feat = concat(probe_x, scen_x, direction.unsqueeze(1), cap_init.unsqueeze(1))
-     = (B, 64+64+1+1) = (B, 130)
+─── raw 융합 (선택, with_raw_cnn/with_raw_flat 중 하나만 — 상호 배타) ──────
+  with_raw_cnn=true:
+    raw_cnn_pretrained_from 지정 → RawCNN을 그 classifier 체크포인트에서 로드해
+      얼림(requires_grad_(False)+eval, model.train() 호출돼도 항상 eval 유지) — 방안 a
+    미지정 → RawCNN 랜덤 초기화, Phase2와 함께 학습 — 방안 b
+    cnn_emb = RawCNN(x_raw)                    (B, 64)  (frozen이면 torch.no_grad())
+  with_raw_flat=true:
+    raw_flat = BatchNorm1d(x_raw.reshape(B,-1))  (B, 96)  (RAW_CH×RAW_N=2×48)
+    # BatchNorm은 REGRESSION_UPGRADE.md §2 원안(단순 flatten concat)에 없던 추가 —
+    # 이미 z-score된 HI(mean0/std1) 대비 raw V(~3-4)/|I|(~0-5) 스케일 격차를 흡수하기 위함.
 
-─── Capacity head (선택 가능) ────────────────────────────
-  mlp          : Linear(130→d)→ReLU→Linear(d→d/2)→ReLU→Linear(d/2→1)
-  transformer  : probe/scen/meta 3토큰 → TransformerEncoder(Pre-LN) → mean pool → Linear→1
-  i_transformer: 130 스칼라 각각이 토큰 → feature-wise attention → mean pool → Linear→1
+─── Capacity head 입력 구성 ──────────────────────────────
+feat = concat(probe_x, scen_x, [cnn_emb 또는 raw_flat,] direction.unsqueeze(1), cap_init.unsqueeze(1))
+     = (B, 130)                         # 기본(raw 융합 없음)
+     = (B, 130 + 64) = (B, 194)         # with_raw_cnn=true
+     = (B, 130 + 96) = (B, 226)         # with_raw_flat=true
+
+─── Capacity head (yaml model.regression_model로 선택) ────────
+  mlp           : Linear(head_in→d)→ReLU→…→Linear(→1)
+  transformer   : probe/scen/[cnn_emb 또는 raw_flat/]meta 토큰(3~4개) → TransformerEncoder(Pre-LN) → mean pool → Linear→1
+  i_transformer : head_in개 스칼라 각각이 토큰 → feature-wise attention → mean pool → Linear→1
+                  (with_raw_cnn/with_raw_flat 미지원 — NotImplementedError)
+  resnet_tab    : Linear(head_in→d) → ResBlock×n_blocks(pre-act, skip) → LN→ReLU→Linear(→1)
+  ft_transformer: head_in개 스칼라 토큰 + [CLS] + sparse attention mask(L0 게이트 0=비활성 제외)
+                  (with_raw_cnn/with_raw_flat 미지원 — NotImplementedError)
 
 cap_pred (B,)   — SOH ratio 예측값 [정규화 없음, 직접 SOH ratio 단위]
 ```
@@ -1290,7 +1384,8 @@ Stage B — scenario-conditioned regression
                            n_scenarios = spec.n_scenarios
   x_probe = probe_gate(x_hi)               # (B, 64), direction별 게이트
   x_scen  = scen_gates[seg_idx](x_hi)      # (B, 64), seg_idx 하드 라우팅
-  feat    = [x_probe | x_scen | direction | cap_init]  # (B, 130)
+  feat    = [x_probe | x_scen | direction | cap_init]  # (B, 130) — with_raw_cnn/
+            # with_raw_flat=true면 direction 앞에 raw 융합 블록 추가(194/226차원, §5-0(E))
   cap_pred = cap_head(feat)                # (B,) — SOH ratio ∈ (0,1]
 
 출력 dict:
@@ -1307,24 +1402,41 @@ model = SCRModel(
     charge_probe_mask=None,    # Phase 1: None → HardConcreteGate (학습 가능)
     discharge_probe_mask=None, # Phase 2/FT: (64,) bool tensor → 고정 buffer
     scen_masks=None,           # Phase 2/FT: (n_scenarios, 64) bool tensor → 고정 buffer
-    model_cfg={"regression_model": "mlp"},
+    model_cfg={
+        "regression_model": "mlp",
+        "with_raw_cnn": False,             # true면 raw_cnn_pretrained_from도 확인(§5-0(E))
+        "raw_cnn_pretrained_from": None,
+        "with_raw_flat": False,            # with_raw_cnn과 동시 true 불가(ValueError)
+    },
     spec=spec,                 # ScenarioSpec — None이면 qfrac 기본값
 )
 # model.spec, model.n_scenarios, model.n_classes 로 접근
+# model.raw_cnn: with_raw_cnn=true일 때만 RawCNN 인스턴스, 아니면 None
+# model.with_raw_flat: bool (raw_flat_norm=BatchNorm1d(96) 존재 여부와 대응)
 ```
 
 **Phase 전환:**
-- **Phase 1**: gate 학습, L0 패널티 활성. gate_prob 랭킹 JSON 저장
-- **Phase 2/Fine-tune**: JSON 로드 → 고정 buffer. **cap_head만 학습**  
-  (gates가 buffer이므로 `model.parameters()` = cap_head만 → 명시적 freeze 불필요)
+- **Phase 1**: gate 학습, L0 패널티 활성. gate_prob 랭킹 JSON 저장. `with_raw_cnn`/
+  `with_raw_flat`는 `train_scr.py`가 `_p1_model_cfg`에서 강제로 `False`로 덮어써
+  Phase 1엔 절대 반영되지 않는다(게이트 선정과 무관한 Phase 2 전용 옵션).
+- **Phase 2/Fine-tune**: JSON 로드 → 고정 buffer. **cap_head(+ with_raw_cnn=true고
+  frozen이 아니면 raw_cnn도)만 학습**  
+  (gates가 buffer이므로 기본은 `model.parameters()` = cap_head만 → 명시적 freeze 불필요.
+  `raw_cnn_pretrained_from` 지정 시 raw_cnn도 `requires_grad_(False)`로 얼려짐)
 
 **cap_head 옵션** (`5_model/models/cap_heads.py`):
 
-| 모드 | 구조 | 특징 |
-|---|---|---|
-| `mlp` | Linear(130→d)→ReLU→…→1 | 기본, 빠름 |
-| `transformer` | probe/scen/meta 3토큰 → TransformerEncoder | semantic 토큰 분리 |
-| `i_transformer` | 130 피처 각각이 토큰 → feature-wise attention | feature-wise |
+| 모드 | 구조 | 특징 | `with_raw_cnn`/`with_raw_flat` |
+|---|---|---|---|
+| `mlp` | Linear(head_in→d)→ReLU→…→1 | 기본, 빠름 | 지원 (head_in=130/194/226) |
+| `transformer` | probe/scen/[raw]/meta 토큰 → TransformerEncoder | semantic 토큰 분리, raw는 토큰 1개로 추가 | 지원 |
+| `resnet_tab` | Linear(head_in→d)→ResBlock×n(skip)→LN→ReLU→1 | Gorishniy et al. NeurIPS 2021 | 지원 |
+| `i_transformer` | head_in 피처 각각이 토큰 → feature-wise attention | feature-wise, 해석 가능 | **미지원(NotImplementedError)** |
+| `ft_transformer` | 피처 토큰 + [CLS] + sparse attention mask | Gorishniy et al. NeurIPS 2021 | **미지원(NotImplementedError)** |
+
+`build_cap_head()`가 `with_raw_cnn`+`with_raw_flat` 동시 지정 시 `ValueError`,
+미지원 헤드에 raw 융합 지정 시 `NotImplementedError`를 즉시 던진다(생성 시점에
+바로 실패 — 학습 도중 발견되지 않음).
 
 ---
 
@@ -1428,6 +1540,21 @@ checkpoints/best.pt 저장 (norm_mean/std/target_mean/target_std 포함)
 --phase > --no-gates(legacy) > yaml gates_from 유무 순서로 Phase 결정
 --seg-axis > yaml scenario.axis > "qfrac" 순서로 축 결정
 spec = get_segmenter(axis, cfg).get_spec()
+
+# Phase 2: build_datasets/spec.save() 이전에 gates_dir을 먼저 확정하고, 그 폴더의
+# 자기 own scenario_spec.json이 있으면 그걸로 spec을 교체한다(2026-07-31 수정 —
+# 예전엔 이 재로드가 build_datasets 이후에 일어나서, 디스크에 저장되는
+# scenario_spec.json이 "현재 코드 기준 spec"이고 실제 학습에 쓰인 spec은
+# "gates_from 폴더의 spec"으로 서로 어긋날 수 있었다. 두 spec이 다를 때는 —
+# 예: routing 상수가 gates_from 학습 이후에 수정된 경우 — test_scr.py가 저장된
+# spec으로 평가해 라우팅을 잘못 해석하는 버그가 있었다. 지금은 항상 "실제 학습에
+#쓰인 spec"이 저장된다).
+if phase == 2:
+    gates_dir = resolve_gates_dir(args.gates_from, cfg)
+    p2_spec_path = gates_dir.parent / "scenario_spec.json"
+    if p2_spec_path.exists():
+        spec = ScenarioSpec.load(p2_spec_path)   # gates_from 자신의 spec으로 교체
+
 spec.save(output_dir / "scenario_spec.json")       ← test_scr.py 재사용
 build_datasets(cfg, spec=spec)                     ← spec 명시 전달 필수
   # spec 미전달 시 _DEFAULT_SPEC(qfrac, n_scenarios=6)으로 fallback →
@@ -1449,15 +1576,28 @@ python 5_model/train_scr.py --phase 2 --charge-m 3 --discharge-m 1 --scen-k 10
 
 # 재현성 시드
 python 5_model/train_scr.py --phase 1 --seed 42
+
+# 회귀 헤드 raw CNN 융합(방안2) — 분류기 CNN 재사용(a) / yaml에서 with_raw_flat: true로 방안1
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0711_1538 \
+  --with-raw-cnn --raw-cnn-pretrained-from _5_data_model_scr/0711_1538/classifier/clf_best.pt
 ```
+
+`--with-raw-cnn`/`--raw-cnn-pretrained-from`은 Phase 2 전용 CLI 오버라이드(yaml
+`model.with_raw_cnn`/`model.raw_cnn_pretrained_from`과 동일 효과, `run_pipeline.py`가
+Step 8에 자동 주입할 때 사용 — §스텝 목록 "Phase 간 자동 핸드오프" 참조).
+`with_raw_flat`은 대응하는 CLI 플래그가 없어 yaml로만 설정한다(빈도가 낮고 pretrained
+경로 같은 부가 옵션이 없어 CLI 단축이 불필요).
 
 run_dir 자동 생성 규칙:
 ```
 Phase 1: MMDD_HHMM_p1_{axis}          (예: 0716_1149_p1_prot)
 Phase 2: MMDD_HHMM_p2_{model}_{axis}  (예: 0716_1200_p2_mlp_prot)
   axis 약어 : qfrac→qfr / protocol→prot / vwindow→vwin / rcs→rcs / cluster→clst
-  model 약어: mlp→mlp / transformer→tr / i_transformer→itr / resnet_tab→res
+  model 약어: mlp→mlp / transformer→tr / i_transformer→itr / resnet_tab→res / ft_transformer→ftt
 ```
+`with_raw_cnn`/`with_raw_flat` 여부는 run_dir 이름에 반영되지 않는다(run 폴더의
+`config.yaml`을 확인해야 구분 가능) — 실험을 구분하려면 `--model-config`로 서로 다른
+yaml 파일을 쓰는 관례를 따른다(REGRESSION_UPGRADE.md §10.1/§11.1의 `exp_*.yaml` 예시).
 
 ---
 
@@ -1477,20 +1617,25 @@ SCRModel Phase 1/2와 완전히 독립적으로 HI 특성만으로 시나리오 
          (cnn) CNNProbeClassifier  RawCNN + Linear(129→d_hidden)→GELU→Dropout→Linear(→d_hidden//2)→GELU→Linear(→n_classes)
 손실   : CrossEntropyLoss  (regression과 완전 분리)
 정규화 : 동일 config로 build_datasets 호출 → Phase 2와 동일 정규화기 자동 재현
-저장   : {run_dir}/classifier/clf_best.pt
+저장   : {run_dir}/classifier/clf_best.pt  — run_dir은 --run-dir로 지정한 폴더.
+         run_pipeline.py로 실행 시(Step 7) Phase 1 폴더가 자동 주입된다
+         (2026-07-30 재배치 — §스텝 목록 참조). 직접 실행 시 Phase 1/2 어느 폴더를
+         지정해도 동작은 동일(회귀와 완전 분리라 어느 run_dir이든 상관없음), 다만
+         with_raw_cnn이 이 경로를 찾아 재사용하므로 run_pipeline.py 관례(Phase 1
+         폴더)를 따르는 게 일관적이다.
 ```
 
 ```bash
-# Phase 2 run_dir 지정 (분류기를 해당 run_dir 내에 저장)
-python 5_model/train_classifier.py --run-dir _5_data_model_scr/0716_1200_p2_mlp_prot
+# run_dir 지정 (분류기를 해당 run_dir 내에 저장) — Phase 1 폴더 권장(위 참고)
+python 5_model/train_classifier.py --run-dir _5_data_model_scr/0716_1149_p1_prot
 
 # 하이퍼파라미터 오버라이드
 python 5_model/train_classifier.py \
-    --run-dir _5_data_model_scr/0716_1200_p2_mlp_prot \
+    --run-dir _5_data_model_scr/0716_1149_p1_prot \
     --epochs 300 --lr 5e-4 --d-hidden 128
 
-# run_pipeline.py Step 8로 자동 실행 (--run-dir 자동 주입)
-python run_pipeline.py 8 --to-step 8
+# run_pipeline.py Step 7로 자동 실행 (--run-dir에 직전 Phase 1 run 자동 주입)
+python run_pipeline.py 7 --to-step 7
 ```
 
 **저장 포맷:**
@@ -1531,8 +1676,15 @@ python run_pipeline.py 8 --to-step 8
 각 모드마다 **회귀(capacity/breakdown) + 분류(classification) 지표를 함께** 계산한다
 (`SCREvaluator.evaluate_modes()`, §5-11).
 
+**분류기 체크포인트 자동 탐색 (`_resolve_classifier_ckpt`, 2026-07-30 재배치 대응)**:
+`--classifier-ckpt` 미지정 시 두 위치를 순서대로 탐색한다 — ① 레거시 관례
+`{run_dir}/classifier/clf_best.pt`(재배치 이전 run, run_dir=Phase 2 폴더), ②
+없으면 그 run의 저장된 `config.yaml`에서 `data.gates_from`을 읽어
+`{gates_from}/classifier/clf_best.pt`(재배치 이후 run, 분류기가 Phase 1 폴더에
+있음)를 확인한다. 두 위치 다 없으면 분류기 없이 oracle만 실행.
+
 ```bash
-# 기본: run_dir 내 classifier/clf_best.pt 자동 탐색 → oracle+hard+soft 모두 실행
+# 기본: run_dir 내 classifier/clf_best.pt 자동 탐색(레거시→gates_from 순) → oracle+hard+soft 모두 실행
 python 5_model/test_scr.py --checkpoint .../best.pt
 
 # 분류기 체크포인트 직접 지정
@@ -1929,9 +2081,9 @@ model:
 ```bash
 python run_pipeline.py 6 --seg-axis <원하는 축> --model-config 5_model/config/scr.yaml --to-step 9
 ```
-- Step 6/7(Phase 1/2): raw_mlp는 게이트가 없어 phase 구분이 무의미 — 두 phase 모두 동일하게
+- Step 6/8(Phase 1/2): raw_mlp는 게이트가 없어 phase 구분이 무의미 — 두 phase 모두 동일하게
   `RawMLPModel`을 처음부터 학습한다(모델이 작아 재학습 비용이 낮음, `train_scr.py`).
-- Step 8(분류기 학습): `train_classifier.py`가 run의 `config.yaml`에서 `regression_model: raw_mlp`를
+- Step 7(분류기 학습): `train_classifier.py`가 run의 `config.yaml`에서 `regression_model: raw_mlp`를
   감지하면 "라우팅이 필요 없다"는 메시지와 함께 자동으로 건너뛴다.
 - Step 9(평가): `test_scr.py`가 raw_mlp 체크포인트를 감지하면 `RawMLPModel`로 재구성하고, 분류기
   로딩·HI 게이트 로딩·routing heatmap을 모두 스킵한 뒤 **oracle 전용**으로 자동 평가한다(hard/soft

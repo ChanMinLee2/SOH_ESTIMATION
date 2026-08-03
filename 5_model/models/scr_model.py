@@ -21,14 +21,18 @@ At inference JSON masks may replace the L0 gates (fixed binary vectors).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils.hi_schema import N_HI, spec_from_qfrac
+from utils.hi_schema import N_HI, RAW_CH, RAW_N, spec_from_qfrac
 from models.cap_heads import build_cap_head
+
+# 5_model/models/scr_model.py → repo root (train_scr.py/test_scr.py의 PROJECT_ROOT와 동일 계산)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class SCRModel(nn.Module):
@@ -98,13 +102,65 @@ class SCRModel(nn.Module):
 
         # ----------------------------------------------------------------
         # Capacity head
-        # input: probe_x (N_HI) || scen_x (N_HI) || direction (1) || cap_init (1)
-        # = m active probe HIs + k active scen HIs + 2 scalars
+        # input: probe_x (N_HI) || scen_x (N_HI) [|| cnn_emb (64)] || direction (1) || cap_init (1)
+        # = m active probe HIs + k active scen HIs [+ raw V/|I| CNN 임베딩] + 2 스칼라
         # Phase 1: 항상 MLP (model_cfg=None)
         # Phase 2: model_cfg["regression_model"] 에 따라
         #   mlp / transformer / i_transformer / resnet_tab / ft_transformer
         # ----------------------------------------------------------------
         self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout)
+
+        # ----------------------------------------------------------------
+        # raw_cnn — 회귀 헤드용 원시 V/|I| 곡선 CNN 임베딩 (REGRESSION_UPGRADE.md §5/§8)
+        # with_raw_cnn=False(기본) → 회귀 경로 완전히 기존과 동일(x_raw 무시).
+        # with_raw_cnn=True:
+        #   raw_cnn_pretrained_from 미지정 → RawCNN 랜덤 초기화, Phase2와 함께 학습 (방안 (b))
+        #   raw_cnn_pretrained_from=<classifier clf_best.pt 경로> → 그 체크포인트의
+        #     RawCNN 서브모듈("cnn.*")만 가중치 로드 후 얼림(requires_grad_(False)+eval 고정)
+        #     — 사전 검증 (a): 분류기 CNN 재사용, Phase2 MSE 그래디언트가 CNN에 안 흐름.
+        # ----------------------------------------------------------------
+        _mcfg = model_cfg or {}
+        self.with_raw_cnn = bool(_mcfg.get("with_raw_cnn", False))
+        self._raw_cnn_frozen = False
+        if self.with_raw_cnn:
+            from models.raw_cnn import RawCNN
+            self.raw_cnn = RawCNN(d_out=64)
+            _pretrained_from = _mcfg.get("raw_cnn_pretrained_from")
+            if _pretrained_from:
+                _pf_path = Path(_pretrained_from)
+                if not _pf_path.is_absolute():
+                    _pf_path = _PROJECT_ROOT / _pf_path
+                _ckpt = torch.load(_pf_path, map_location="cpu")
+                _state = _ckpt["clf_state"] if isinstance(_ckpt, dict) and "clf_state" in _ckpt else _ckpt
+                _cnn_state = {
+                    k[len("cnn."):]: v for k, v in _state.items() if k.startswith("cnn.")
+                }
+                missing, unexpected = self.raw_cnn.load_state_dict(_cnn_state, strict=True)
+                for p in self.raw_cnn.parameters():
+                    p.requires_grad_(False)
+                self.raw_cnn.eval()
+                self._raw_cnn_frozen = True
+                print(f"[scr_model] raw_cnn: frozen, loaded from {_pf_path}")
+            else:
+                print("[scr_model] raw_cnn: random init, trainable (Phase2와 함께 학습)")
+        else:
+            self.raw_cnn = None
+
+        # ----------------------------------------------------------------
+        # raw_flat — 방안1(REGRESSION_UPGRADE.md §2 방안1): raw V/|I| 곡선을 압축 없이
+        # flatten(RAW_CH*RAW_N=96)해 그대로 concat. with_raw_cnn과 동시 사용 불가(택1).
+        # HI는 이미 z-score(mean0/std1)인데 raw_v(~3-4V)/raw_i(~0-5A)는 스케일이 전혀
+        # 다르므로, 문서 원안(단순 reshape concat)에 BatchNorm1d를 하나 더해 정규화한다
+        # — RawCNN이 stem에서 BatchNorm1d로 채널 스케일을 흡수하는 것과 동등한 처리를
+        # 주지 않으면 raw 블록이 gradient를 불공정하게 지배해 비교가 왜곡된다.
+        # ----------------------------------------------------------------
+        self.with_raw_flat = bool(_mcfg.get("with_raw_flat", False))
+        if self.with_raw_cnn and self.with_raw_flat:
+            raise ValueError("with_raw_cnn과 with_raw_flat을 동시에 켤 수 없습니다 (방안2 vs 방안1).")
+        if self.with_raw_flat:
+            self.raw_flat_norm = nn.BatchNorm1d(RAW_CH * RAW_N)
+        else:
+            self.raw_flat_norm = None
 
         # ----------------------------------------------------------------
         # probe_mlp — Phase 1 dual-objective CE head
@@ -125,6 +181,22 @@ class SCRModel(nn.Module):
             )
         else:
             self.probe_mlp = None
+
+    # ------------------------------------------------------------------
+    # train()/eval() 오버라이드 — 얼린 raw_cnn은 BatchNorm 통계도 절대 갱신되면 안 됨
+    # ------------------------------------------------------------------
+    def train(self, mode: bool = True):
+        """부모 train(mode)를 호출한 뒤, raw_cnn이 얼려져 있으면 항상 eval()로 되돌린다.
+
+        requires_grad_(False)는 그래디언트만 막을 뿐 BatchNorm의 러닝 통계
+        갱신(forward 시 버퍼 업데이트, 그래디언트와 무관)은 막지 못한다 —
+        model.train()이 재귀적으로 raw_cnn.training=True를 만들면 frozen CNN의
+        BatchNorm이 Phase2 데이터 분포로 계속 오염된다. 그걸 막기 위한 오버라이드.
+        """
+        super().train(mode)
+        if self._raw_cnn_frozen and self.raw_cnn is not None:
+            self.raw_cnn.eval()
+        return self
 
     # ------------------------------------------------------------------
     # Gate helpers
@@ -229,14 +301,22 @@ class SCRModel(nn.Module):
         # Stage B: scenario-conditioned gate (MSE gradient only)
         scen_x, scen_z = self._apply_scen_gate(x, seg_idx) # (B, N_HI)
 
-        # Capacity head: probe_x + scen_x + direction + cap_init
-        feat = torch.cat(
-            [probe_x, scen_x,
-             direction.unsqueeze(1),
-             batch["cap_init"].unsqueeze(1)],
-            dim=1,
-        )                                                   # (B, 2*N_HI+2)
-        cap_pred = self.cap_head(feat)                      # (B,)
+        # Capacity head: probe_x + scen_x [+ raw CNN 임베딩 | raw flat] + direction + cap_init
+        feat_parts = [probe_x, scen_x]
+        if self.raw_cnn is not None:
+            if self._raw_cnn_frozen:
+                with torch.no_grad():
+                    cnn_emb = self.raw_cnn(batch["x_raw"])       # (B, 64) — 그래디언트 차단
+            else:
+                cnn_emb = self.raw_cnn(batch["x_raw"])           # (B, 64) — Phase2와 함께 학습
+            feat_parts.append(cnn_emb)
+        elif self.with_raw_flat:
+            x_raw = batch["x_raw"]                                # (B, RAW_CH, RAW_N)
+            raw_flat = self.raw_flat_norm(x_raw.reshape(x_raw.size(0), -1))  # (B, 96)
+            feat_parts.append(raw_flat)
+        feat_parts += [direction.unsqueeze(1), batch["cap_init"].unsqueeze(1)]
+        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+64+2)/(B, 2*N_HI+96+2)
+        cap_pred = self.cap_head(feat)                       # (B,)
 
         # CE head: [probe_x || direction] → class logits (Phase 1 dual-objective only)
         if self.probe_mlp is not None:

@@ -2,14 +2,20 @@
 run_pipeline.py
 
 LFP SOH Prediction 전체 파이프라인 실행기.
-데이터 전처리(Step 1~5)부터 모델 학습/평가(Step 6~8)까지 지원.
+데이터 전처리(Step 1~5)부터 모델 학습/평가(Step 6~9)까지 지원.
+
+2026-07-30: Step 7(분류기)/Step 8(Phase 2) 순서를 재배치했다 — 분류기는 Phase 1
+게이트만 있으면 학습되므로(회귀와 완전 분리) Phase 2보다 먼저 돌리고, Phase 2가
+--with-raw-cnn으로 그 분류기의 CNN을 바로 재사용할 수 있게 했다(REGRESSION_UPGRADE.md
+§8/§10). Step 6=Phase1, Step 7=분류기, Step 8=Phase2, Step 9=평가.
 
 사용:
   python run_pipeline.py                          # 전체 파이프라인 (Step 1부터)
   python run_pipeline.py 2                        # Step 2부터 재실행
-  python run_pipeline.py 6                        # 학습/평가만 (Step 6~8)
-  python run_pipeline.py 6 --to-step 7           # Phase 1~2 학습만
-  python run_pipeline.py 8 --checkpoint path/to/best.pt  # 평가만
+  python run_pipeline.py 6                        # 학습/평가만 (Step 6~9)
+  python run_pipeline.py 6 --to-step 8            # Phase1→분류기→Phase2 학습만(평가 제외)
+  python run_pipeline.py 6 --to-step 8 --with-raw-cnn  # 위와 동일 + Phase2에 raw CNN 융합(방안 a, 단일 패스)
+  python run_pipeline.py 9 --checkpoint path/to/best.pt  # 평가만
   python run_pipeline.py 3 --workers 8
   python run_pipeline.py --model-config 5_model/config/scr.yaml
 """
@@ -27,6 +33,15 @@ MODEL_OUTPUT_DIR = ROOT / "_5_data_model_scr"
 _RUN_DIR_RE = re.compile(r"_p(\d+)_")  # train_scr.py 명명 규칙: {MMDD_HHMM}_p{phase}_...
 
 # (번호, 이름, 스크립트 경로, 기본 추가 인자, --workers 지원 여부)
+#
+# 2026-07-30 재배치: 분류기(구 Step 8)를 Phase 2(구 Step 7) 앞으로 옮겼다.
+# train_classifier.py는 원래도 Phase 1 게이트(run_dir/gates/*)만 있으면 동작했고
+# Phase 2 가중치는 전혀 안 썼다(회귀와 완전 분리 설계) — 다만 체크포인트 저장 위치가
+# "그 run_dir"이었을 뿐이라 관례상 Phase 2 뒤에 뒀었다. Phase 2가 with_raw_cnn으로
+# 그 분류기의 CNN을 재사용(REGRESSION_UPGRADE.md §8 방안 a)하려면 분류기가 먼저
+# 학습돼 있어야 하므로, Phase 2를 두 번 돌리지 않도록 순서를 Phase1→분류기→Phase2로
+# 바꿨다. 기존 run(분류기가 Phase 2 폴더 안에 저장됨)은 test_scr.py가 레거시 위치를
+# 우선 탐색해 그대로 호환된다(_resolve_classifier_ckpt 참조).
 STEPS = [
     (1, "데이터 변환",          "1_convert/convert_unified.py",    ["--dataset", "all"], True),
     (2, "이상 사이클 제거",     "2_preprocess/preprocess.py",       [],                   True),
@@ -34,8 +49,8 @@ STEPS = [
     (4, "HI 상관 분석",         "4_hi_analysis/hi_correlation.py",  ["--force"],          True),
     (5, "HI 세그먼트 시각화",   "4_hi_analysis/hi_segment_viz.py",  [],                   True),
     (6, "SCR Phase 1 학습",     "5_model/train_scr.py",             ["--phase", "1"],     False),
-    (7, "SCR Phase 2 학습",     "5_model/train_scr.py",             ["--phase", "2"],     False),
-    (8, "시나리오 분류기 학습", "5_model/train_classifier.py",       [],                   False),
+    (7, "시나리오 분류기 학습", "5_model/train_classifier.py",       [],                   False),
+    (8, "SCR Phase 2 학습",     "5_model/train_scr.py",             ["--phase", "2"],     False),
     (9, "SCR 평가",             "5_model/test_scr.py",              [],                   False),
 ]
 
@@ -159,7 +174,8 @@ def main():
     )
     parser.add_argument(
         "--gates-from", default=None, metavar="DIR",
-        help="Phase 2 학습 시 gates 디렉터리 직접 지정 (미지정 시 Phase 1 출력 자동 탐색)",
+        help="분류기 학습(Step 7)/Phase 2 학습(Step 8) 시 gates 디렉터리(=Phase 1 run) "
+             "직접 지정 (미지정 시 Phase 1 출력 자동 탐색)",
     )
     parser.add_argument(
         "--checkpoint", default=None, metavar="PATH",
@@ -167,13 +183,14 @@ def main():
     )
     parser.add_argument(
         "--seg-axis", default=None, metavar="AXIS",
-        help="세그멘테이션 축 (Step 4~7에 전달). 예: qfrac, q_frac_wide",
+        help="세그멘테이션 축 (Step 4~6, 8에 전달 — 분류기(Step 7)는 run_dir의 "
+             "scenario_spec.json에서 축을 읽으므로 이 옵션이 필요 없음). 예: qfrac, q_frac_wide",
     )
     parser.add_argument(
         "--axis-config", default=None, metavar="JSON",
-        help="축 파라미터 JSON (Step 4~7에 전달). 예: '{\"n1\": 0.4, \"n2\": 0.2, \"n_samples\": 4}'",
+        help="축 파라미터 JSON (Step 4~6, 8에 전달). 예: '{\"n1\": 0.4, \"n2\": 0.2, \"n_samples\": 4}'",
     )
-    # 단축 인자 (PowerShell JSON 우회) — Step 4~7에 그대로 전달
+    # 단축 인자 (PowerShell JSON 우회) — Step 4~6, 8에 그대로 전달
     parser.add_argument("--n1",        type=float, default=None,
                         help="q_frac_wide 구간 크기 (--axis-config 대체, PowerShell 호환)")
     parser.add_argument("--n2",        type=float, default=None,
@@ -197,18 +214,25 @@ def main():
                         help="충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외 (Step 4/6/7/8 전달). "
                              "Step 4는 결과를 '_ccOnly' 접미사 경로에 저장하고, "
                              "Step 6/7/8은 동일 접미사로 해당 데이터를 찾는다.")
-    # m/k 오버라이드 (Step 6~7에 그대로 전달 — train_scr.py --charge-m/--discharge-m/--scen-k)
+    # m/k 오버라이드 (Step 6, 8에 그대로 전달 — train_scr.py --charge-m/--discharge-m/--scen-k.
+    # 분류기(Step 7)는 이 CLI 옵션이 없고 yaml classifier.charge_probe_m 등을 직접 읽음)
     parser.add_argument("--charge-m",    type=int, default=None,
-                        help="충전 probe 상위 m개 (yaml charge_probe_m 오버라이드, Step 6~7 전달)")
+                        help="충전 probe 상위 m개 (yaml charge_probe_m 오버라이드, Step 6/8 전달)")
     parser.add_argument("--discharge-m", type=int, default=None,
-                        help="방전 probe 상위 m개 (yaml discharge_probe_m 오버라이드, Step 6~7 전달)")
+                        help="방전 probe 상위 m개 (yaml discharge_probe_m 오버라이드, Step 6/8 전달)")
     parser.add_argument("--scen-k",      type=int, default=None,
-                        help="시나리오별 scen HI 수 (yaml scen_k_count 오버라이드, Step 6~7 전달)")
+                        help="시나리오별 scen HI 수 (yaml scen_k_count 오버라이드, Step 6/8 전달)")
     parser.add_argument("--phase1-lr",   type=float, default=None,
                         help="Phase 1 peak LR (yaml training.lr 오버라이드, Step 6에만 전달)")
     parser.add_argument("--phase2-lr",   type=float, default=None,
-                        help="Phase 2 peak LR (yaml training.lr 오버라이드, Step 7에만 전달). "
+                        help="Phase 2 peak LR (yaml training.lr 오버라이드, Step 8에만 전달). "
                              "Phase 1/2가 yaml lr을 공유하므로 Phase 2만 낮추고 싶을 때 사용")
+    parser.add_argument("--with-raw-cnn", action="store_true", dest="with_raw_cnn",
+                        help="Phase 2(Step 8)에 회귀 헤드 raw CNN 융합 적용 (REGRESSION_UPGRADE.md "
+                             "§5/§8/§10). Step 7에서 학습된 분류기의 RawCNN을 자동으로 얼려서 "
+                             "재사용한다(방안 a) — Step 6→9를 한 번에 돌리면 Phase 2를 두 번 학습할 "
+                             "필요 없이 단일 패스로 완료됨. yaml model.regression_model 등 다른 "
+                             "model 설정은 --model-config로 지정한 파일 그대로 사용됨")
     args = parser.parse_args()
 
     # 단축 인자 → args.axis_config(JSON) 로 합침. 이후 기존 --axis-config 전달 로직이
@@ -283,19 +307,19 @@ def main():
     for num, name, script, extra, use_workers in selected:
         step_extra = list(extra)
 
-        # ── 축 정보 주입 (Step 4~7) ─────────────────────────────────────────
-        if num in (4, 5, 6, 7):
+        # ── 축 정보 주입 (Step 4~6, 8 — 분류기(7)는 run_dir의 scenario_spec.json에서 축을 읽음) ──
+        if num in (4, 5, 6, 8):
             if args.seg_axis:
                 step_extra += ["--seg-axis", args.seg_axis]
             if args.axis_config:
                 step_extra += ["--axis-config", args.axis_config]
 
-        # ── CV 제외 옵션 주입 (Step 4=추출, 6/7=학습, 8=분류기 — 모두 '_ccOnly' 경로 인지 필요) ──
+        # ── CV 제외 옵션 주입 (Step 4=추출, 6=Phase1, 7=분류기, 8=Phase2 — 모두 '_ccOnly' 경로 인지 필요) ──
         if num in (4, 6, 7, 8) and args.exclude_cv:
             step_extra += ["--exclude-cv"]
 
-        # ── m/k 오버라이드 주입 (Step 6~7) ──────────────────────────────────
-        if num in (6, 7):
+        # ── m/k 오버라이드 주입 (Step 6=Phase1, 8=Phase2 — 분류기(7)는 이 CLI 옵션이 없음) ──
+        if num in (6, 8):
             if args.charge_m is not None:
                 step_extra += ["--charge-m", str(args.charge_m)]
             if args.discharge_m is not None:
@@ -303,18 +327,33 @@ def main():
             if args.scen_k is not None:
                 step_extra += ["--scen-k", str(args.scen_k)]
 
-        # ── phase별 lr 오버라이드 (Step 6=Phase1, 7=Phase2 각각 독립) ──────────
+        # ── phase별 lr 오버라이드 (Step 6=Phase1, 8=Phase2 각각 독립) ──────────
         if num == 6 and args.phase1_lr is not None:
             step_extra += ["--lr", str(args.phase1_lr)]
-        if num == 7 and args.phase2_lr is not None:
+        if num == 8 and args.phase2_lr is not None:
             step_extra += ["--lr", str(args.phase2_lr)]
 
         # ── Phase 1 전: 스냅샷 ──────────────────────────────────────────────
         if num == 6:
             snapshot = _snapshot_run_dirs()
 
-        # ── Phase 2 전: 스냅샷 + gates-from 주입 ────────────────────────────
+        # ── 분류기 학습 전: Phase 1 run_dir 주입 (2026-07-30 재배치 — 분류기는 Phase 1
+        #    게이트만 있으면 되므로 Phase 2보다 먼저 학습해, Phase 2가 with_raw_cnn으로
+        #    이 분류기의 CNN을 그 자리에서 재사용할 수 있게 한다) ──────────────────────
         if num == 7:
+            clf_run = args.gates_from or (str(p1_run_dir) if p1_run_dir else None)
+            if clf_run is None:
+                latest = _find_new_run_dir(set(), phase=1)
+                clf_run = str(latest) if latest else None
+            if clf_run:
+                step_extra += ["--run-dir", str(clf_run)]
+                print(f"\n  → run-dir (분류기): {clf_run}")
+            else:
+                print("\n  [경고] Phase 1 run 디렉터리를 찾을 수 없습니다. "
+                      "--run-dir 직접 지정 권장.")
+
+        # ── Phase 2 전: 스냅샷 + gates-from 주입 (+ --with-raw-cnn 자동 연결) ──────
+        if num == 8:
             snapshot = _snapshot_run_dirs()
             gates_src = args.gates_from or (str(p1_run_dir) if p1_run_dir else None)
             if gates_src is None:
@@ -326,15 +365,18 @@ def main():
             else:
                 print("\n  [경고] Phase 1 run 디렉터리를 찾을 수 없습니다.")
 
-        # ── 분류기 학습 전: Phase 2 run_dir 주입 ────────────────────────────
-        if num == 8:
-            clf_run = p2_run_dir or _find_new_run_dir(set(), phase=2)
-            if clf_run:
-                step_extra += ["--run-dir", str(clf_run)]
-                print(f"\n  → run-dir (분류기): {clf_run}")
-            else:
-                print("\n  [경고] Phase 2 run 디렉터리를 찾을 수 없습니다. "
-                      "--run-dir 직접 지정 권장.")
+            if args.with_raw_cnn:
+                step_extra += ["--with-raw-cnn"]
+                if gates_src:
+                    _clf_ckpt = Path(gates_src) / "classifier" / "clf_best.pt"
+                    if not _clf_ckpt.is_absolute():
+                        _clf_ckpt = ROOT / _clf_ckpt
+                    if _clf_ckpt.exists():
+                        step_extra += ["--raw-cnn-pretrained-from", str(_clf_ckpt)]
+                        print(f"  → raw-cnn-pretrained-from: {_clf_ckpt}")
+                    else:
+                        print(f"\n  [경고] --with-raw-cnn 지정했지만 분류기 체크포인트가 없습니다"
+                              f"({_clf_ckpt}) — RawCNN을 랜덤 초기화해 Phase2와 함께 학습합니다(방안 b).")
 
         # ── 평가 전: checkpoint 주입 ─────────────────────────────────────────
         if num == 9:
@@ -360,7 +402,7 @@ def main():
                 print("  [경고] Phase 1 run 디렉터리를 감지하지 못했습니다.")
 
         # ── Phase 2 후: 신규 run dir 기록 ────────────────────────────────────
-        if num == 7:
+        if num == 8:
             p2_run_dir = _find_new_run_dir(snapshot, phase=2)
             if p2_run_dir:
                 print(f"  → Phase 2 run dir: {p2_run_dir}")

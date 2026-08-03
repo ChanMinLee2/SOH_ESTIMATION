@@ -259,12 +259,13 @@ def main() -> None:
     # ------------------------------------------------------------------
     rs_cfg = cfg.get("test", {})
     _clf_ckpt_path = (Path(args.classifier_ckpt) if args.classifier_ckpt
-                      else run_dir / "classifier" / "clf_best.pt")
+                      else _resolve_classifier_ckpt(run_dir))
     if _is_raw_mode:
         # RawMLPModel은 seg_idx를 직접 입력받아 회귀 — 분류기 기반 라우팅이 무의미하므로
-        # 설령 classifier/clf_best.pt가 남아 있어도(예: Step 8 수동 실행) 무시하고 oracle만 평가.
+        # 설령 classifier 체크포인트가 남아 있어도(예: 분류기 스텝 수동 실행) 무시하고
+        # oracle만 평가.
         print("[test] raw_mlp 모드 — 분류기 로드 생략, oracle 모드만 평가")
-    elif _clf_ckpt_path.exists():
+    elif _clf_ckpt_path is not None and _clf_ckpt_path.exists():
         try:
             _clf_ckpt = torch.load(_clf_ckpt_path, map_location="cpu", weights_only=False)
         except TypeError:
@@ -288,7 +289,9 @@ def main() -> None:
         print(f"[test] 분류기 로드: {_clf_ckpt_path}  type={_clf_type}  "
               f"val_acc={_clf_ckpt.get('val_acc', float('nan')):.4f}")
     else:
-        print(f"[test] 분류기 체크포인트 없음 ({_clf_ckpt_path}) — oracle 모드만 실행.")
+        _loc = _clf_ckpt_path if _clf_ckpt_path is not None else (
+            f"{run_dir/'classifier'/'clf_best.pt'} 또는 gates_from 폴더의 classifier/clf_best.pt")
+        print(f"[test] 분류기 체크포인트 없음 ({_loc}) — oracle 모드만 실행.")
 
     # ------------------------------------------------------------------
     # 통합 평가: 학습된 분류기로 분류 → 라우팅 → 회귀 (oracle / hard / soft)
@@ -501,6 +504,34 @@ def _find_latest_checkpoint(output_dir: Path) -> Path:
     if old:
         return max(old, key=lambda p: p.stat().st_mtime)
     return output_dir / "checkpoints" / "final.pt"
+
+
+def _resolve_classifier_ckpt(run_dir: Path) -> Path | None:
+    """분류기 체크포인트 위치를 두 관례 모두 지원해 찾는다.
+
+    - 기존 관례(레거시, 기존 run 전부 이 위치): {run_dir}/classifier/clf_best.pt
+      (train_classifier.py --run-dir에 Phase 2 폴더를 줬을 때 저장되는 위치)
+    - 신규 관례(2026-07-30 파이프라인 재배치 이후): Phase 1 폴더(gates_from)의
+      classifier/clf_best.pt — 분류기가 Phase 2보다 먼저(Phase 1 직후) 학습되어
+      Phase 2가 with_raw_cnn으로 그 결과를 바로 재사용할 수 있게 되면서 저장 위치도
+      Phase 1 폴더로 옮겨감. _resolve_gate_json과 동일하게 config.yaml의
+      data.gates_from을 따라가 찾는다.
+    """
+    legacy = run_dir / "classifier" / "clf_best.pt"
+    if legacy.exists():
+        return legacy
+    cfg_path = run_dir / "config.yaml"
+    if not cfg_path.exists():
+        return None
+    import yaml as _yaml
+    with open(cfg_path, encoding="utf-8") as f:
+        saved_cfg = _yaml.safe_load(f)
+    gates_from = saved_cfg.get("data", {}).get("gates_from")
+    if not gates_from:
+        return None
+    from_dir = Path(gates_from) if Path(gates_from).is_absolute() else PROJECT_ROOT / gates_from
+    new_loc = from_dir / "classifier" / "clf_best.pt"
+    return new_loc if new_loc.exists() else None
 
 
 def _resolve_gate_json(run_dir: Path, new_name: str, old_name: str) -> Path | None:
