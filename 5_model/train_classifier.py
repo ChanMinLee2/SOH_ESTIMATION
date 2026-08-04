@@ -153,7 +153,8 @@ def _apply_probe_mask(
 # 학습 기록 CSV — scr_trainer.py의 train_log.csv 와 동일한 패턴
 # ---------------------------------------------------------------------------
 
-_LOG_COLS = ["epoch", "tr_loss", "tr_acc", "val_loss", "val_acc", "lr", "elapsed_s"]
+_LOG_COLS = ["epoch", "tr_loss", "tr_acc", "val_loss", "val_acc", "lr", "elapsed_s",
+             "tr_aux_scen", "tr_aux_int", "tr_aux_soh", "tr_decorr"]
 
 
 def _init_log_csv(path: Path) -> None:
@@ -165,15 +166,85 @@ def _init_log_csv(path: Path) -> None:
 def _append_log_csv(
     path: Path, epoch: int, tr_loss: float, tr_acc: float,
     vl_loss: float, vl_acc: float, lr: float, elapsed: float,
+    aux_scen: float = 0.0, aux_int: float = 0.0, aux_soh: float = 0.0,
+    decorr: float = 0.0,
 ) -> None:
     row = [
         epoch,
         f"{tr_loss:.6f}", f"{tr_acc:.6f}",
         f"{vl_loss:.6f}", f"{vl_acc:.6f}",
         f"{lr:.6e}", f"{elapsed:.2f}",
+        f"{aux_scen:.6f}", f"{aux_int:.6f}", f"{aux_soh:.6f}", f"{decorr:.6f}",
     ]
     with open(path, "a", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(row)
+
+
+# ---------------------------------------------------------------------------
+# h_scen/h_intensity/h_soh 보조손실 (docs/260803_RESULTS.md §10.8/§10.9/§10.11)
+# ---------------------------------------------------------------------------
+
+# 보조손실 가중치 — 첫 실행 기준 실용적 기본값(정밀 튜닝 미실시, §10.3에서 이미
+# "실험으로 조정해야 하는 하이퍼파라미터"로 명시).
+LAMBDA_SCEN = 0.1
+LAMBDA_INTENSITY = 0.1
+LAMBDA_SOH = 0.1
+LAMBDA_DECORR = 0.05
+
+
+def _masked_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """target에 NaN이 섞여 있으면(플래토 미검출 등) 유효한 행만으로 MSE 계산."""
+    valid = torch.isfinite(target)
+    if not valid.any():
+        return pred.new_zeros(())
+    return nn.functional.mse_loss(pred[valid], target[valid])
+
+
+def _decorr_penalty(emb: torch.Tensor) -> torch.Tensor:
+    """emb: (B, 3) = [h_scen, h_intensity, h_soh]. 배치 내 피어슨 상관계수 제곱합.
+    표본이 2개 미만이면 정의 불가 → 0 반환."""
+    if emb.size(0) < 2:
+        return emb.new_zeros(())
+    c = emb - emb.mean(dim=0, keepdim=True)
+    std = c.std(dim=0, unbiased=False) + 1e-8
+    corr = (c.t() @ c) / emb.size(0) / (std.unsqueeze(0) * std.unsqueeze(1))
+    n = corr.size(0)
+    off_diag = corr[~torch.eye(n, dtype=torch.bool, device=corr.device)]
+    return (off_diag ** 2).sum()
+
+
+def _cnn_aux_losses(
+    cnn_emb: torch.Tensor,
+    batch: dict,
+    device: torch.device,
+    soh_probe: nn.Module,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """h_scen/h_intensity/h_soh 보조손실 + decorrelation penalty 합산.
+
+    cnn_emb: (B, 3) = [h_scen, h_intensity, h_soh] (RawCNN 출력, BatchNorm1d(3) 통과 후)
+    반환: (총 보조손실 텐서, 로깅용 개별 항목 dict)
+    """
+    h_scen = cnn_emb[:, 0]
+    h_intensity = cnn_emb[:, 1]
+    h_soh = cnn_emb[:, 2]
+
+    scen_target = batch["aux_scen_target"].to(device)
+    int_target = batch["aux_intensity_target"].to(device)
+    soh_target = batch["target"].to(device)   # SOH ratio — Phase 2와 동일한 라벨(§10.9)
+
+    loss_scen = _masked_mse(h_scen, scen_target)
+    loss_int = _masked_mse(h_intensity, int_target)
+    soh_pred = soh_probe(h_soh.unsqueeze(1)).squeeze(1)
+    loss_soh = nn.functional.mse_loss(soh_pred, soh_target)
+    decorr = _decorr_penalty(cnn_emb)
+
+    total = (LAMBDA_SCEN * loss_scen + LAMBDA_INTENSITY * loss_int
+             + LAMBDA_SOH * loss_soh + LAMBDA_DECORR * decorr)
+    logs = {
+        "aux_scen": loss_scen.item(), "aux_int": loss_int.item(),
+        "aux_soh": loss_soh.item(), "decorr": decorr.item(),
+    }
+    return total, logs
 
 
 def main() -> None:
@@ -275,16 +346,25 @@ def main() -> None:
         # CNNProbeClassifier: probe_x(N_HI) + CNN(x_raw) + direction 내부 융합
         clf     = CNNProbeClassifier(N_HI, spec.n_classes, d_hidden=d_hidden).to(device)
         clf_n_hi = N_HI
+        # h_soh 보조 프로브(§10.9) — Phase 1은 cap_head가 없어 SOH 손실에 접근할
+        # 경로가 없으므로, 폐기 가능한 Linear(1,1)로 h_soh 차원에 SOH MSE 그래디언트를
+        # 흘려준다. 체크포인트에는 저장하지 않는다(clf_state만 저장 — frozen 재사용 시
+        # scr_model.py가 "cnn." 접두사만 읽으므로 무관).
+        soh_probe = nn.Linear(1, 1).to(device)
     else:
         # MLPProbeClassifier: [probe_x || direction] = N_HI+1 입력 (기존 동작 유지)
         clf     = MLPProbeClassifier(N_HI + 1, spec.n_classes, d_hidden=d_hidden).to(device)
         clf_n_hi = N_HI + 1
-    opt       = torch.optim.AdamW(clf.parameters(), lr=lr, weight_decay=1e-4)
+        soh_probe = None
+    opt_params = list(clf.parameters()) + (list(soh_probe.parameters()) if soh_probe is not None else [])
+    opt       = torch.optim.AdamW(opt_params, lr=lr, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
 
     # FastTensorLoader: collate 오버헤드 제거. CNN 분류기는 x_raw 필요 → include_raw=True.
-    train_loader = FastTensorLoader(train_ds, batch_sz, shuffle=True,  include_raw=True)
-    val_loader   = FastTensorLoader(val_ds,   batch_sz, shuffle=False, include_raw=True)
+    # h_scen/h_intensity/h_soh 보조손실 타깃도 CNN 분류기에서만 필요 → include_aux=True.
+    _include_aux = (clf_type == "cnn")
+    train_loader = FastTensorLoader(train_ds, batch_sz, shuffle=True,  include_raw=True, include_aux=_include_aux)
+    val_loader   = FastTensorLoader(val_ds,   batch_sz, shuffle=False, include_raw=True, include_aux=_include_aux)
 
     clf_dir = run_dir / "classifier"
     clf_dir.mkdir(exist_ok=True)
@@ -302,6 +382,7 @@ def main() -> None:
         # ── train ────────────────────────────────────────────────────────
         clf.train()
         tr_loss = tr_correct = tr_total = 0
+        aux_scen_sum = aux_int_sum = aux_soh_sum = decorr_sum = 0.0
         for batch in train_loader:
             x     = batch["x_hi"].to(device)
             dir_t = batch["direction"].to(device)
@@ -310,16 +391,26 @@ def main() -> None:
             if clf_type == "cnn":
                 binp   = {"x_raw": batch["x_raw"].to(device), "direction": dir_t}
                 logits = clf.classify(probe, binp)               # (B, n_classes)
+                aux_loss, aux_logs = _cnn_aux_losses(clf.last_cnn_emb, batch, device, soh_probe)
             else:
                 inp    = torch.cat([probe, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
                 logits = clf(inp)
-            loss   = criterion(logits, lbl)
+                aux_loss, aux_logs = logits.new_zeros(()), {"aux_scen": 0.0, "aux_int": 0.0, "aux_soh": 0.0, "decorr": 0.0}
+            loss   = criterion(logits, lbl) + aux_loss
             opt.zero_grad(); loss.backward(); opt.step()
             tr_loss    += loss.item() * x.size(0)
             tr_correct += (logits.argmax(1) == lbl).sum().item()
             tr_total   += x.size(0)
+            aux_scen_sum += aux_logs["aux_scen"] * x.size(0)
+            aux_int_sum  += aux_logs["aux_int"] * x.size(0)
+            aux_soh_sum  += aux_logs["aux_soh"] * x.size(0)
+            decorr_sum   += aux_logs["decorr"] * x.size(0)
         tr_loss /= tr_total
         tr_acc   = tr_correct / tr_total
+        aux_scen_avg = aux_scen_sum / tr_total
+        aux_int_avg  = aux_int_sum / tr_total
+        aux_soh_avg  = aux_soh_sum / tr_total
+        decorr_avg   = decorr_sum / tr_total
 
         # ── val ──────────────────────────────────────────────────────────
         clf.eval()
@@ -343,7 +434,8 @@ def main() -> None:
         vl_acc   = vl_correct / vl_total
 
         _append_log_csv(log_path, epoch, tr_loss, tr_acc, vl_loss, vl_acc,
-                        lr, time.time() - t0)
+                        lr, time.time() - t0,
+                        aux_scen_avg, aux_int_avg, aux_soh_avg, decorr_avg)
 
         if hasattr(pbar, "set_postfix"):
             pbar.set_postfix(tr_acc=f"{tr_acc:.4f}", val_acc=f"{vl_acc:.4f}",

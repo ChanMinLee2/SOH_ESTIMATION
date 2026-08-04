@@ -253,6 +253,14 @@ def load_dataset_native_seg(
             df["direction"] = df["seg_idx"].map(_id_to_dir).astype(np.float32)
             df["level"]     = df["seg_idx"].map(_id_to_lvl).astype(np.int64)
 
+            # h_scen/h_intensity 보조손실 타깃 (docs/260803_RESULTS.md §10.8) — 이미
+            # x_hi(hi_XX)에 포함되는 기존 HI를 그대로 재사용하므로 rename 전에 원본
+            # 이름으로 복사해 보존한다(둘 다 세그먼트 내부 상대량이라 q_tot 불필요).
+            if "lfp_plateau_frac" in df.columns:
+                df["aux_scen_target"] = df["lfp_plateau_frac"]
+            if "stat_i_std" in df.columns:
+                df["aux_intensity_target"] = df["stat_i_std"]
+
             # Map native HI cols → hi_00..hi_64 (exclude stat_q_abs)
             available = [c for c in _NATIVE_HI_COLS if c in df.columns]
             rename_map = {old: f"hi_{i:02d}" for i, old in enumerate(available)}
@@ -263,9 +271,10 @@ def load_dataset_native_seg(
             keep = (["cell_id", "cycle", "seg_name", "seg_idx", "scen",
                      "direction", "level", "capacity_Ah"]
                     + [f"hi_{i:02d}" for i in range(N_HI)])
-            # 원시 곡선 컬럼(raw_v/raw_i)이 있으면 함께 보존 (CNN 입력용)
-            raw_cols = [c for c in ("raw_v", "raw_i") if c in df.columns]
-            df = df[keep + raw_cols].dropna(subset=["capacity_Ah"])
+            # 원시 곡선 컬럼(raw_v/raw_i/raw_t)이 있으면 함께 보존 (CNN 입력용)
+            raw_cols = [c for c in ("raw_v", "raw_i", "raw_t") if c in df.columns]
+            aux_cols = [c for c in ("aux_scen_target", "aux_intensity_target") if c in df.columns]
+            df = df[keep + raw_cols + aux_cols].dropna(subset=["capacity_Ah"])
             df["dataset"] = ds
             all_dfs.append(df)
 
@@ -348,7 +357,9 @@ def _stack_raw_col(series, n: int) -> np.ndarray:
 
 def _build_raw_tensor(df: pd.DataFrame) -> torch.Tensor:
     """DataFrame → x_raw 텐서 (N, RAW_CH, RAW_N).
-    raw_v/raw_i 컬럼이 없으면(구 pkl / wide 포맷) zero 텐서로 fallback."""
+    raw_v/raw_i/raw_t 컬럼이 없으면(구 pkl / wide 포맷) zero 텐서로 fallback.
+    raw_t 컬럼만 없는 구 pkl(RAW_CH=2 시절 캐시)은 raw_t 채널만 0으로 채운다
+    (docs/260803_RESULTS.md §10.10 — 하위호환)."""
     n = len(df)
     if "raw_v" in df.columns and "raw_i" in df.columns:
         rv = _stack_raw_col(df["raw_v"], n)   # (n, RAW_N)
@@ -356,7 +367,11 @@ def _build_raw_tensor(df: pd.DataFrame) -> torch.Tensor:
     else:
         rv = np.zeros((n, RAW_N), np.float32)
         ri = np.zeros((n, RAW_N), np.float32)
-    raw = np.stack([rv, ri], axis=1)          # (n, RAW_CH=2, RAW_N)
+    if "raw_t" in df.columns:
+        rt = _stack_raw_col(df["raw_t"], n)   # (n, RAW_N)
+    else:
+        rt = np.zeros((n, RAW_N), np.float32)
+    raw = np.stack([rv, ri, rt], axis=1)      # (n, RAW_CH=3, RAW_N)
     return torch.from_numpy(raw)
 
 
@@ -433,6 +448,19 @@ class SegmentDataset(Dataset):
         cap_init_norm = normalizer.transform_cap_init(cap_init_raw)
         self.cap_init = torch.tensor(cap_init_norm, dtype=torch.float32)
 
+        # h_scen/h_intensity 보조손실 타깃 (docs/260803_RESULTS.md §10.8, Phase 1
+        # CNN 학습 전용 — 구 pkl에 컬럼이 없으면 NaN → 학습 시 마스킹 처리)
+        if "aux_scen_target" in df.columns:
+            self.aux_scen_target = torch.tensor(
+                df["aux_scen_target"].values.astype(np.float32), dtype=torch.float32)
+        else:
+            self.aux_scen_target = torch.full((len(df),), float("nan"), dtype=torch.float32)
+        if "aux_intensity_target" in df.columns:
+            self.aux_intensity_target = torch.tensor(
+                df["aux_intensity_target"].values.astype(np.float32), dtype=torch.float32)
+        else:
+            self.aux_intensity_target = torch.full((len(df),), float("nan"), dtype=torch.float32)
+
         # metadata (not returned by __getitem__, but useful for evaluation)
         self.cap_init_raw = cap_init_raw                          # SOH→Ah 변환용
         self.cell_ids = df["cell_id"].values.tolist()
@@ -453,6 +481,8 @@ class SegmentDataset(Dataset):
             "seg_idx":   self.seg_idx[idx],
             "target":    self.target[idx],
             "cap_init":  self.cap_init[idx],
+            "aux_scen_target":      self.aux_scen_target[idx],
+            "aux_intensity_target": self.aux_intensity_target[idx],
         }
 
 
@@ -470,7 +500,9 @@ class FastTensorLoader:
     그 오버헤드를 제거한다 (대규모 세그먼트 학습에서 에폭 시간 대폭 단축).
 
     SCRModel 회귀 forward(Phase 1/2)는 ``x_raw``를 사용하지 않으므로 기본 제외한다.
-    CNN 분류기 학습 등 ``x_raw``가 필요하면 ``include_raw=True``.
+    CNN 분류기 학습 등 ``x_raw``가 필요하면 ``include_raw=True``. ``h_scen``/
+    ``h_intensity`` 보조손실 타깃(docs/260803_RESULTS.md §10.8)이 필요하면
+    ``include_aux=True`` (Phase 1 CNN 학습 전용).
 
     트레이너의 ``_to_device``가 배치를 GPU로 옮기므로 텐서는 CPU에 유지한다
     (배치당 1회 연속 전송 → per-sample stack보다 훨씬 빠르고 GPU 메모리 상주 없음).
@@ -485,11 +517,14 @@ class FastTensorLoader:
         batch_size: int,
         shuffle: bool = False,
         include_raw: bool = False,
+        include_aux: bool = False,
         drop_last: bool = False,
     ) -> None:
         keys = list(self._MODEL_KEYS)
         if include_raw:
             keys.insert(1, "x_raw")
+        if include_aux:
+            keys += ["aux_scen_target", "aux_intensity_target"]
         self.keys = keys
         self.tensors = {k: getattr(ds, k) for k in keys}
         self.n = len(ds)
@@ -528,6 +563,8 @@ def _subset_dataset(ds: "SegmentDataset", indices: list[int]) -> "SegmentDataset
     new_ds.seg_idx      = ds.seg_idx[indices]
     new_ds.target       = ds.target[indices]
     new_ds.cap_init     = ds.cap_init[indices]
+    new_ds.aux_scen_target      = ds.aux_scen_target[indices]
+    new_ds.aux_intensity_target = ds.aux_intensity_target[indices]
     new_ds.dataset_id   = ds.dataset_id[indices]
     new_ds.cap_init_raw = ds.cap_init_raw[indices]
     new_ds.cell_ids     = [ds.cell_ids[i] for i in indices]

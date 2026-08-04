@@ -20,8 +20,9 @@ import torch.nn as nn
 from utils.hi_schema import N_HI, RAW_CH, RAW_N
 
 _HEAD_IN = N_HI + N_HI + 1 + 1  # 64+64+1+1 = 130
-_D_CNN = 64  # RawCNN 출력 차원 — raw_cnn.py의 d_out 기본값과 동일(HI 64D와 정렬)
-_HEAD_IN_WITH_CNN = N_HI + N_HI + _D_CNN + 1 + 1  # 64+64+64+1+1 = 194 (REGRESSION_UPGRADE.md §5)
+_D_CNN = 3  # RawCNN 출력 차원 — 3개 의미고정 스칼라 [h_scen,h_intensity,h_soh]
+            # (docs/260803_RESULTS.md §10, 이전 d_out=64 "HI와 정렬" 설계에서 전환)
+_HEAD_IN_WITH_CNN = N_HI + N_HI + _D_CNN + 1 + 1  # 64+64+3+1+1 = 133
 _D_RAW_FLAT = RAW_CH * RAW_N  # 2*48=96 — 방안1(REGRESSION_UPGRADE.md §2 방안1): raw_v‖raw_i flatten
 _HEAD_IN_WITH_RAW_FLAT = N_HI + N_HI + _D_RAW_FLAT + 1 + 1  # 64+64+96+1+1 = 226
 
@@ -70,12 +71,12 @@ class MLPHead(nn.Module):
 
 class TransformerHead(nn.Module):
     """
-    130-dim(with_raw_cnn=True면 194-dim, with_raw_flat=True면 226-dim) 입력을
+    130-dim(with_raw_cnn=True면 133-dim, with_raw_flat=True면 226-dim) 입력을
     semantic 토큰으로 분할해 Transformer Encoder에 입력한다.
       Token 0: probe_x  (64-dim)  — 방향별 probe gate 출력
       Token 1: scen_x   (64-dim)  — 시나리오 gate 출력
-      Token 2: (with_raw_cnn=True) cnn_emb (64-dim) — raw V/|I| CNN 임베딩,
-               64개 스칼라로 쪼개지 않고 통째로 한 토큰(REGRESSION_UPGRADE.md §3.2)
+      Token 2: (with_raw_cnn=True) cnn_emb (3-dim) — raw V/I/t CNN 임베딩
+               [h_scen,h_intensity,h_soh], 쪼개지 않고 통째로 한 토큰(docs/260803_RESULTS.md §10)
                또는 (with_raw_flat=True) raw_flat(96-dim) — raw_v‖raw_i를 압축 없이
                통째로 한 토큰으로 선형 투영(방안1, REGRESSION_UPGRADE.md §2). 96개
                개별 스칼라 토큰화는 어텐션 비용이 급증해(§3.2) 피하고, cnn_emb와
@@ -119,7 +120,7 @@ class TransformerHead(nn.Module):
         self.output  = nn.Linear(d_model, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 130) 또는 (B, 194)/(B, 226) — with_raw_cnn/with_raw_flat 여부에 따라
+        # x: (B, 130) 또는 (B, 133)/(B, 226) — with_raw_cnn/with_raw_flat 여부에 따라
         probe_x = x[:, :N_HI]                                # (B, 64)
         scen_x  = x[:, N_HI: 2 * N_HI]                       # (B, 64)
 
@@ -129,7 +130,7 @@ class TransformerHead(nn.Module):
         offset = 2 * N_HI
 
         if self.with_raw_cnn:
-            cnn_emb = x[:, offset: offset + _D_CNN]           # (B, 64)
+            cnn_emb = x[:, offset: offset + _D_CNN]           # (B, 3)
             offset += _D_CNN
             tokens.append(self.cnn_embed(cnn_emb).unsqueeze(1))
         elif self.with_raw_flat:

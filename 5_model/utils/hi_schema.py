@@ -47,7 +47,7 @@ LEAK_COLS: set[str] = {
 # 세그먼트의 V/I 시계열을 q_frac [0,1] 그리드에 리샘플한 고정 길이.
 # hi_correlation.py(데이터 생성)와 segment_dataset.py(로더)가 공유하는 단일 상수.
 RAW_N: int = 48       # 리샘플 포인트 수
-RAW_CH: int = 2       # 채널 수: [V, |I|]
+RAW_CH: int = 3       # 채널 수: [V, I(signed), t_rel] — docs/260803_RESULTS.md §10.1/§10.10
 
 
 # Computation cost by category (used in L0 loss)

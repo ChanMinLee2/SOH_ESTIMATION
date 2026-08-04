@@ -101,7 +101,7 @@ class CNNProbeClassifier(ScenarioClassifier, nn.Module):
         self,
         n_hi: int,
         n_classes: int,
-        d_cnn: int = 64,
+        d_cnn: int = 3,
         d_hidden: int = 128,
         dropout: float = 0.1,
     ) -> None:
@@ -109,7 +109,11 @@ class CNNProbeClassifier(ScenarioClassifier, nn.Module):
         # 지연 import: torch 모델 계층 순환참조 방지
         from models.raw_cnn import RawCNN
 
-        self.cnn = RawCNN(d_out=d_cnn, dropout=dropout)
+        # RawCNN 출력은 3D 고정([h_scen,h_intensity,h_soh], docs/260803_RESULTS.md §10) —
+        # d_cnn 인자는 하위호환을 위해 남기되 3과 다르면 즉시 오류로 잡는다.
+        if d_cnn != 3:
+            raise ValueError(f"RawCNN 출력은 3D 고정입니다 (d_cnn={d_cnn} 요청됨).")
+        self.cnn = RawCNN(dropout=dropout)
         self.head = nn.Sequential(
             nn.Linear(d_cnn + n_hi + 1, d_hidden),
             nn.GELU(),
@@ -121,7 +125,10 @@ class CNNProbeClassifier(ScenarioClassifier, nn.Module):
 
     def _fuse(self, probe_x: torch.Tensor, batch: dict) -> torch.Tensor:
         x_raw = batch["x_raw"]                          # (B, RAW_CH, RAW_N)
-        cnn_emb = self.cnn(x_raw)                        # (B, d_cnn)
+        cnn_emb = self.cnn(x_raw)                        # (B, 3)=[h_scen,h_intensity,h_soh]
+        # h_scen/h_intensity/h_soh 보조손실용으로 학습 루프에서 재사용
+        # (docs/260803_RESULTS.md §10.8/§10.9) — forward pass 중복 없이 캐싱.
+        self.last_cnn_emb = cnn_emb
         direction = batch["direction"].to(probe_x.dtype).unsqueeze(1)  # (B, 1)
         return torch.cat([cnn_emb, probe_x, direction], dim=1)
 

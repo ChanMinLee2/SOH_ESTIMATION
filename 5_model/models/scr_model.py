@@ -102,8 +102,8 @@ class SCRModel(nn.Module):
 
         # ----------------------------------------------------------------
         # Capacity head
-        # input: probe_x (N_HI) || scen_x (N_HI) [|| cnn_emb (64)] || direction (1) || cap_init (1)
-        # = m active probe HIs + k active scen HIs [+ raw V/|I| CNN 임베딩] + 2 스칼라
+        # input: probe_x (N_HI) || scen_x (N_HI) [|| cnn_emb (3)] || direction (1) || cap_init (1)
+        # = m active probe HIs + k active scen HIs [+ raw V/I/t CNN 임베딩 3D] + 2 스칼라
         # Phase 1: 항상 MLP (model_cfg=None)
         # Phase 2: model_cfg["regression_model"] 에 따라
         #   mlp / transformer / i_transformer / resnet_tab / ft_transformer
@@ -124,7 +124,7 @@ class SCRModel(nn.Module):
         self._raw_cnn_frozen = False
         if self.with_raw_cnn:
             from models.raw_cnn import RawCNN
-            self.raw_cnn = RawCNN(d_out=64)
+            self.raw_cnn = RawCNN()   # 출력 3D 고정: [h_scen,h_intensity,h_soh] (docs/260803_RESULTS.md §10)
             _pretrained_from = _mcfg.get("raw_cnn_pretrained_from")
             if _pretrained_from:
                 _pf_path = Path(_pretrained_from)
@@ -306,16 +306,16 @@ class SCRModel(nn.Module):
         if self.raw_cnn is not None:
             if self._raw_cnn_frozen:
                 with torch.no_grad():
-                    cnn_emb = self.raw_cnn(batch["x_raw"])       # (B, 64) — 그래디언트 차단
+                    cnn_emb = self.raw_cnn(batch["x_raw"])       # (B, 3)=[h_scen,h_intensity,h_soh] — 그래디언트 차단
             else:
-                cnn_emb = self.raw_cnn(batch["x_raw"])           # (B, 64) — Phase2와 함께 학습
+                cnn_emb = self.raw_cnn(batch["x_raw"])           # (B, 3) — Phase2와 함께 학습
             feat_parts.append(cnn_emb)
         elif self.with_raw_flat:
             x_raw = batch["x_raw"]                                # (B, RAW_CH, RAW_N)
             raw_flat = self.raw_flat_norm(x_raw.reshape(x_raw.size(0), -1))  # (B, 96)
             feat_parts.append(raw_flat)
         feat_parts += [direction.unsqueeze(1), batch["cap_init"].unsqueeze(1)]
-        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+64+2)/(B, 2*N_HI+96+2)
+        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+3+2)/(B, 2*N_HI+96+2)
         cap_pred = self.cap_head(feat)                       # (B,)
 
         # CE head: [probe_x || direction] → class logits (Phase 1 dual-objective only)

@@ -27,6 +27,21 @@ m=10으로 재학습·재평가까지 마친 최종본). 방안1(raw_concat) 5�
 > vqslope/q_abs 및 모든 (b)/방안1은 이 버그의 영향을 받지 않는다(각자 자기 baseline을
 > 정확히 참조).
 
+> **⚠️ 2026-08-04 추가 정정 — `chg_lo`/`chg_hi` 시나리오 라벨 스왑 버그**: §2의
+> qfw+mlp/transformer/resnet_tab·vqslope+mlp 4개 표에서 `chg_lo`/`chg_hi` 행의
+> **(a)/(b)/방안1 열은 이름이 서로 뒤바뀌어 있다**(baseline 열은 영향 없음 —
+> 각 표의 baseline이 이 시점엔 아직 basefix 이전 원본이라 별개 이슈인
+> `scen_k_count=55` confound는 남아있지만, chg_lo/chg_hi 스왑과는 무관). 원인·검증
+> 방법은 `docs/260731_RESULTS.md`의 동일 날짜 정정 참고 — `q_frac_wide.py`가
+> SOC 정합성 버그(2026-07-30 커밋 `a9c410b`에서 코드 수정)를 갖고 있었는데, 실제
+> HI pkl 재추출은 2026-08-04에야 이뤄져 그 사이 학습된 (a)/(b)/방안1 run들이 버그
+> 있는 데이터를 그대로 썼다. `dis_hi`/`dis_lo`(q_abs 포함 방전 쪽)는 이 버그의
+> 영향이 아니다(q_frac_wide/vqslope는 방전 routing이 원래도 정상이었음; q_abs는
+> 별도 검증 결과 baseline/(b)/방안1엔 이상 없고 (a) 하나만 패턴이 달라 원인
+> 미확정 — 스왑 미적용). 표는 원본 보존을 위해 정정하지 않는다 — **§2의
+> qfw/vqslope 4개 표에서 (a)/(b)/방안1의 `chg_lo` 행과 `chg_hi` 행을 서로 바꿔
+> 읽을 것.**
+
 ---
 
 ## 0. 공통 설정
