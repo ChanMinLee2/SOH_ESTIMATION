@@ -29,6 +29,7 @@ ROOT = Path(r"c:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION")
 sys.path.insert(0, str(ROOT))
 from common.scenario._curves import _build_vq_curve, _build_ica_seg, THETA_FLAT  # noqa: E402
 from common.scenario import get_segmenter  # noqa: E402  (실제 QAbsSegmenter로 세그먼트 추출)
+from data_directories import DATA_4_HI_ROOT  # noqa: E402
 
 for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
     try:
@@ -38,8 +39,8 @@ for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
     except Exception:
         continue
 
-MIT_DIR  = ROOT / "_4_data_hi" / "clean" / "MIT"
-HUST_DIR = ROOT / "_4_data_hi" / "clean" / "HUST"
+MIT_DIR  = DATA_4_HI_ROOT / "clean" / "MIT"
+HUST_DIR = DATA_4_HI_ROOT / "clean" / "HUST"
 OUT_DIR  = ROOT / "4_hi_analysis" / "outputs" / "seg_diagnose" / "qabs_healthy_vs_aged"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 

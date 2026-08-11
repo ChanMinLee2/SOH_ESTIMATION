@@ -30,6 +30,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
 sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
 
 import torch
 import torch.nn as nn
@@ -64,6 +65,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
                    help="train_scr.py --exclude-cv 로 학습된 run의 '_ccOnly' 데이터 경로 사용 "
                         "(spec 기반 자동 경로 재구성에 접미사 추가). yaml data.exclude_cv 로도 설정 가능")
+    p.add_argument("--skip-shape", action="store_true", dest="skip_shape",
+                   help="train_scr.py --skip-shape 로 학습된 run의 '_noshape' 데이터 경로 사용 "
+                        "(spec 기반 자동 경로 재구성에 접미사 추가). yaml data.skip_shape 로도 설정 가능")
     return p.parse_args()
 
 
@@ -84,11 +88,23 @@ def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
     p = spec.params or {}
     # random_segment=True 면 _random-L{seg_len_pts} suffix (hi_correlation._rand_suffix 와 동일)
     rand_sfx = f"_random-L{int(p.get('seg_len_pts', 20))}" if p.get("random_segment", False) else ""
+    # min_pts 기본값(10)이 아니면 접미사 (hi_correlation._qfw_tag 와 동일 규칙, 2026-08-10)
+    min_pts = int(p.get("min_pts", 10))
+    minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
     if spec.axis == "q_frac_wide":
         n1 = int(round(p.get("n1", 0.4) * 100))
         n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
-        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}"
+        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}"
+    if spec.axis == "q_frac_ref":
+        n1 = int(round(p.get("n1", 0.4) * 100))
+        n2 = int(round(p.get("n2", 0.2) * 100))
+        ns = int(p.get("n_samples", 4))
+        lag = int(p.get("ref_lag", 0))
+        noise = int(round(p.get("noise_amp", 0.03) * 100))
+        nmode = str(p.get("noise_mode", "ou"))
+        period = int(round(p.get("noise_period_cycles", 200.0)))
+        return f"q_frac_ref/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}_lag-{lag}_noise-{noise}%_{nmode}-{period}"
     if spec.axis == "q_abs":
         ms = int(round(p.get("mid_start", 0.20) * 100))
         me = int(round(p.get("mid_end", 0.50) * 100))
@@ -296,10 +312,17 @@ def main() -> None:
     if _exclude_cv:
         _axis_dir = f"{_axis_dir}_ccOnly"
 
+    # --skip-shape: train_scr.py --skip-shape 로 학습된 run은 '_noshape' 경로를 썼으므로
+    # spec 기반 재구성에도 동일 접미사를 붙여야 한다(같은 이유로 spec.params에 없음).
+    # hi_correlation.py 접미사 순서(_ccOnly 다음 _noshape)와 동일하게 맞춘다.
+    _skip_shape = args.skip_shape or bool(cfg.get("data", {}).get("skip_shape", False))
+    if _skip_shape:
+        _axis_dir = f"{_axis_dir}_noshape"
+
     if spec.axis in ("q_frac_wide", "q_abs", "vqslope"):
         # spec.params에서 태그 재구성 — 저장된 config 경로(구버전)보다 항상 우선
-        _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
-        _data_cfg["data_dir"]     = f"_4_data_hi/{_axis_dir}/cycle"
+        _data_cfg["seg_data_dir"] = f"{DATA_4_HI_ROOT_STR}/{_axis_dir}/seg"
+        _data_cfg["data_dir"]     = f"{DATA_4_HI_ROOT_STR}/{_axis_dir}/cycle"
     else:
         # 저장된 config에서 경로 복원 시도, 없으면 spec.axis 기반 fallback
         saved_cfg_path = run_dir / "config.yaml"
@@ -309,11 +332,11 @@ def main() -> None:
                 if saved_cfg.get("data", {}).get(k):
                     _data_cfg[k] = saved_cfg["data"][k]
         if not _data_cfg.get("seg_data_dir"):
-            _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
+            _data_cfg["seg_data_dir"] = f"{DATA_4_HI_ROOT_STR}/{_axis_dir}/seg"
         if not _data_cfg.get("data_dir"):
-            _data_cfg["data_dir"] = f"_4_data_hi/{_axis_dir}/cycle"
+            _data_cfg["data_dir"] = f"{DATA_4_HI_ROOT_STR}/{_axis_dir}/cycle"
 
-    print(f"[clf] data_dir={_data_cfg['data_dir']}  exclude_cv={_exclude_cv}")
+    print(f"[clf] data_dir={_data_cfg['data_dir']}  exclude_cv={_exclude_cv}  skip_shape={_skip_shape}")
 
     # 데이터 로드 (같은 config → Phase 2와 동일한 split/정규화)
     train_ds, val_ds, _, norm = build_datasets(cfg, spec=spec)

@@ -11,14 +11,21 @@ raw data
   ↓ [1_convert]       MIT(.mat HDF5) / HUST(.pkl) → _1_data_unified/
   ↓ [2_preprocess]    7단계 필터링                 → _4_data_hi/clean/
   ↓ [3_integrity]     10개 항목 무결성 검사         → reports/
-  ↓ [4_hi_analysis]   HI 추출 (Global 15 + Seg 6×66) + 원시 곡선 리샘플(raw_v/raw_i, 48pt)
+  ↓ [4_hi_analysis]   HI 추출 (Global 15 + Seg 6×66) + 원시 곡선 리샘플(raw_v/raw_i/raw_t, 48pt,
+                        2026-08-03부터 3채널 — I는 부호 있음(+충전/-방전), t_rel은 세그먼트 내
+                        상대시간). SOH_EXCLUDE_STAT_LEAK=1이면 stat_q_abs/stat_energy_seg 제외
+                        (N_HI 66→64, §5-1 참고)
                         → _4_data_hi/{axis}/cycle/{ds}/*.pkl  (wide-cycle)
-                        → _4_data_hi/{axis}/seg/{ds}/*.pkl    (native-seg + raw_v/raw_i)
+                        → _4_data_hi/{axis}/seg/{ds}/*.pkl    (native-seg + raw_v/raw_i/raw_t)
                         → _4_data_hi/{axis}/scenario_spec.json
+                        (2026-08-08부터 _4_data_hi 루트가 D:\chanminLee\LFP_SOH_prediction_v2\
+                        로 이전 — 프로젝트 루트의 data_directories.py가 단일 진입점, §데이터
+                        디렉토리 구조 참고)
   ↓ [5_model]
       Phase 1 : L0 HardConcrete gate → probe/scen HI 선택 → gates/*.json
       Clf     : 독립 시나리오 분류기 학습 → (Phase 1 run_dir)/classifier/clf_best.pt  ← B안
-                classifier.type = mlp(HI) | cnn(원시 V/I CNN + HI 융합)  ← CNN 옵션
+                classifier.type = mlp(HI) | cnn(신규 RawCNN, 3채널 입력 → [h_scen,h_intensity,
+                  h_soh] 3D 의미고정 출력 + 보조손실, 2026-08-03 재설계 — §5-5 참고)
                 (2026-07-30부터 Phase 2보다 먼저 학습 — Phase 2가 이 CNN을 재사용 가능하게)
       Phase 2 : 고정 gate + 회귀 전용 → checkpoints/best.pt
                 model.with_raw_cnn=true 시 회귀 헤드에 raw V/|I| CNN 임베딩 융합(방안2,
@@ -91,7 +98,7 @@ python run_pipeline.py --workers 4
   4~6, 8에 전달된다 — 분류기(Step 7)는 CLI로 축 정보를 받지 않고 `run_dir/
   scenario_spec.json`(=Phase 1이 저장한 값)에서 읽는다.
 
-세그멘테이션 축 (`--seg-axis`): `qfrac`(기본) / `protocol` / `vwindow` / `rcs` / `cluster` / `q_frac_wide` / `vqslope` / `q_abs` / `full_cycle`  
+세그멘테이션 축 (`--seg-axis`): `qfrac`(기본) / `protocol` / `vwindow` / `rcs` / `cluster` / `q_frac_wide` / `q_frac_ref`(q_frac_wide + 과거 레퍼런스·노이즈, 2026-08-05 신설, 아래 참고) / `vqslope` / `q_abs` / `full_cycle`  
 축 변경 시 Step 4~6, 8이 모두 동일한 `--seg-axis`(및 `--axis-config`)를 사용해야 데이터 경로가 일치한다.
 
 ---
@@ -101,28 +108,43 @@ python run_pipeline.py --workers 4
 > 이 절은 Step 4 이후 스크립트와 보조 진단/비교 도구의 **모든** 커맨드라인 옵션을 한 곳에 모은 빠른 참조다.
 > Step 1~3(`1_convert`/`2_preprocess`/`3_integrity`)의 옵션은 각 절(§1~§3)에 이미 정리되어 있으므로 생략한다.
 
-### 공통: 축 단축 인자 (`--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts`)
+### 공통: 축 단축 인자 (`--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts`/`--min-pts`/...)
 
 `run_pipeline.py`, `hi_correlation.py`, `hi_segment_viz.py` 세 스크립트가 동일한 패턴을 공유한다 — PowerShell이
 `--axis-config '{"n1":0.4,...}'`의 따옴표를 벗겨버려 JSON 파싱이 깨지는 문제를 우회하기 위해, 자주 쓰는
-q_frac_wide/vqslope/q_abs 파라미터를 개별 플래그로도 받을 수 있게 했다. 아래 플래그 중 하나라도 지정되면
-내부적으로 JSON으로 합쳐져 `--axis-config`를 대체한다(둘 다 주면 이 단축 인자들이 우선).
+q_frac_wide/q_frac_ref/vqslope/q_abs 파라미터를 개별 플래그로도 받을 수 있게 했다. 아래 플래그 중 하나라도
+지정되면 내부적으로 JSON으로 합쳐져 `--axis-config`를 대체한다(둘 다 주면 이 단축 인자들이 우선).
 
 | 플래그 | 타입 | 대상 축 | 의미 |
 |---|---|---|---|
-| `--n1` | float | q_frac_wide | 구간 크기(q_frac 비율, `[0.35, 0.45]`) — hi=`[0,n1]`, mid=중앙 n1폭, lo=`[1-n1,1]` |
-| `--n2` | float | q_frac_wide | 세그먼트 길이(q_frac 비율, `0 < n2 < n1`) |
-| `--n-samples` | int | q_frac_wide / vqslope | 구간(존)당 세그먼트 수 |
+| `--n1` | float | q_frac_wide / q_frac_ref | 구간 크기(q_frac 비율, `[0.35, 0.45]`) — hi=`[0,n1]`, mid=중앙 n1폭, lo=`[1-n1,1]` |
+| `--n2` | float | q_frac_wide / q_frac_ref | 세그먼트 길이(q_frac 비율, `0 < n2 < n1`) |
+| `--n-samples` | int | q_frac_wide / q_frac_ref / vqslope | 구간(존)당 세그먼트 수 |
 | `--mode` | str | vqslope | 플래토 검출 모드 `dva`\|`ica` (기본 `dva`) |
 | `--random-segment` | flag | q_frac_wide / vqslope | 구간 내 고정길이 랜덤 창 추출 옵션 켜기 (기본 `False`) |
 | `--seg-len-pts` | int | q_frac_wide / vqslope | `--random-segment` 시 창의 고정 관측 포인트 수 (기본 20) |
+| `--min-pts` | int | q_frac_wide / q_frac_ref | (2026-08-10 신설) 세그먼트 최소 실측 포인트 수(기본 10) — 미달 세그먼트는 통째로 제외. 기본값과 다르면 경로에 `_minptsN` 접미사가 붙는다(§14 `docs/260810_RESULTS.md` — n2가 작을 때 얇은 존이 통째로 사라지는 문제의 대응책) |
+| `--ref-lag` | int | q_frac_ref | (2026-08-05 신설) 레퍼런스 지연 사이클 수(기본 0=q_frac_wide와 동등) — 세그먼트 경계 분모(q_ref)를 몇 사이클 전 값으로 쓸지 |
+| `--noise-amp` | float | q_frac_ref | 레퍼런스 노이즈 최대 진폭, 분수(기본 0.03=±3%) — BMS 쿨롱카운팅 측정오차 시뮬레이션 |
+| `--noise-mode` | str | q_frac_ref | 노이즈 드리프트 방식 `ou`(기본, bounded random walk)\|`sine`(구버전, 결정론적) |
+| `--noise-period` | float | q_frac_ref | `ou`: 평균회귀 특성시간(사이클) \| `sine`: 파장(사이클), 기본 200 |
 | `--mid-start` | float | q_abs | mid 존 시작(정격용량=BOL 첫 사이클 용량 비율, 기본 0.2) |
 | `--mid-end` | float | q_abs | mid 존 끝(정격용량 비율, 기본 0.5) |
 | `--seg-len` | float | q_abs | 세그먼트 길이(정격용량 비율, 기본 0.15) |
+| `--skip-shape` | flag | 공통(축 무관) | (2026-08-08 신설) 전처리 필터7(형상 이상치 제거) 미적용 데이터 사용 — `2_preprocess/preprocess.py --skip-shape`로 만든 `_4_data_hi/clean_noshape/`를 원본으로, 추출 경로에 `_noshape` 접미사 |
+| `--exclude-cv` | flag | 공통(축 무관) | 충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외, 추출 경로에 `_ccOnly` 접미사 |
 
 `q_abs`는 `q_frac_wide`와 달리 그 사이클 자신의 실측 총 용량(`q_tot`)이 아니라 **그 셀의 BOL(첫
 사이클) 용량을 고정 기준**으로 존 경계를 잡는다 — 실배포 시 `q_tot`을 몰라도(세션이 안 끝나도)
 적용 가능하도록 설계됐다. 자세한 설계 근거는 `docs/SCENARIO_STRATEGY.md`의 "축: q_abs" 절 참조.
+
+**`q_frac_ref`**(`common/scenario/q_frac_ref.py`)는 `q_frac_wide`의 서브클래스로 존/라우팅/spec은
+전부 동일하고, 세그먼트 경계의 분모(q_tot)만 "그 사이클 자신의 값"이 아니라 **"과거(ref_lag
+사이클 전) 레퍼런스 + 완만한 노이즈"**로 바꾼다 — 실배포 BMS가 갱신 주기가 있는 FCC(Full Charge
+Capacity) 추정치를 쓰는 상황을 시뮬레이션한다. `ref_lag=0`(초기 구현 기본값)이면 사실상
+`q_frac_wide`와 동등하다(스캐폴딩 단계, 라벨 누수에 가까움을 인지한 채 채택 — 자세한 설계
+근거·트레이드오프는 `docs/SOC.md` §4~§7 참조). 노이즈는 셀·방향별 고정 바이어스 +
+OU(Ornstein-Uhlenbeck) 느린 드리프트로, `[-noise_amp, +noise_amp]`로 클리핑된다.
 
 `--random-segment`를 켜면 각 존(hi/mid/lo 또는 head/plateau/tail) 경계 자체는 그대로 두고, 그 안에서
 `seg_len_pts` 길이의 창을 `n_samples`개 랜덤 위치에서 뽑는다(클리핑 금지 — 존이 창보다 짧으면 존 전체를
@@ -159,12 +181,19 @@ python 4_hi_analysis/hi_correlation.py --seg-axis q_abs --mid-start 0.2 --mid-en
 | `--checkpoint` | str, 기본 None | 평가(Step 9) 체크포인트 직접 지정 (미지정 시 Step 8 출력 자동 탐색) |
 | `--seg-axis` | str, 기본 None | 세그멘테이션 축, Step 4~6, 8에 전달(분류기 Step 7은 run_dir의 `scenario_spec.json`에서 읽으므로 불필요) |
 | `--axis-config` | str(JSON), 기본 None | 축 파라미터 JSON, Step 4~6, 8에 전달 |
-| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체(PowerShell 호환) |
+| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts`/`--min-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체(PowerShell 호환), Step 4~6, 8에 전달 |
+| `--ref-lag`/`--noise-amp`/`--noise-mode`/`--noise-period` | 위 "공통: 축 단축 인자" 참고 | q_frac_ref 전용, `--axis-config` 대체, Step 4~6, 8에 전달 |
 | `--mid-start`/`--mid-end`/`--seg-len` | 위 "공통: 축 단축 인자" 참고 | q_abs 전용, `--axis-config` 대체 |
 | `--exclude-cv` | flag | Step 4/6/7/8에 전달 — 충전 세그먼트에서 CC→CV 전환 이후 구간 제외(`_ccOnly` 경로 사용) |
+| `--skip-shape` | flag | (2026-08-08 신설) Step 2/4/6/7/8에 전달 — 전처리 필터7(형상 이상치 제거) 비활성화. Step 2는 `_4_data_hi/clean_noshape/`에 저장, Step 4는 그 데이터로 `_noshape` 접미사 경로에 추출, Step 6/7/8은 동일 접미사로 해당 데이터를 찾음 |
 | `--charge-m`/`--discharge-m`/`--scen-k` | 위 §5-8 참고 | Step 6/8에 전달(분류기 Step 7은 이 CLI가 없음) |
 | `--phase1-lr`/`--phase2-lr` | float, 기본 None | Phase 1(Step 6)/Phase 2(Step 8) peak LR 각각 독립 오버라이드 |
 | `--with-raw-cnn` | flag | Step 8(Phase 2)에 raw CNN 융합 적용(방안2) — Step 7에서 학습된 분류기의 RawCNN을 자동으로 얼려 재사용(방안 a). REGRESSION_UPGRADE.md §5/§8/§10 |
+
+> `--gates-from`을 명시하고 `from_step`을 8(또는 그 이후)로 잡아 Step 6/7을 건너뛰면, 이미
+> 학습된 Phase 1 run의 게이트·분류기(RawCNN 포함)를 재학습 없이 그대로 재사용할 수 있다 —
+> `--with-raw-cnn`도 이 경우 `<gates-from>/classifier/clf_best.pt`를 자동으로 찾아 연결한다
+> (raw 융합처럼 Phase 1과 무관한 변경만 실험할 때 유용, `docs/260810_RESULTS.md` §8-3 참고).
 
 ```powershell
 python run_pipeline.py                      # 전체(Step 1~9)
@@ -180,9 +209,12 @@ python run_pipeline.py --workers 4           # 병렬 수 지정(Step 1~5 전용
 
 | 플래그 | 타입/기본값 | 설명 |
 |---|---|---|
-| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`\|`q_frac_wide`\|`vqslope`\|`q_abs`\|`full_cycle`(부분 사이클 대비 베이스라인, 방향당 전체 curve 1개) |
+| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`\|`q_frac_wide`\|`q_frac_ref`\|`vqslope`\|`q_abs`\|`full_cycle`(부분 사이클 대비 베이스라인, 방향당 전체 curve 1개) |
 | `--axis-config` | str(JSON), 기본 `"{}"` | 축 파라미터 JSON 문자열. PowerShell에서는 `--axis-config=$cfg` 형태 또는 아래 단축 인자 사용 |
-| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체 |
+| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts`/`--min-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체 |
+| `--ref-lag`/`--noise-amp`/`--noise-mode`/`--noise-period` | 위 "공통: 축 단축 인자" 참고 | q_frac_ref 전용, `--axis-config` 대체 |
+| `--exclude-cv` | flag | 충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외, `_ccOnly` 접미사 경로에 저장 |
+| `--skip-shape` | flag | (2026-08-08 신설) `_4_data_hi/clean_noshape/`(필터7 미적용) 원본 사용, `_noshape` 접미사 경로에 저장 |
 | `--workers` | int, 기본 `cpu_count-2` | 병렬 프로세스 수 |
 | `--force` | flag | 캐시 무시하고 HI 재추출 |
 | `--dataset` | str, 기본 `MIT` | 디버그/시각화 대상 데이터셋(`MIT`\|`HUST`) |
@@ -205,7 +237,7 @@ python 4_hi_analysis/hi_correlation.py --seg-axis vqslope --mode dva --n-samples
 
 | 플래그 | 타입/기본값 | 설명 |
 |---|---|---|
-| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`(q_frac_wide/vqslope/q_abs도 단축 인자로 지원) |
+| `--seg-axis` | str, 기본 `qfrac` | `qfrac`\|`protocol`\|`vwindow`\|`rcs`\|`cluster`(q_frac_wide/q_frac_ref/vqslope/q_abs도 단축 인자로 지원) |
 | `--axis-config` | str(JSON), 기본 `"{}"` | 축 파라미터 JSON |
 | `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | 위 "공통: 축 단축 인자" 참고 | `--axis-config` 대체 |
 | `--workers` | int, 기본 4 | HI 추출 병렬 워커 수 |
@@ -829,7 +861,7 @@ V(V)                                 V(V)
 
 ---
 
-### HI 구조 (총 411개 컬럼, 모델 입력 64개/세그먼트)
+### HI 구조 (총 411개 컬럼, 모델 입력 66개/세그먼트 — `SOH_EXCLUDE_STAT_LEAK=1`이면 64개)
 
 **Global HI (15개)** — 사이클 전체 특성:
 ```
@@ -847,7 +879,22 @@ ce, cv_q_frac, cv_time_frac, chg_ica_peak1_h
 | LFP  | 20 | `lfp_{k}_{seg}`  | `plateau_frac`, `plateau_dvdq_std`, `v_flatness`, `knee_v` |
 | MORPH|  6 | `morph_{k}_{seg}`| `vt_dtw`, `vq_dtw`, `ve_dtw`, `*_frec` × 3 |
 
-모델 입력: `stat_q_abs` + `stat_energy_seg` 누설 변수 제외 → **64 HI/세그먼트**
+**모델 입력 — `SOH_EXCLUDE_STAT_LEAK` 환경변수 토글(2026-08-07/08)**:
+`stat_q_abs`/`stat_energy_seg`는 세그멘테이션 분모(q_tot)가 그 사이클 자신의 실측 용량에
+가까운 축(`q_frac_wide`/`q_abs` 등)에서는 SOH를 거의 직접 역산할 수 있는 라벨 누수 위험이
+있다 — `q_frac_ref`(§SOC.md, ref_lag>0)처럼 분모가 과거 레퍼런스로 바뀌면 이 위험이
+줄어든다. 기본값은 **포함(66 HI/세그먼트)**이고, 프로세스 시작 전 환경변수로 제외를
+켤 수 있다:
+```powershell
+$env:SOH_EXCLUDE_STAT_LEAK="1"   # → N_HI 66→64, run 디렉터리명에 _noleak 접미사
+python 5_model/train_scr.py --phase 1 ...
+```
+`N_HI`가 여러 모델 모듈(`cap_heads.py` 등)에서 **모듈 임포트 시점 상수**로 게이트·레이어
+크기를 정하므로, CLI 인자가 아니라 반드시 프로세스 시작 전 환경변수로 줘야 하고, 한 run으로
+만든 체크포인트를 나중에 평가할 때도 **그때 썼던 값을 그대로 다시 지정**해야 한다(N_HI
+불일치 시 로드 실패 또는 조용히 다른 차원으로 동작). `train_scr.py`가 이 값을 저장되는
+`config.yaml`(`data.exclude_stat_leak`)과 run 디렉터리명(`_noleak` 접미사)에 기록해 사후
+추적 가능하게 한다.
 
 > **LFP L04 변경**: `plateau_q_frac` 제거 (`plateau_frac`과 수학적으로 동일 — `n_plt/n_b` 증명).  
 > → `plateau_dvdq_std` 대체: 플래토 마스크 내 dV/dQ 표준편차. 플래토 평탄도를 직접 측정하며 다른 피처와 비중복.
@@ -883,7 +930,7 @@ multiprocessing 호환: `_extract_one_cell((pkl_path_str, axis, cfg_json))` 튜�
 ```
 _4_data_hi/{axis}/
   cycle/{ds}/{cell}.pkl    wide-cycle HI (한 행=한 사이클, stat/diff/lfp/morph × 세그먼트)
-  seg/{ds}/{cell}.pkl      native-seg HI (한 행=한 세그먼트, hi_00..hi_63 + raw_v/raw_i[48])
+  seg/{ds}/{cell}.pkl      native-seg HI (한 행=한 세그먼트, hi_00..hi_N + raw_v/raw_i/raw_t[48], N_HI=66 기본)
   scenario_spec.json       해당 축의 ScenarioSpec
 hi_features.pkl            qfrac 추출 캐시 (축 변경 시 hi_features_{axis}.pkl)
 ```
@@ -966,7 +1013,7 @@ python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --no-plot --dataset HUST
 ```yaml
 scenario:
   axis: protocol        # 세그멘테이션 축: qfrac | protocol | vwindow | rcs | cluster |
-                         #   q_frac_wide | vqslope | q_abs | full_cycle
+                         #   q_frac_wide | q_frac_ref | vqslope | q_abs | full_cycle
   axis_config: {}       # 축별 파라미터 (예: vwindow: {n_windows: 3})
 
 data:
@@ -1054,12 +1101,12 @@ columns:
   cycle          : int — 사이클 번호
   capacity_Ah    : float — 해당 사이클 실측 방전 용량 [Ah] = SOH 타겟 원본
   [세그먼트별 HI × n_scenarios]:
-    stat_{key}_{seg}   18개 × n_seg   → e.g. stat_v_mean_dis_hi
+    stat_{key}_{seg}   20개 × n_seg   → e.g. stat_v_mean_dis_hi (stat_q_abs/stat_energy_seg 포함)
     diff_{key}_{seg}   20개 × n_seg
     lfp_{key}_{seg}    20개 × n_seg
     morph_{key}_{seg}   6개 × n_seg
-    (stat_q_abs, stat_energy_seg는 제외 → 세그먼트당 64 HI)
-  총 컬럼 수 ≈ 1 + 1 + 64×n_scenarios  (qfrac: 64×6=384+2=386)
+    (SOH_EXCLUDE_STAT_LEAK=1이면 stat_q_abs/stat_energy_seg 제외 → 세그먼트당 66→64 HI, §5-1)
+  총 컬럼 수 ≈ 1 + 1 + N_HI×n_scenarios  (qfrac, N_HI=66 기본: 66×6=396+2=398 / N_HI=64면 386)
 ```
 
 ---
@@ -1077,20 +1124,20 @@ columns:
 | `direction` | float | +1.0=충전, -1.0=방전 |
 | `level` | int | latent_class 0/1/2 (lo/mid/hi) |
 | `capacity_Ah` | float | 사이클 실측 용량 — SOH 타겟 원본 |
-| `hi_00`..`hi_63` | float32 | 64개 HI (세그먼트별, NaN 허용) |
-| `raw_v` / `raw_i` | list[48] | 원시 V/|I| 곡선 (q_frac 정규화 48pt, CNN 입력용). native-seg에만 존재; 없으면 로더가 zero-fallback |
+| `hi_00`..`hi_N` | float32 | N_HI개 HI(66 기본/64, 세그먼트별, NaN 허용) |
+| `raw_v` / `raw_i` / `raw_t` | list[48] | 원시 V/I(signed)/t_rel 곡선(q_frac 정규화 48pt, CNN 입력용, 2026-08-03부터 3채널). native-seg에만 존재; 없으면 로더가 zero-fallback |
 | `dataset` | str | `MIT` 또는 `HUST` |
 
 > Wide 포맷: `_wide_to_segments()` 로 reshape (raw 컬럼 없음 → x_raw=0).  
-> Native seg 포맷: `load_dataset_native_seg()` 직접 로드 (raw_v/raw_i 있으면 CNN 입력으로 사용).
+> Native seg 포맷: `load_dataset_native_seg()` 직접 로드 (raw_v/raw_i/raw_t 있으면 CNN 입력으로 사용).
 
 ---
 
 #### (C) SegmentNormalizer (train 셀만 fit)
 
 ```python
-mean_  : (64,) float64  # 각 HI의 train 집합 mean (전부 NaN → 0.0)
-std_   : (64,) float64  # 각 HI의 train 집합 std  (constant 또는 전부 NaN → 1.0)
+mean_  : (N_HI,) float64  # 각 HI의 train 집합 mean (전부 NaN → 0.0)
+std_   : (N_HI,) float64  # 각 HI의 train 집합 std  (constant 또는 전부 NaN → 1.0)
 
 # transform_x():
 x_norm = (x_raw - mean_) / std_   # NaN 위치는 0.0으로 마스킹
@@ -1106,9 +1153,9 @@ nan_mask = ~isnan(x_raw)          # 1.0=유효, 0.0=결측
 
 ```python
 {
-  "x_hi":      Tensor (64,)    float32  # z-scored HI, NaN→0
-  "x_raw":     Tensor (2, 48)  float32  # 원시 [V; |I|] 곡선 (CNN 입력). raw 없는 pkl → 전부 0
-  "nan_mask":  Tensor (64,)    float32  # 1.0=유효, 0.0=결측
+  "x_hi":      Tensor (N_HI,)  float32  # z-scored HI(66 기본/64), NaN→0
+  "x_raw":     Tensor (3, 48)  float32  # 원시 [V; I(signed); t_rel] 곡선(CNN 입력, 2026-08-03 3채널). raw 없는 pkl → 전부 0
+  "nan_mask":  Tensor (N_HI,)  float32  # 1.0=유효, 0.0=결측
   "direction": Tensor ()       float32  # +1.0 or -1.0
   "level":     Tensor ()       int64    # latent class (0/1/2)
   "seg_idx":   Tensor ()       int64    # 시나리오 인덱스 0..n-1
@@ -1121,9 +1168,9 @@ nan_mask = ~isnan(x_raw)          # 1.0=유효, 0.0=결측
 
 ```python
 batch = {
-  "x_hi":      (B, 64)    float32
-  "x_raw":     (B, 2, 48) float32   # RAW_CH=2, RAW_N=48 (CNN 분류기 입력)
-  "nan_mask":  (B, 64)    float32
+  "x_hi":      (B, N_HI)  float32
+  "x_raw":     (B, 3, 48) float32   # RAW_CH=3, RAW_N=48 (CNN 분류기 입력)
+  "nan_mask":  (B, N_HI)  float32
   "direction": (B,)       float32
   "level":     (B,)       int64
   "seg_idx":   (B,)       int64
@@ -1146,49 +1193,50 @@ batch = {
 
 ```
 입력 batch
-  x_hi    (B, 64)         — z-scored HI
-  nan_mask(B, 64)         — 유효 비트
+  x_hi    (B, N_HI)       — z-scored HI (66 기본/64)
+  nan_mask(B, N_HI)       — 유효 비트
   direction (B,)
   seg_idx   (B,)
   cap_init  (B,)
-  x_raw   (B, 2, 48)       — with_raw_cnn/with_raw_flat일 때만 사용
+  x_raw   (B, 3, 48)       — with_raw_cnn/with_raw_flat일 때만 사용
 
 ─── 전처리 ───────────────────────────────────────────────
-x = x_hi × nan_mask                          (B, 64)  [NaN 위치 → 0]
+x = x_hi × nan_mask                          (B, N_HI)  [NaN 위치 → 0]
 
 ─── Stage A: 방향별 probe gate ─────────────────────────
   충전 샘플 (direction > 0) → charge_probe_gate
   방전 샘플 (direction ≤ 0) → discharge_probe_gate
   Gate 타입:
     Phase 1: HardConcreteGate (학습 가능, L0 정규화 대상)
-    Phase 2: buffer mask (고정 bool (64,))
+    Phase 2: buffer mask (고정 bool (N_HI,))
 
-probe_x (B, 64)   — 선택된 HI만 비0 (m개 활성)
-probe_z (B, 64)   — gate 확률 벡터 (0/1 혼합 또는 이진)
+probe_x (B, N_HI)   — 선택된 HI만 비0 (m개 활성)
+probe_z (B, N_HI)   — gate 확률 벡터 (0/1 혼합 또는 이진)
 
 ─── Stage B: 시나리오별 gate ────────────────────────────
   seg_idx 기준으로 각 샘플에 해당 시나리오 gate 적용
-  scen_gates[s] (64,) — 시나리오 s 전용 gate (k개 활성)
+  scen_gates[s] (N_HI,) — 시나리오 s 전용 gate (k개 활성)
 
-scen_x (B, 64)   — 시나리오 gate 출력
-scen_z (B, 64)   — gate 확률 벡터
+scen_x (B, N_HI)   — 시나리오 gate 출력
+scen_z (B, N_HI)   — gate 확률 벡터
 
 ─── raw 융합 (선택, with_raw_cnn/with_raw_flat 중 하나만 — 상호 배타) ──────
   with_raw_cnn=true:
     raw_cnn_pretrained_from 지정 → RawCNN을 그 classifier 체크포인트에서 로드해
       얼림(requires_grad_(False)+eval, model.train() 호출돼도 항상 eval 유지) — 방안 a
     미지정 → RawCNN 랜덤 초기화, Phase2와 함께 학습 — 방안 b
-    cnn_emb = RawCNN(x_raw)                    (B, 64)  (frozen이면 torch.no_grad())
+    cnn_emb = RawCNN(x_raw)                    (B, 3)  [h_scen,h_intensity,h_soh], 2026-08-03
+              재설계(구버전은 64차원 무의미 임베딩) — frozen이면 torch.no_grad(), §5-5 참고
   with_raw_flat=true:
-    raw_flat = BatchNorm1d(x_raw.reshape(B,-1))  (B, 96)  (RAW_CH×RAW_N=2×48)
+    raw_flat = BatchNorm1d(x_raw.reshape(B,-1))  (B, 144)  (RAW_CH×RAW_N=3×48)
     # BatchNorm은 REGRESSION_UPGRADE.md §2 원안(단순 flatten concat)에 없던 추가 —
-    # 이미 z-score된 HI(mean0/std1) 대비 raw V(~3-4)/|I|(~0-5) 스케일 격차를 흡수하기 위함.
+    # 이미 z-score된 HI(mean0/std1) 대비 raw V(~3-4)/I(~±5) 스케일 격차를 흡수하기 위함.
 
 ─── Capacity head 입력 구성 ──────────────────────────────
 feat = concat(probe_x, scen_x, [cnn_emb 또는 raw_flat,] direction.unsqueeze(1), cap_init.unsqueeze(1))
-     = (B, 130)                         # 기본(raw 융합 없음)
-     = (B, 130 + 64) = (B, 194)         # with_raw_cnn=true
-     = (B, 130 + 96) = (B, 226)         # with_raw_flat=true
+     = (B, 2×N_HI+2)                    # 기본(raw 융합 없음) — N_HI=66이면 134, 64면 130
+     = (B, 2×N_HI+2 + 3)                # with_raw_cnn=true (신규 3D cnn_emb) — 137(N_HI=66)
+     = (B, 2×N_HI+2 + 144)              # with_raw_flat=true (RAW_CH×RAW_N=3×48) — 278(N_HI=66)
 
 ─── Capacity head (yaml model.regression_model로 선택) ────────
   mlp           : Linear(head_in→d)→ReLU→…→Linear(→1)
@@ -1210,9 +1258,9 @@ cap_pred (B,)   — SOH ratio 예측값 [정규화 없음, 직접 SOH ratio 단�
 {
   "cap_pred":     Tensor (B,)           float32  # SOH ratio 예측 ∈ (0, ~1]
   "level_logits": Tensor (B, n_classes) float32  # probe_mlp 출력 (lambda_scen>0) or all-zero
-  "probe_x":      Tensor (B, 64)        float32  # Stage A gate 출력 (상위 m개 활성, 나머지 0)
-  "probe_z":      Tensor (B, 64)        float32  # Stage A gate 확률
-  "scen_z":       Tensor (B, 64)        float32  # Stage B gate 확률
+  "probe_x":      Tensor (B, N_HI)      float32  # Stage A gate 출력 (상위 m개 활성, 나머지 0)
+  "probe_z":      Tensor (B, N_HI)      float32  # Stage A gate 확률
+  "scen_z":       Tensor (B, N_HI)      float32  # Stage B gate 확률
 }
 ```
 
@@ -1242,36 +1290,41 @@ MAPE = mean(|Δ| / cap_true_raw) × 100  [%]
 
 | 텐서/배열 | 형태 | 단위 | 어디서 생성 |
 |---|---|---|---|
-| `x_hi` | `(B, 64)` | z-score | SegmentDataset |
-| `nan_mask` | `(B, 64)` | 0/1 | SegmentDataset |
-| `probe_z`, `scen_z` | `(B, 64)` | 확률 | SCRModel |
+| `x_hi` | `(B, N_HI)` | z-score | SegmentDataset |
+| `nan_mask` | `(B, N_HI)` | 0/1 | SegmentDataset |
+| `probe_z`, `scen_z` | `(B, N_HI)` | 확률 | SCRModel |
 | `cap_pred` | `(B,)` | SOH ratio | SCRModel |
 | `cap_pred_Ah` | `(N_test,)` | Ah | SCREvaluator |
-| `norm.mean_`, `norm.std_` | `(64,)` | 원본 단위 | SegmentNormalizer |
+| `norm.mean_`, `norm.std_` | `(N_HI,)` | 원본 단위 | SegmentNormalizer |
+
+> `N_HI`=66 기본, `SOH_EXCLUDE_STAT_LEAK=1`이면 64(§5-1). `x_raw`는 `(B, RAW_CH=3, RAW_N=48)`.
 
 ---
 
 ### 5-1. HI 스키마 — `5_model/utils/hi_schema.py`
 
 ```python
-N_HI = 64   # STAT 18 + DIFF 20 + LFP 20 + MORPH 6 (q_abs, energy_seg 제외)
+EXCLUDE_STAT_LEAK = os.environ.get("SOH_EXCLUDE_STAT_LEAK", "0") == "1"  # 프로세스 시작 시 1회
 
 # 카테고리별 컬럼 키 목록 (순서 고정)
-STAT_KEYS   # 20개
+STAT_KEYS   # 20개 (stat_q_abs/stat_energy_seg 포함 — EXCLUDE_STAT_LEAK=True면 get_hi_cols_for_seg()가 이 둘만 걸러 18개로 축소)
 DIFF_KEYS   # 20개
 LFP_KEYS    # 20개
-MORPH_KEYS  # 6개
+MORPH_KEYS  # 6개  (DTW/Fréchet vs BOL — 그 셀의 최초 유효 사이클 곡선을 기준선으로 저장해두고 비교,
+            #       hi_correlation.py에서 배치 계산. BOL 없으면(=그 셀에서 그 세그먼트가 한 번도 안 뽑히면) NaN)
 
 CATEGORY_COSTS = {"stat": 1.0, "diff": 1.5, "lfp": 2.0, "morph": 3.0}
-LEAK_COLS = {"stat_q_abs", "stat_energy_seg"}   # 모델 입력 제외
+LEAK_COLS = set()   # 2026-08-07부터 미사용(과거 이력 참고용) — 실제 제외는 EXCLUDE_STAT_LEAK가 담당
 
 RAW_N  = 48   # 원시 세그먼트 곡선 리샘플 포인트 수 (CNN 입력)
-RAW_CH = 2    # 원시 곡선 채널 수: [V, |I|]
+RAW_CH = 3    # 원시 곡선 채널 수: [V, I(signed, +충전/-방전), t_rel] — 2026-08-03 2→3채널 재설계
 # hi_correlation.py(데이터 생성)와 segment_dataset.py(로더)가 공유하는 단일 소스
 
-def get_hi_cols_for_seg(seg: str) -> list[str]:  # 64개 컬럼명 반환 (순서 고정)
-def get_hi_cost_vector(seg: str) -> list[float]: # 64개 L0 비용 벡터
+def get_hi_cols_for_seg(seg: str) -> list[str]:  # N_HI개 컬럼명 반환 (순서 고정)
+def get_hi_cost_vector(seg: str) -> list[float]: # N_HI개 L0 비용 벡터
 def spec_from_qfrac() -> ScenarioSpec:           # backward-compat: qfrac 기본 spec 반환
+
+N_HI = len(get_hi_cols_for_seg("dis_hi"))  # == 66 기본, EXCLUDE_STAT_LEAK=True면 64 (§HI 구조 참고)
 ```
 
 **제거됨** (시나리오 하드코딩 → ScenarioSpec으로 이관):
@@ -1311,6 +1364,28 @@ def build_datasets(cfg, spec=None) -> (train_ds, val_ds, test_ds, norm):
     ...  # spec=None 이면 _DEFAULT_SPEC(qfrac) 사용
 ```
 
+**셀 분할(`split_cells`) 및 `data.forced_test_cells`(2026-08-10 신설):**
+
+기본 동작은 `data.datasets`로 걸러진 **그 run의 cell_ids 리스트 전체**를 `sorted()` →
+`rng.shuffle(seed=split_seed)`로 섞어 train/val/test로 나눈다 — **주의**: 이 방식은
+`datasets` 구성(예: `["MIT","HUST"]` 풀링 vs `["MIT"]`만)이 다르면 **같은 `split_seed`를
+써도 셔플 결과(어느 셀이 test로 빠지는지)가 달라진다**(입력 리스트 길이·내용 자체가
+바뀌므로). MIT+HUST 풀링 run과 MIT-only run을 나란히 비교하려는 실험(예: 도메인 정렬 없이
+데이터셋을 섞는 게 도움이 되는지 검증 — `docs/260810_RESULTS.md` §8-5)에서 이 문제가
+실제로 발견됐다.
+
+```yaml
+data:
+  forced_test_cells: ["b1c0", "b1c31", ..., "1-7", "10-7", ...]  # 옵션, 기본 없음
+```
+
+지정하면 그 셀들을(그 run의 `datasets`에 실제로 존재하는 것만 교집합으로 걸러) **먼저
+test로 확정**해두고, 나머지 셀만 `split_cells()`로 train/val 재분할한다(비율은
+`is_cross_dataset_evaluate` 분기와 동일하게 `train_ratio/(train_ratio+val_ratio)`로
+재정규화). 이 필드가 없으면(기존 모든 run의 기본값) 분기 자체가 안 타 기존 동작과
+100% 동일 — 여러 `datasets` 구성 간에 **완전히 동일한 test 셀 집합**을 강제해 짝지어진
+(paired) 비교를 가능하게 하는 용도다.
+
 **SegmentNormalizer:**
 - `fit()`: train 분할로 HI별 z-score 파라미터 계산
   - 전-NaN 컬럼 (예: RCS/vwindow CC 전용 → `corr_qi`, `r_dyn_seg` 구조적 NaN): mean=0, std=1 (no-op)
@@ -1322,9 +1397,9 @@ def build_datasets(cfg, spec=None) -> (train_ds, val_ds, test_ds, norm):
 
 | 텐서 (`__getitem__` 반환) | 형상 | 설명 |
 |---|---|---|
-| `x_hi` | (64,) | z-score 정규화된 HI 피처 |
-| `x_raw` | (2, 48) | 원시 [V; |I|] 곡선 (CNN 입력). raw 컬럼 없는 pkl → zero-fallback (`_build_raw_tensor`) |
-| `nan_mask` | (64,) | 1=유효값, 0=원래NaN |
+| `x_hi` | (N_HI,) — 66 기본, `SOH_EXCLUDE_STAT_LEAK=1`이면 64(§5-1) | z-score 정규화된 HI 피처 |
+| `x_raw` | (RAW_CH=3, 48) | 원시 [V; I(signed); t_rel] 곡선(CNN 입력, 2026-08-03부터 3채널). raw 컬럼 없는 pkl → zero-fallback (`_build_raw_tensor`) |
+| `nan_mask` | (N_HI,) | 1=유효값, 0=원래NaN |
 | `direction` | scalar | +1=충전, -1=방전 |
 | `level` | scalar(int64) | 0=lo, 1=mid, 2=hi (spec.class_names 인덱스) |
 | `seg_idx` | scalar(int64) | 0~(n_scenarios-1) scenario_id |
@@ -1367,32 +1442,35 @@ P(z>0) = sigmoid(log_alpha - β×log(-γ/ζ))  ← L0 패널티 계산에 사용
 ### 5-4. 모델 아키텍처 — `5_model/models/scr_model.py`
 
 ```
-입력: x_hi(64) + nan_mask(64) + direction(±1) + cap_init(z-scored Ah)
+입력: x_hi(N_HI) + nan_mask(N_HI) + direction(±1) + cap_init(z-scored Ah)
+      N_HI=66 기본, SOH_EXCLUDE_STAT_LEAK=1이면 64(§5-1)
 
 Stage A — direction-aware probe gate (HI 서브셋 선택)
   direction 기반 라우팅:
-    충전 → charge_probe_gate    (HardConcreteGate, 64→64)
-    방전 → discharge_probe_gate (HardConcreteGate, 64→64)
-  probe_x (B, 64)  — 게이트 적용 결과 (상위 m개 활성)
+    충전 → charge_probe_gate    (HardConcreteGate, N_HI→N_HI)
+    방전 → discharge_probe_gate (HardConcreteGate, N_HI→N_HI)
+  probe_x (B, N_HI)  — 게이트 적용 결과 (상위 m개 활성)
   ※ lambda_scen > 0 시 probe_mlp 활성:
-       probe_x_dir = [probe_x | direction]  (B, 65)
+       probe_x_dir = [probe_x | direction]  (B, N_HI+1)
        level_logits = probe_mlp(probe_x_dir)  → CE 손실 입력
      lambda_scen = 0 시: level_logits = zeros(B, n_classes)  (호환용)
 
 Stage B — scenario-conditioned regression
-  scen_gates[n_scenarios]: 각 시나리오별 HardConcreteGate (64→64)
+  scen_gates[n_scenarios]: 각 시나리오별 HardConcreteGate (N_HI→N_HI)
                            n_scenarios = spec.n_scenarios
-  x_probe = probe_gate(x_hi)               # (B, 64), direction별 게이트
-  x_scen  = scen_gates[seg_idx](x_hi)      # (B, 64), seg_idx 하드 라우팅
-  feat    = [x_probe | x_scen | direction | cap_init]  # (B, 130) — with_raw_cnn/
-            # with_raw_flat=true면 direction 앞에 raw 융합 블록 추가(194/226차원, §5-0(E))
+  x_probe = probe_gate(x_hi)               # (B, N_HI), direction별 게이트
+  x_scen  = scen_gates[seg_idx](x_hi)      # (B, N_HI), seg_idx 하드 라우팅
+  feat    = [x_probe | x_scen | direction | cap_init]  # (B, 2×N_HI+2) — N_HI=66 기준 134,
+            # 64 기준(구버전/EXCLUDE_STAT_LEAK=1)이면 130. with_raw_cnn=true면 여기에 신규
+            # RawCNN 출력 3차원(h_scen/h_intensity/h_soh, §5-5) 추가, with_raw_flat=true면
+            # RAW_N×RAW_CH=48×3=144차원 flatten 추가(§5-0(E))
   cap_pred = cap_head(feat)                # (B,) — SOH ratio ∈ (0,1]
 
 출력 dict:
   cap_pred      : (B,) SOH ratio 예측값
   level_logits  : (B, n_classes) 항상 0 (CE 비활성)
-  probe_z       : (B, 64) probe gate 활성값
-  scen_z        : (B, 64) scenario gate 활성값
+  probe_z       : (B, N_HI) probe gate 활성값
+  scen_z        : (B, N_HI) scenario gate 활성값
 ```
 
 **SCRModel 생성:**
@@ -1400,8 +1478,8 @@ Stage B — scenario-conditioned regression
 model = SCRModel(
     d_probe=64, d_head=128, dropout=0.1,
     charge_probe_mask=None,    # Phase 1: None → HardConcreteGate (학습 가능)
-    discharge_probe_mask=None, # Phase 2/FT: (64,) bool tensor → 고정 buffer
-    scen_masks=None,           # Phase 2/FT: (n_scenarios, 64) bool tensor → 고정 buffer
+    discharge_probe_mask=None, # Phase 2/FT: (N_HI,) bool tensor → 고정 buffer
+    scen_masks=None,           # Phase 2/FT: (n_scenarios, N_HI) bool tensor → 고정 buffer
     model_cfg={
         "regression_model": "mlp",
         "with_raw_cnn": False,             # true면 raw_cnn_pretrained_from도 확인(§5-0(E))
@@ -1412,7 +1490,8 @@ model = SCRModel(
 )
 # model.spec, model.n_scenarios, model.n_classes 로 접근
 # model.raw_cnn: with_raw_cnn=true일 때만 RawCNN 인스턴스, 아니면 None
-# model.with_raw_flat: bool (raw_flat_norm=BatchNorm1d(96) 존재 여부와 대응)
+# model.with_raw_flat: bool (raw_flat_norm=BatchNorm1d(RAW_N×RAW_CH=144) 존재 여부와 대응,
+#                       2026-08-03 RAW_CH 2→3 재설계로 96→144)
 ```
 
 **Phase 전환:**
@@ -1428,7 +1507,7 @@ model = SCRModel(
 
 | 모드 | 구조 | 특징 | `with_raw_cnn`/`with_raw_flat` |
 |---|---|---|---|
-| `mlp` | Linear(head_in→d)→ReLU→…→1 | 기본, 빠름 | 지원 (head_in=130/194/226) |
+| `mlp` | Linear(head_in→d)→ReLU→…→1 | 기본, 빠름 | 지원 (head_in=2×N_HI+2 기본(134, N_HI=66 기준) / +3(with_raw_cnn, 신규 3D 출력) / +144(with_raw_flat, 48×3)) |
 | `transformer` | probe/scen/[raw]/meta 토큰 → TransformerEncoder | semantic 토큰 분리, raw는 토큰 1개로 추가 | 지원 |
 | `resnet_tab` | Linear(head_in→d)→ResBlock×n(skip)→LN→ReLU→1 | Gorishniy et al. NeurIPS 2021 | 지원 |
 | `i_transformer` | head_in 피처 각각이 토큰 → feature-wise attention | feature-wise, 해석 가능 | **미지원(NotImplementedError)** |
@@ -1455,20 +1534,32 @@ model = SCRModel(
 
 ```python
 from models.scenario_classifier import build_classifier
-clf = build_classifier("mlp",  n_hi=64, n_classes=3, d_hidden=64)   # B안 (HI만)
-clf = build_classifier("cnn",  n_hi=64, n_classes=3, d_hidden=128)  # 원시 곡선 CNN 융합
-clf = build_classifier("rule", n_hi=64, n_classes=3, spec=spec)     # 규칙 기반
+clf = build_classifier("mlp",  n_hi=N_HI, n_classes=3, d_hidden=64)   # B안 (HI만)
+clf = build_classifier("cnn",  n_hi=N_HI, n_classes=3, d_hidden=128)  # 원시 곡선 CNN 융합
+clf = build_classifier("rule", n_hi=N_HI, n_classes=3, spec=spec)     # 규칙 기반
 ```
 
-**CNNProbeClassifier 구조** (`models/raw_cnn.py`의 `RawCNN` 사용):
+**CNNProbeClassifier 구조** (`models/raw_cnn.py`의 `RawCNN` 사용, **2026-08-03 재설계**):
 ```
-x_raw (B,2,48) ─ RawCNN ─→ cnn_emb (B,64)
-   RawCNN: Conv stem → ResBlock×2 → AttentionPool → Linear  (≈42K params)
-[cnn_emb(64) ‖ probe_x(64) ‖ direction(1)] = 129D → MLP → n_classes logits
+x_raw (B,3,48) ─ RawCNN ─→ cnn_emb (B,3) = [h_scen, h_intensity, h_soh]  (의미 고정 3D 출력)
+   RawCNN: stem(48→24, 1단계 다운샘플) → chan_expand(k=1) → AttentionPool×3(독립 분기)
+           → 각 Linear(64,1) → BatchNorm1d(3)   (34.7K params, 구버전 42.4K 대비 -18%)
+[cnn_emb(3) ‖ probe_x(N_HI) ‖ direction(1)] → MLP → n_classes logits
 
 classify(probe_x, batch): batch["x_raw"]·batch["direction"]를 내부에서 융합
 구 pkl(x_raw 전부 0) → CNN 임베딩이 상수로 수렴 → probe_x만으로 동작(무해 degrade)
 ```
+
+**구조 변경 이력**: 구버전(~2026-08-02)은 2채널 입력([V,|I|], 부호 없음)·2단계 다운샘플·
+64차원 무의미 임베딩(`cnn_emb`)을 썼다. 2026-08-03 재설계로 (1) 입력에 부호 있는 전류와
+`t_rel`(세그먼트 내 상대시간) 채널을 추가해 3채널로, (2) 다운샘플을 1단계로 줄여 전환점
+위치 해상도를 보존, (3) 출력을 해석 불가능한 64D 대신 **`h_scen`(플래토 유사도)/
+`h_intensity`(전류 변동성)/`h_soh`(SOH 직결)라는 물리적 근거 있는 3D 병목**으로 압축했다.
+Phase 1(분류기) 학습 시 이 3개 차원 각각에 보조손실(MSE, `train_classifier.py`)을 걸어
+"제 역할"을 하도록 유도하고, 배치 내 상호 비상관(decorrelation) 페널티도 추가한다 — 자세한
+설계 근거·ablation은 `docs/260803_RESULTS.md`/`docs/260804_RESULTS.md` 참고. 이 RawCNN은
+Phase 2에서 `--with-raw-cnn`으로 얼려서 재사용되거나(§5-4), `train_scr.py`가 직접
+Phase 2와 함께 학습(방안 b)할 수도 있다.
 
 > **B안 설계 원칙**: 분류기는 회귀 모델(SCRModel)과 완전히 분리.  
 > 배터리 운영 레짐(CC1/CC2/CV 등)은 물리적으로 실재하는 상태이므로 독립 분류가 타당하며,  
@@ -1609,12 +1700,13 @@ SCRModel Phase 1/2와 완전히 독립적으로 HI 특성만으로 시나리오 
 ```
 타입   : scr.yaml classifier.type = mlp(기본) | cnn
 마스크 : classification_HIs.json 로드 → charge/discharge 방향별 상위 m개 probe HI 마스크
-입력   : (mlp) probe_x (N_HI=64, 마스크 적용) + direction (1) = 65차원
-         (cnn) probe_x (64) + RawCNN(x_raw (2,48))=64 + direction (1) = 129차원 내부 융합
+입력   : (mlp) probe_x (N_HI, 마스크 적용, 66 기본/64 SOH_EXCLUDE_STAT_LEAK=1) + direction (1)
+         (cnn) probe_x (N_HI) + RawCNN(x_raw (3,48))=3(h_scen/h_intensity/h_soh, §5-5) + direction (1)
          (마스크 없으면 x_hi 전체 fallback)
 타겟   : batch["level"]  (latent_class: lo=0 / mid=1 / hi=2)
-모델   : (mlp) MLPProbeClassifier  Linear(65→d_hidden)→ReLU→Dropout→Linear(→d_hidden//2)→ReLU→Linear(→n_classes)
-         (cnn) CNNProbeClassifier  RawCNN + Linear(129→d_hidden)→GELU→Dropout→Linear(→d_hidden//2)→GELU→Linear(→n_classes)
+         (cnn 전용 보조타겟: aux_scen_target/aux_intensity_target — h_scen/h_intensity MSE용, §5-5)
+모델   : (mlp) MLPProbeClassifier  Linear(N_HI+1→d_hidden)→ReLU→Dropout→Linear(→d_hidden//2)→ReLU→Linear(→n_classes)
+         (cnn) CNNProbeClassifier  RawCNN + Linear(N_HI+4→d_hidden)→GELU→Dropout→Linear(→d_hidden//2)→GELU→Linear(→n_classes)
 손실   : CrossEntropyLoss  (regression과 완전 분리)
 정규화 : 동일 config로 build_datasets 호출 → Phase 2와 동일 정규화기 자동 재현
 저장   : {run_dir}/classifier/clf_best.pt  — run_dir은 --run-dir로 지정한 폴더.
@@ -1643,7 +1735,7 @@ python run_pipeline.py 7 --to-step 7
 {
   "clf_state": ...,     # MLPProbeClassifier | CNNProbeClassifier state_dict
   "clf_type":  "mlp",   # "mlp" | "cnn" — test_scr.py 복원 시 분기 기준
-  "n_hi":      65,      # mlp: N_HI(64)+direction(1)=65 | cnn: N_HI=64 (direction 내부 concat)
+  "n_hi":      N_HI+1,  # mlp: N_HI(66 기본/64)+direction(1) | cnn: N_HI (direction 내부 concat)
   "n_classes": 3,       # 출력 클래스 수
   "d_hidden":  64,      # 히든 차원
   "val_acc":   0.xxx,   # 최고 검증 정확도
@@ -1652,8 +1744,8 @@ python run_pipeline.py 7 --to-step 7
 }
 ```
 
-> `type: cnn`으로 학습하려면 Step 4를 재실행해 raw_v/raw_i 컬럼이 포함된 seg pkl을 먼저
-> 생성해야 한다. raw 없는 기존 pkl로 `cnn`을 써도 동작하나 x_raw=0이라 CNN 이점이 없다.
+> `type: cnn`으로 학습하려면 Step 4를 재실행해 raw_v/raw_i/raw_t 컬럼이 포함된 seg pkl을
+> 먼저 생성해야 한다. raw 없는 기존 pkl로 `cnn`을 써도 동작하나 x_raw=0이라 CNN 이점이 없다.
 
 ---
 
@@ -1733,7 +1825,7 @@ evaluator.set_classifier(clf)           # MLPProbeClassifier | CNNProbeClassifie
 # predict_dataset(ds, routing_mode="none")  → 기존 동작 (seg_idx 그대로, oracle 라우팅에 사용)
 
 # 분류기 입력 구성 (train_classifier.py와 동일, 타입별 분기):
-#   probe_x_clf = model.get_probe_x(x_hi, direction, seg_idx)   # (B, 64) probe 마스크 적용
+#   probe_x_clf = model.get_probe_x(x_hi, direction, seg_idx)   # (B, N_HI) probe 마스크 적용
 #   MLP: clf_logits = classifier([probe_x_clf | direction])      # (B, 65)
 #   CNN: clf_logits = classifier.classify(probe_x_clf, batch_d)  # batch_d에 x_raw 포함
 #        (isinstance(classifier, CNNProbeClassifier) 로 분기)
@@ -1907,20 +1999,44 @@ python 5_model/clustering.py --k-max 9 --mrmr-m 20 --knn 10
 
 ## 데이터 디렉토리 구조
 
+### `data_directories.py` — pkl 데이터 경로의 단일 진입점 (2026-08-08 신설)
+
+`_2_data_clean`(미사용 레거시)/`_4_data_hi`/`4_hi_analysis`의 pkl 캐시가 용량 문제로
+**D 드라이브로 이전**됐다. 프로젝트 루트의 `data_directories.py` 하나가 그 경로들을 정의하고,
+26개 이상의 `.py` 파일이 여기서 import해서 쓴다(이전엔 각 파일이 D: 절대경로를 따로
+하드코딩해 유지보수 부담이 컸음) — 드라이브를 또 옮길 일이 생기면 이 파일의 `_D_ROOT`
+한 줄만 고치면 된다.
+
+```python
+# data_directories.py
+_D_ROOT = Path(r"D:\chanminLee\LFP_SOH_prediction_v2")
+DATA_2_CLEAN_ROOT  = _D_ROOT / "_2_data_clean"   # 미사용(레거시), 문서화 목적
+DATA_4_HI_ROOT     = _D_ROOT / "_4_data_hi"
+DATA_4_HI_ROOT_STR = str(DATA_4_HI_ROOT).replace("\\", "/")  # PROJECT_ROOT join용
+PKL_CACHE_ROOT      = _D_ROOT / "4_hi_analysis"  # hi_features*.pkl, outputs/**/*.pkl
+```
+
+아래 트리의 `_4_data_hi/`는 실제로는 이 `DATA_4_HI_ROOT`(D 드라이브)를 가리킨다 — `.py`
+코드 파일 자체(`4_hi_analysis/*.py` 등)와 `_5_data_model_scr/`(run 결과)는 이동하지 않고
+C 드라이브(프로젝트 루트)에 그대로 남아 있다. `*.yaml`(25개)은 파이썬 import가 불가능해
+D: 절대경로 문자열을 직접 담고 있다(`random_seg_data_dir` 등).
+
 ```
 _0_data_raw/              # 원본 복사본 (MIT .mat / HUST .pkl)
 _1_data_unified/          # 변환된 통합 포맷
   MIT/ HUST/              # 셀별 .pkl + .csv
-_4_data_hi/               # HI 추출 결과
-  clean/                  # hi_correlation.py 입력 (전처리 완료 시계열)
+_4_data_hi/               # HI 추출 결과 (D:\chanminLee\LFP_SOH_prediction_v2\_4_data_hi, 위 참고)
+  clean/                  # hi_correlation.py 입력 (전처리 완료 시계열, 필터7 적용본)
     MIT/ HUST/
-  {axis}/                 # 세그멘테이션 축별 서브트리 (예: qfrac/)
+  clean_noshape/          # (2026-08-08 신설) --skip-shape로 만든 필터7 미적용본
+    MIT/ HUST/
+  {axis}/                 # 세그멘테이션 축별 서브트리 (예: qfrac/, q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/)
     cycle/                # wide-cycle HI (한 행=한 사이클)
       MIT/ HUST/          # b1c0.pkl, 1-1.pkl, ...
     seg/                  # native-seg HI (한 행=한 세그먼트)
       MIT/ HUST/
     scenario_spec.json    # ScenarioSpec (n_scenarios, routing, class_names ...)
-_5_data_model_scr/        # 학습 결과
+_5_data_model_scr/        # 학습 결과 (C 드라이브, 프로젝트 루트 그대로)
   MMDD_HHMM/              # run_dir (Phase 1 또는 Phase 2)
     scenario_spec.json    # 사용된 ScenarioSpec 복사본
     config.yaml           # 학습 시 yaml 복사본
@@ -1928,6 +2044,8 @@ _5_data_model_scr/        # 학습 결과
       classification_HIs.json   # probe gate 랭킹 (charge/discharge)
       regression_HIs.json       # scen gate 랭킹 (시나리오별)
       gate_probs.png
+    classifier/
+      clf_best.pt          # 시나리오 분류기(§5-9) — Phase 1 run_dir 안에 저장(2026-07-30부터)
     checkpoints/
       best.pt             # val SOH RMSE 최솟값 (normalizer 포함)
       final.pt            # 최종 (model + normalizer)
@@ -1946,6 +2064,13 @@ common/
     vwindow.py            # VWindowSegmenter
     rcs.py                # RCSSegmenter
     cluster.py            # ClusterSegmenter
+    full_cycle.py         # FullCycleSegmenter (부분사이클 대비 베이스라인)
+    q_frac_wide.py        # QFracWideSegmenter (n1/n2/n_samples, min_pts, random_segment)
+    q_frac_ref.py         # QFracRefSegmenter — q_frac_wide 서브클래스, 과거 레퍼런스+노이즈(§SOC.md)
+    vqslope.py            # VQSlopeSegmenter (플래토 검출 head/plateau/tail)
+    q_abs.py              # QAbsSegmenter (BOL 고정 절대용량 분할)
+    test_rs.py            # 랜덤세그먼트 평가 전용
+    _curves.py / _random_seg.py   # 내부 공용 헬퍼(곡선 보간, 랜덤 창 추출)
 ```
 
 ---
@@ -2062,12 +2187,12 @@ python run_pipeline.py 6 --seg-axis full_cycle --to-step 9
 
 ##### 1-B. `raw_mlp` 베이스라인 — HI 추출 자체의 기여도 측정
 
-**검증 대상**: "수작업 HI 64개를 뽑는 게 실제로 가치가 있는가, 아니면 raw 곡선을 그냥 학습기에 넣어도
+**검증 대상**: "수작업 HI N_HI개를 뽑는 게 실제로 가치가 있는가, 아니면 raw 곡선을 그냥 학습기에 넣어도
 비슷한가?"라는 질문. CNN(B-4/B-5 계열)을 쓰면 "raw 입력"과 "CNN 아키텍처"가 뒤섞여 원인 구분이
-안 되므로, **같은 MLP 구조**에 입력만 HI(게이트로 고른 64차원) 대신 raw로 바꿔 비교한다.
+안 되므로, **같은 MLP 구조**에 입력만 HI(게이트로 고른 N_HI차원) 대신 raw로 바꿔 비교한다.
 
 **구현**: `5_model/models/raw_mlp_model.py`의 `RawMLPModel` — HI/게이트를 완전히 우회하고, 이미
-`SegmentDataset`이 만들어 두는 `x_raw`(raw_v/raw_i 48포인트 리샘플, 2채널=96차원)를 flatten해
+`SegmentDataset`이 만들어 두는 `x_raw`(raw_v/raw_i/raw_t 48포인트 리샘플, 3채널=144차원)를 flatten해
 direction/cap_init과 concat한 뒤 평범한 2-hidden-layer MLP로 SOH를 직접 회귀한다. `SCRModel`과 동일한
 batch/출력 dict 계약(`cap_pred`/`level_logits`/`probe_z`/`scen_z`)을 따르고, `_fixed_probe=True`/
 `_fixed_scen=True`/`probe_mlp=None`으로 선언해 `SCRLoss`의 L0·CE 항이 자동으로 비활성화되므로

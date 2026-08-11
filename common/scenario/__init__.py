@@ -51,6 +51,12 @@ except Exception:
     pass
 
 try:
+    from .q_frac_ref import QFracRefSegmenter
+    REGISTRY["q_frac_ref"] = QFracRefSegmenter
+except Exception:
+    pass
+
+try:
     from .vqslope import VQSlopeSegmenter
     REGISTRY["vqslope"] = VQSlopeSegmenter
 except Exception:
@@ -92,6 +98,7 @@ __all__ = [
     "Segmenter",
     "QFracSegmenter",
     "QFracWideSegmenter",
+    "QFracRefSegmenter",
     "QAbsSegmenter",
     "REGISTRY",
     "get_segmenter",

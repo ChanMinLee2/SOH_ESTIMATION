@@ -64,11 +64,14 @@ from tqdm import tqdm
 # ─────────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STEP_DIR     = Path(__file__).resolve().parent
-MIT_DIR      = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
-HUST_DIR     = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
-
+# 2026-08-08: pkl 데이터(_4_data_hi 입력, 4_hi_analysis 캐시/outputs pkl)만 D로 이동 —
+# STEP_DIR은 다른 곳(compare_conditions.json 등 실제 코드 자산)에도 쓰이므로 그대로 두고
+# data_directories.py의 공유 상수를 쓴다(hi_correlation.py와 동일 패턴).
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT, PKL_CACHE_ROOT  # noqa: E402
+MIT_DIR      = DATA_4_HI_ROOT / "clean" / "MIT"
+HUST_DIR     = DATA_4_HI_ROOT / "clean" / "HUST"
 
 for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
     try:
@@ -1615,7 +1618,7 @@ def _discover_axes() -> list[str]:
     hi_features_vwindow.pkl  → "vwindow"
     """
     axes = []
-    for pkl in sorted(STEP_DIR.glob("hi_features*.pkl")):
+    for pkl in sorted(PKL_CACHE_ROOT.glob("hi_features*.pkl")):
         suffix = pkl.stem.replace("hi_features", "").lstrip("_")
         axes.append(suffix if suffix else "qfrac")
     return axes
@@ -1651,7 +1654,7 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
         )
     else:
         dir_name = axis
-    out_dir = STEP_DIR / "outputs" / "seg_diagnose" / dir_name
+    out_dir = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 통계 ──────────────────────────────────────────────────────────────────
@@ -1799,7 +1802,7 @@ def _run_qfracwide_survival(axis_cfg: dict, n_workers: int = 1) -> None:
             per_ds_stats[ds] = stats
             per_ds_seg[ds] = _CounterProxy(att, yld, cnp)
 
-    out_dir = STEP_DIR / "outputs" / "seg_diagnose" / "q_frac_wide"
+    out_dir = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / "q_frac_wide"
     tag = f"n1-{int(round(n1*100))}%_n2-{int(round(n2*100))}%_N-{n_samples}"
 
     txt_path = out_dir / f"survival_stats_{tag}.txt"
@@ -1862,8 +1865,15 @@ def _run_compare(args) -> None:
     for c in conditions:
         print(f"  - {c.get('label') or _condition_tag(c['axis'], c.get('axis_config', {}))}")
 
-    out_dir  = STEP_DIR / "outputs" / "seg_diagnose" / "compare"
-    out_path = out_dir / f"{ds}_{cell_pkl.stem}_cyc{args.cycle or 'auto'}_compare.png"
+    # 설정파일 이름을 파일명에 포함 — compare-config를 바꿔가며 같은 셀/사이클을 여러 번
+    # 비교할 때(예: exp1_n2 vs exp2_noise vs exp6_minpts) 서로 덮어쓰지 않도록 한다.
+    _cfg_tag = cfg_path.stem
+    if _cfg_tag.startswith("compare_"):
+        _cfg_tag = _cfg_tag[len("compare_"):]
+    _cfg_sfx = f"_{_cfg_tag}" if _cfg_tag and _cfg_tag != "conditions" else ""
+
+    out_dir  = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / "compare"
+    out_path = out_dir / f"{ds}_{cell_pkl.stem}_cyc{args.cycle or 'auto'}{_cfg_sfx}_compare.png"
     plot_condition_comparison(cell_pkl, conditions, args.cycle, out_path)
 
 

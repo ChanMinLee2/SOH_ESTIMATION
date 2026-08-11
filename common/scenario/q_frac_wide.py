@@ -146,6 +146,20 @@ class QFracWideSegmenter(Segmenter):
             return np.array([(lo + hi) / 2.0])
         return np.linspace(lo, hi, self.n_samples)
 
+    # ── 분모(q_tot) 산출 훅 ──────────────────────────────────────────────────
+    # 기본구현: 이 세션(사이클) 자신의 전류적산 최종값 — q_frac_wide 원래 정의.
+    # QFracRefSegmenter(q_frac_ref.py)가 이 메서드만 오버라이드해 과거 레퍼런스
+    # 기반 분모를 반환한다(docs/SOC.md §6 Phase 3 — 서브클래스 + stateful 캐시).
+
+    def _normalizer(
+        self,
+        direction: int,
+        cell_id: str,
+        cycle: int,
+        q: np.ndarray,
+    ) -> float:
+        return float(q[-1]) if len(q) > 0 else 0.0
+
     # ── 한 방향 추출 ─────────────────────────────────────────────────────────
 
     def _extract(
@@ -160,7 +174,7 @@ class QFracWideSegmenter(Segmenter):
         seg_local_start: int,
         rand_rng: "np.random.Generator | None" = None,
     ) -> tuple[list[SegmentRecord], int]:
-        q_tot = float(q[-1]) if len(q) > 0 else 0.0
+        q_tot = self._normalizer(direction, cell_id, cycle, q)
         if q_tot < 0.05:
             return [], seg_local_start
 
@@ -252,7 +266,8 @@ class QFracWideSegmenter(Segmenter):
             routing=_ROUTING,
             classifier_default="mlp_probe",
             params={"n1": self.n1, "n2": self.n2, "n_samples": self.n_samples,
-                    "random_segment": self.random_segment, "seg_len_pts": self.seg_len_pts},
+                    "random_segment": self.random_segment, "seg_len_pts": self.seg_len_pts,
+                    "min_pts": self.min_pts},
         )
 
     def _rng_for(self, cell_id: str, cycle: int, direction: int) -> "np.random.Generator | None":

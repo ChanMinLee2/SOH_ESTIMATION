@@ -210,10 +210,28 @@ def main():
                         help="q_abs mid 존 끝 (정격용량 비율, 기본 0.5, --axis-config 대체)")
     parser.add_argument("--seg-len",   type=float, default=None, dest="seg_len",
                         help="q_abs 세그먼트 길이 (정격용량 비율, 기본 0.15, --axis-config 대체)")
+    # q_frac_ref 전용 단축 인자 (n1/n2/n_samples는 q_frac_wide와 공유해 위 인자 그대로 씀)
+    parser.add_argument("--ref-lag",   type=int, default=None, dest="ref_lag",
+                        help="q_frac_ref 레퍼런스 지연 사이클 수 (기본 0=q_frac_wide와 동등, --axis-config 대체)")
+    parser.add_argument("--noise-amp", type=float, default=None, dest="noise_amp",
+                        help="q_frac_ref 레퍼런스 노이즈 최대 진폭, 분수 (기본 0.03=±3%%, --axis-config 대체)")
+    parser.add_argument("--noise-mode", type=str, default=None, dest="noise_mode",
+                        choices=["ou", "sine"],
+                        help="q_frac_ref 노이즈 드리프트 방식 ou(기본)|sine(구버전) (--axis-config 대체)")
+    parser.add_argument("--noise-period", type=float, default=None, dest="noise_period_cycles",
+                        help="q_frac_ref 노이즈 평균회귀 특성시간/파장(사이클 수, 기본 200, --axis-config 대체)")
+    parser.add_argument("--min-pts", type=int, default=None, dest="min_pts",
+                        help="q_frac_wide/q_frac_ref 세그먼트 최소 포인트 수(기본 10, --axis-config 대체). "
+                             "기본값과 다르면 '_minptsN' 접미사 경로에 별도 저장됨")
     parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
                         help="충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외 (Step 4/6/7/8 전달). "
                              "Step 4는 결과를 '_ccOnly' 접미사 경로에 저장하고, "
                              "Step 6/7/8은 동일 접미사로 해당 데이터를 찾는다.")
+    parser.add_argument("--skip-shape", action="store_true", dest="skip_shape",
+                        help="전처리 필터7(형상 이상치 제거) 비활성화 (Step 2/4/6/7/8 전달). "
+                             "Step 2는 _4_data_hi/clean_noshape/에 저장하고, Step 4는 그 데이터로 "
+                             "'_noshape' 접미사 경로에 추출하며, Step 6/7/8은 동일 접미사로 "
+                             "해당 데이터를 찾는다.")
     # m/k 오버라이드 (Step 6, 8에 그대로 전달 — train_scr.py --charge-m/--discharge-m/--scen-k.
     # 분류기(Step 7)는 이 CLI 옵션이 없고 yaml classifier.charge_probe_m 등을 직접 읽음)
     parser.add_argument("--charge-m",    type=int, default=None,
@@ -240,7 +258,10 @@ def main():
     # 전달하므로 PowerShell 따옴표 벗김 문제가 발생하지 않는다.
     if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
             or args.mode is not None or args.random_segment or args.seg_len_pts is not None
-            or args.mid_start is not None or args.mid_end is not None or args.seg_len is not None):
+            or args.mid_start is not None or args.mid_end is not None or args.seg_len is not None
+            or args.ref_lag is not None or args.noise_amp is not None
+            or args.noise_mode is not None or args.noise_period_cycles is not None
+            or args.min_pts is not None):
         import json as _json
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
@@ -252,6 +273,11 @@ def main():
         if args.mid_start is not None: _quick["mid_start"] = args.mid_start
         if args.mid_end   is not None: _quick["mid_end"]   = args.mid_end
         if args.seg_len   is not None: _quick["seg_len"]   = args.seg_len
+        if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
+        if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
+        if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
+        if args.noise_period_cycles is not None: _quick["noise_period_cycles"] = args.noise_period_cycles
+        if args.min_pts is not None: _quick["min_pts"] = args.min_pts
         args.axis_config = _json.dumps(_quick)
 
     to_step = args.to_step if args.to_step is not None else len(STEPS)
@@ -281,6 +307,8 @@ def main():
         print(f"  checkpoint  : {args.checkpoint}")
     if args.exclude_cv:
         print(f"  exclude-cv  : True")
+    if args.skip_shape:
+        print(f"  skip-shape  : True")
     if args.charge_m is not None:
         print(f"  charge-m    : {args.charge_m}")
     if args.discharge_m is not None:
@@ -317,6 +345,11 @@ def main():
         # ── CV 제외 옵션 주입 (Step 4=추출, 6=Phase1, 7=분류기, 8=Phase2 — 모두 '_ccOnly' 경로 인지 필요) ──
         if num in (4, 6, 7, 8) and args.exclude_cv:
             step_extra += ["--exclude-cv"]
+
+        # ── shape filter 비활성화 옵션 주입 (Step 2=전처리 자체가 필터7 스킵,
+        #    Step 4=추출, 6=Phase1, 7=분류기, 8=Phase2 — 모두 '_noshape' 경로 인지 필요) ──
+        if num in (2, 4, 6, 7, 8) and args.skip_shape:
+            step_extra += ["--skip-shape"]
 
         # ── m/k 오버라이드 주입 (Step 6=Phase1, 8=Phase2 — 분류기(7)는 이 CLI 옵션이 없음) ──
         if num in (6, 8):

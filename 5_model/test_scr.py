@@ -23,6 +23,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
 
 try:
     from utils.compat import install_numpy2_shim
@@ -398,7 +401,7 @@ def _run_random_segment_test(
 ) -> None:
     """랜덤 세그먼트 데이터셋으로 추가 평가 (qfrac train → random test)."""
     rs_cfg      = cfg.get("test", {})
-    rs_data_dir = rs_cfg.get("random_seg_data_dir", "_4_data_hi/test_rs/seg")
+    rs_data_dir = rs_cfg.get("random_seg_data_dir", f"{DATA_4_HI_ROOT_STR}/test_rs/seg")
     rs_datasets = rs_cfg.get("random_seg_datasets",
                              cfg.get("data", {}).get("datasets", ["MIT", "HUST"]))
 

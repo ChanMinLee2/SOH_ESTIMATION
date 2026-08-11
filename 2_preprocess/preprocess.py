@@ -38,6 +38,7 @@ MIT / HUST _1_data_unified PKL 에 이상 사이클·행 제거를 적용.
 
 import argparse
 import pickle
+import sys
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date
@@ -50,7 +51,19 @@ from tqdm.auto import tqdm
 PROJECT_ROOT     = Path(__file__).resolve().parent.parent
 _OUTPUTS_ROOT    = Path(__file__).resolve().parent / "outputs"
 OUTPUT_DIR       = _OUTPUTS_ROOT / date.today().strftime("%m%d")
-POSTPROCESS_ROOT = PROJECT_ROOT / "_4_data_hi" / "clean"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT  # noqa: E402
+POSTPROCESS_ROOT = DATA_4_HI_ROOT / "clean"
+
+# _1_data_unified 원본(대용량)이 로컬에 없을 수 있음 — 이 경우 외부 드라이브로 폴백
+# (2_preprocess/diagnose_chg_gap_dt.py와 동일한 관례).
+_EXTERNAL_DATA_ROOT = Path(r"D:\chanminLee\LFP_SOH_prediction_v2")
+
+
+def _resolve_unified_src(dataset: str) -> Path:
+    local = PROJECT_ROOT / "_1_data_unified" / dataset
+    return local if local.exists() else _EXTERNAL_DATA_ROOT / "_1_data_unified" / dataset
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,36 +139,46 @@ def _remove_dt_gap_cycles(df: pd.DataFrame,
                            chg_gap_factor:     float = 50.0,
                            chg_seg_gap_s:      float = 120.0,
                            chg_seg_gap_factor: float = 30.0) -> tuple:
-    """방전/충전 구간 내 시간 단절이 있는 사이클을 처리.
+    """방전/충전 구간 내 시간 단절이 있는 사이클·행을 처리.
 
     판정:
       dt     = clip(diff(t, prepend=t[0]), 0, None)
       dt_med = median(dt[dt > 0])
-      단절   = dt.max() > max(gap_s, dt_med × gap_factor)
+      단절   = dt > max(gap_s, dt_med × gap_factor)
 
-    방전 단절 (>dis_gap_s/dis_gap_factor)
-      → 해당 사이클 전체 제거.
+    방전 단절 (사이클 내 dt.max() > dis_gap_s/dis_gap_factor)
+      → 해당 사이클 전체 제거. (드묾 — 사이클 단위 그대로 유지)
 
-    충전 완전 중단 (>chg_gap_s/chg_gap_factor, 기본 600s/50×)
-      → 충전 phase 행만 제거, 방전 HI 보존.
+    충전 완전 중단 (사이클 내 dt.max() > chg_gap_s/chg_gap_factor, 기본 600s/50×)
+      → 해당 사이클 충전 phase 행 전체 제거, 방전 HI 보존. (드묾 — 사이클 단위 유지)
 
-    충전 CC 프로토콜 전환 갭 (>chg_seg_gap_s/chg_seg_gap_factor, 기본 120s/30×)
-      → 행 유지, `chg_gap_seg = True` 플래그 기록.
-      → hi_correlation 에서 이 컬럼을 읽어 세그먼트 HI만 NaN 처리.
-      → 전역 HI(에너지, 전압평균 등)는 추세 일관성이 있으므로 계산.
+    충전 CC 프로토콜 전환 갭 (개별 dt > chg_seg_gap_s/chg_seg_gap_factor, 기본 120s/30×)
+      → **행 단위 판정(2026-08-05 재설계)**: 사이클 전체가 아니라 그 dt가 걸리는
+      바로 그 행에만 `chg_gap_seg = True` 플래그를 기록한다.
+      과거엔 사이클 내 dt 최댓값 단 하나만으로 사이클 전체에 플래그가 퍼졌었다 —
+      MIT batch2는 사이클당 수백 개 행 중 단 1곳(~306초 구조적 공백)만 커도
+      그 사이클 전체가 걸려, 사이클의 99.94%가 이 플래그로 걸리고
+      hi_correlation.py가 그 사이클들의 충전 세그먼트 HI 전체를 스킵하는 문제가
+      있었다(docs/DATASET_ANOMALIES.md "충전 단절의 배치별 편중" 참고).
+      hi_correlation.py는 이제 플래그 찍힌 행의 dt만 국소적으로 정상값(중앙값)으로
+      대체해 누적적분 오염을 막고, 나머지 행은 그대로 세그먼트 HI 계산에 쓴다 —
+      행 자체의 V/I 값은 유지되므로 정보 손실이 그 한 행의 시간정보로 국한된다.
 
     Returns:
         (df_clean,
-         n_dis_removed,    dis_removed_cycles,
-         n_chg_rows,       chg_all_cycles,
-         n_chg_seg_marked, chg_seg_cycles)
+         n_dis_removed,      dis_removed_cycles,
+         n_chg_rows_removed, chg_all_cycles,
+         n_chg_seg_rows,     chg_seg_cycles)
+         # n_chg_seg_rows: 플래그 찍힌 "행" 개수(사이클 수 아님 — 명칭 하위호환용 유지)
+         # chg_seg_cycles: 그 행들이 속한 사이클 번호 집합(리포팅용)
     """
-    dis_bad:     set = set()
-    chg_bad_all: set = set()   # 완전 중단 → 행 삭제
-    chg_bad_seg: set = set()   # CC 전환 갭 → 플래그만
+    dis_bad:            set = set()
+    chg_bad_all:        set = set()   # 완전 중단 → 사이클 단위 행 삭제 (그대로)
+    chg_seg_row_index:  set = set()   # CC 전환 갭 → 행 단위 인덱스(원본 df 인덱스)
+    chg_seg_cycles:     set = set()   # 리포팅용: 위 행들이 속한 사이클 번호
 
     for cyc, grp in df.groupby("cycle"):
-        # ── 방전 단절 검사 ───────────────────────────────────────────────
+        # ── 방전 단절 검사 (사이클 단위, 기존과 동일) ────────────────────
         dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
         if len(dis) > 5:
             t      = dis["time_s"].values.astype(float)
@@ -167,19 +190,23 @@ def _remove_dt_gap_cycles(df: pd.DataFrame,
                     dis_bad.add(cyc)
                     continue          # 방전 불량 → 충전 검사 불필요
 
-        # ── 충전 단절 검사 (두 단계) ─────────────────────────────────────
+        # ── 충전 단절 검사 (①완전중단=사이클 단위 / ②CC전환갭=행 단위) ────
         chg = grp[grp["phase"] == "charge"].sort_values("time_s")
         if len(chg) > 5:
             tc      = chg["time_s"].values.astype(float)
             dtc     = np.clip(np.diff(tc, prepend=tc[0]), 0, None)
             dtc_pos = dtc[dtc > 0]
             if len(dtc_pos) > 0:
-                dtc_med = float(np.median(dtc_pos))
-                dtc_max = float(dtc.max())
-                if dtc_max > max(chg_gap_s, dtc_med * chg_gap_factor):
-                    chg_bad_all.add(cyc)          # 완전 중단
-                elif dtc_max > max(chg_seg_gap_s, dtc_med * chg_seg_gap_factor):
-                    chg_bad_seg.add(cyc)          # CC 전환 갭
+                dtc_med     = float(np.median(dtc_pos))
+                full_thresh = max(chg_gap_s, dtc_med * chg_gap_factor)
+                seg_thresh  = max(chg_seg_gap_s, dtc_med * chg_seg_gap_factor)
+                if float(dtc.max()) > full_thresh:
+                    chg_bad_all.add(cyc)          # ① 완전 중단(사이클 단위)
+                else:
+                    bad_pos = np.where(dtc > seg_thresh)[0]
+                    if len(bad_pos) > 0:
+                        chg_seg_row_index.update(chg.index[bad_pos].tolist())
+                        chg_seg_cycles.add(cyc)   # ② CC 전환 갭(행 단위)
 
     # 방전 단절: 전체 사이클 제거
     df_clean = df[~df["cycle"].isin(dis_bad)].copy()
@@ -190,16 +217,17 @@ def _remove_dt_gap_cycles(df: pd.DataFrame,
     if n_chg_rows > 0:
         df_clean = df_clean[~chg_mask].copy()
 
-    # CC 전환 갭: chg_gap_seg 플래그 컬럼 기록 (hi_correlation 에서 읽음)
+    # CC 전환 갭: chg_gap_seg 플래그를 그 "행"에만 기록 (사이클 전체 아님)
     df_clean["chg_gap_seg"] = False
-    if chg_bad_seg:
-        df_clean.loc[df_clean["cycle"].isin(chg_bad_seg), "chg_gap_seg"] = True
+    if chg_seg_row_index:
+        row_mask = df_clean.index.isin(chg_seg_row_index)
+        df_clean.loc[row_mask, "chg_gap_seg"] = True
 
     df_clean = df_clean.reset_index(drop=True)
     return (df_clean,
             len(dis_bad), dis_bad,
             n_chg_rows, chg_bad_all,
-            len(chg_bad_seg), chg_bad_seg)
+            len(chg_seg_row_index), chg_seg_cycles)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,7 +448,7 @@ def _preprocess_worker(args) -> tuple:
      dis_gap_s, dis_gap_factor,
      chg_gap_s, chg_gap_factor,
      chg_seg_gap_s, chg_seg_gap_factor,
-     shape_sigma, shape_window, shape_grid) = args
+     shape_sigma, shape_window, shape_grid, skip_shape) = args
     src = Path(src_path_str)
     dst = Path(dst_path_str)
     try:
@@ -447,9 +475,16 @@ def _preprocess_worker(args) -> tuple:
         df, n_vend,    vend_cycles                                         = _remove_bad_vend_cycles(df, vend_min)
         _cell_id = meta.get("cell_id", src.stem)
         _dataset = meta.get("dataset", "")
-        df, n_shape,   shape_cycles                                        = _remove_shape_outlier_cycles(
-            df, shape_sigma, shape_window, shape_grid,
-            cell_id=_cell_id, dataset=_dataset)
+        if skip_shape:
+            # [필터7] 완전 비활성화 — 기존 동작(자동 z-score + KNOWN_SHAPE_ANOMALIES
+            # 하드코딩 목록)과 분리된 별도 경로. shape_sigma를 아무리 키워도
+            # KNOWN_SHAPE_ANOMALIES는 무조건 제거되므로, "완전히 끔"을 보장하려면
+            # 이 분기로 _remove_shape_outlier_cycles 호출 자체를 건너뛰어야 한다.
+            n_shape, shape_cycles = 0, set()
+        else:
+            df, n_shape, shape_cycles                                      = _remove_shape_outlier_cycles(
+                df, shape_sigma, shape_window, shape_grid,
+                cell_id=_cell_id, dataset=_dataset)
 
         n_cycles_removed = n_empty + n_dt_dis + n_rolling + n_vend + n_shape
         n_after          = df["cycle"].nunique()
@@ -504,7 +539,7 @@ def process_dir(src_dir: Path, dst_dir: Path,
                 chg_gap_s: float, chg_gap_factor: float,
                 chg_seg_gap_s: float, chg_seg_gap_factor: float,
                 shape_sigma: float, shape_window: int, shape_grid: int,
-                n_workers: int = 1) -> list:
+                n_workers: int = 1, skip_shape: bool = False) -> list:
     """src_dir PKL → 이상 사이클 제거 → dst_dir 저장 → records 반환."""
     pkls = sorted(p for p in src_dir.glob("*.pkl")
                   if p.stem not in ("README",))
@@ -519,7 +554,7 @@ def process_dir(src_dir: Path, dst_dir: Path,
          dis_gap_s, dis_gap_factor,
          chg_gap_s, chg_gap_factor,
          chg_seg_gap_s, chg_seg_gap_factor,
-         shape_sigma, shape_window, shape_grid)
+         shape_sigma, shape_window, shape_grid, skip_shape)
         for p in pkls
     ]
     records = []
@@ -587,6 +622,10 @@ def main():
                         help="[필터7] 기준 곡선 rolling median 윈도우 (기본: 11)")
     parser.add_argument("--shape-grid",   type=int,   default=100,
                         help="[필터7] q_frac 보간 격자 점 수 (기본: 100)")
+    parser.add_argument("--skip-shape",   action="store_true",
+                        help="[필터7] 완전 비활성화 — shape_sigma/KNOWN_SHAPE_ANOMALIES "
+                             "무관하게 호출 자체를 건너뜀(기존 --shape-sigma 완화와 분리된 "
+                             "별도 옵션). 실험용 — 기본은 기존 동작 그대로(꺼짐=False)")
     # 공통
     parser.add_argument("--workers",  type=int, default=min(4, os.cpu_count() or 1),
                         help="병렬 프로세스 수 (기본: 4)")
@@ -607,15 +646,24 @@ def main():
     print(f"            충전 CC전환갭: {csgs}s×{csgf}  (chg_gap_seg 플래그)")
     print(f"  [필터5] Rolling Median: window={w}, sigma={s}, min_std={m}")
     print(f"  [필터6] 종지전압 하한 : vend_min={vm}V")
-    print(f"  [필터7] 형상 편차     : shape_sigma={ss}, window={sw}, grid={sg}")
+    if args.skip_shape:
+        print(f"  [필터7] 형상 편차     : 비활성화(--skip-shape) — shape_sigma/known 무시")
+    else:
+        print(f"  [필터7] 형상 편차     : shape_sigma={ss}, window={sw}, grid={sg}")
+
+    # --skip-shape: 필터7 있는 기존 clean/과 절대 같은 경로에 안 겹치도록 별도
+    # 루트(clean_noshape/)에 저장 — 실수로 서로를 덮어쓰는 걸 방지.
+    postprocess_root = (POSTPROCESS_ROOT.parent / "clean_noshape") if args.skip_shape else POSTPROCESS_ROOT
+    if args.skip_shape:
+        print(f"  출력 경로            : {postprocess_root}  (--skip-shape로 기존 clean/과 분리)")
 
     all_records = []
     SAMPLE_IDS  = {"MIT": "b1c0", "HUST": "1-1"}
     before_caps: dict = {}
 
     if args.dataset in ("mit", "all"):
-        mit_src = PROJECT_ROOT / "_1_data_unified" / "MIT"
-        mit_dst = POSTPROCESS_ROOT / "MIT"
+        mit_src = _resolve_unified_src("MIT")
+        mit_dst = postprocess_root / "MIT"
         if not mit_src.exists():
             print(f"\n[SKIP] MIT 폴더 없음: {mit_src}")
         else:
@@ -625,11 +673,11 @@ def main():
             all_records.extend(
                 process_dir(mit_src, mit_dst, w, s, m, vm,
                             dgs, dgf, cgs, cgf, csgs, csgf,
-                            ss, sw, sg, args.workers))
+                            ss, sw, sg, args.workers, args.skip_shape))
 
     if args.dataset in ("hust", "all"):
-        hust_src = PROJECT_ROOT / "_1_data_unified" / "HUST"
-        hust_dst = POSTPROCESS_ROOT / "HUST"
+        hust_src = _resolve_unified_src("HUST")
+        hust_dst = postprocess_root / "HUST"
         if not hust_src.exists():
             print(f"\n[SKIP] HUST 폴더 없음: {hust_src}")
         else:
@@ -639,7 +687,7 @@ def main():
             all_records.extend(
                 process_dir(hust_src, hust_dst, w, s, m, vm,
                             dgs, dgf, cgs, cgf, csgs, csgf,
-                            ss, sw, sg, args.workers))
+                            ss, sw, sg, args.workers, args.skip_shape))
 
     if not all_records:
         print("\n처리할 파일이 없습니다.")
@@ -666,7 +714,7 @@ def main():
     print(f"  [필터3] rest 0전류 제거  : {total_rest_rows} 행")
     print(f"  [필터4] 방전 단절 제거   : {total_dt_dis} 사이클")
     print(f"  [필터4] 충전 완전중단    : {total_chg_clean} 행 삭제 (사이클 유지)")
-    print(f"  [필터4] 충전 CC전환갭    : {total_chg_seg} 사이클 → chg_gap_seg 플래그")
+    print(f"  [필터4] 충전 CC전환갭    : {total_chg_seg} 행 → chg_gap_seg 플래그 (행 단위, 사이클 유지)")
     print(f"  [필터5] Rolling 제거     : {total_rolling} 사이클")
     print(f"  [필터6] v_end 제거       : {total_vend} 사이클")
     print(f"  [필터7] 형상 편차 제거   : {total_shape} 사이클")
@@ -690,24 +738,26 @@ def main():
                   f"{row.n_cycles_before} → {row.n_cycles_after}  "
                   f"(-{row.n_removed}  [{',  '.join(parts)}])")
 
+    _report_suffix = "_noshape" if args.skip_shape else ""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _OUTPUTS_ROOT.mkdir(parents=True, exist_ok=True)
-    report_path = _OUTPUTS_ROOT / "cleaning_report.csv"
+    report_path = _OUTPUTS_ROOT / f"cleaning_report{_report_suffix}.csv"
     df_report.to_csv(report_path, index=False)
     print(f"\n  리포트: {report_path}")
 
-    summary_path = _OUTPUTS_ROOT / "cleaning_summary.txt"
+    summary_path = _OUTPUTS_ROOT / f"cleaning_summary{_report_suffix}.txt"
     _write_cleaning_summary(
         df_report,
         params=dict(window=w, sigma=s, min_std=m, vend_min=vm,
-                    shape_sigma=ss, shape_window=sw, shape_grid=sg),
+                    shape_sigma=ss, shape_window=sw, shape_grid=sg,
+                    skip_shape=args.skip_shape),
         out_path=summary_path,
     )
 
     # 대표 셀 before/after 플롯
     after_caps: dict = {}
     for ds, (cell_id, *_) in before_caps.items():
-        after_caps[ds] = _cap_series(POSTPROCESS_ROOT / ds / f"{cell_id}.pkl")
+        after_caps[ds] = _cap_series(postprocess_root / ds / f"{cell_id}.pkl")
     _plot_preprocess_samples(OUTPUT_DIR, before_caps, after_caps, df_report)
 
 
@@ -746,7 +796,8 @@ def _write_cleaning_summary(df_report: pd.DataFrame,
         "파라미터:",
         f"  [필터5] window={params['window']}, sigma={params['sigma']}, min_std={params['min_std']}",
         f"  [필터6] vend_min={params['vend_min']}V",
-        f"  [필터7] shape_sigma={params['shape_sigma']}, shape_window={params['shape_window']}, shape_grid={params['shape_grid']}",
+        (f"  [필터7] 비활성화(--skip-shape)" if params.get("skip_shape")
+         else f"  [필터7] shape_sigma={params['shape_sigma']}, shape_window={params['shape_window']}, shape_grid={params['shape_grid']}"),
         "=" * 78,
         "",
         "[전체 요약]",
@@ -758,7 +809,7 @@ def _write_cleaning_summary(df_report: pd.DataFrame,
         f"  [필터3] rest 0전류 제거   : {total_rest_rows:>8,}행   (행 단위, 사이클 유지)",
         f"  [필터4] 방전 단절 제거    : {total_dt_dis:>8,}개   ({pct(total_dt_dis)})",
         f"  [필터4] 충전 완전중단 삭제: {total_chg_clean:>8,}행   (행 단위, 사이클 유지)",
-        f"  [필터4] 충전 CC갭 플래그  : {total_chg_seg:>8,}개   (플래그만, 제거 아님)",
+        f"  [필터4] 충전 CC갭 플래그  : {total_chg_seg:>8,}행   (행 단위, 플래그만, 제거 아님)",
         f"  [필터5] Rolling Median    : {total_rolling:>8,}개   ({pct(total_rolling)})",
         f"  [필터6] 종지전압(v_end)   : {total_vend:>8,}개   ({pct(total_vend)})",
         f"  [필터7] 형상 편차(shape)  : {total_shape:>8,}개   ({pct(total_shape)})",

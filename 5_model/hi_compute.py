@@ -47,7 +47,7 @@ def _build_vq_curve(vs, ims, dts, n_bins=None):
     n = len(vs)
     if n_bins is None:
         n_bins = max(8, min(30, n // 3))
-    if q_tot < 0.005 or n < 8 or n_bins < 4:
+    if q_tot < 0.005 or n < 6 or n_bins < 4:
         empty = np.full(max(n_bins, 1), np.nan)
         return empty, empty, empty, q_tot
     dq_b = q_tot / n_bins
@@ -75,7 +75,7 @@ def _build_vq_curve(vs, ims, dts, n_bins=None):
 def _build_ica_seg(vs, ims, dts):
     """V-빈 dQ/dV 곡선 (ICA) 스무딩. Returns (vmids, dqdv_sm)."""
     vr = float(vs.max() - vs.min()) if len(vs) > 1 else 0.0
-    if vr < 0.01 or len(vs) < 8:
+    if vr < 0.01 or len(vs) < 6:
         return np.array([]), np.array([])
     v_lo = float(vs.min()) - 0.002
     v_hi = float(vs.max()) + 0.002
@@ -126,7 +126,7 @@ def _peak_fwhm_asym(arr, pk_idx, x_arr):
 
 def _seg_morph_curves(vs, ims, dts):
     """세그먼트 → (V-t, V-Q, V-E) 3곡선을 [0,1] 정규화 그리드로 보간. Returns (vt, vq, ve)."""
-    if len(vs) < 8:
+    if len(vs) < 6:
         return None, None, None
     t_cum = np.cumsum(dts)
     q_cum = np.cumsum(np.abs(ims) * dts) / 3600.0
@@ -362,7 +362,7 @@ def stat_v_detrended_std(w):
 def _vd(w):
     """유효 dV/dQ 값 (q_tot>0.005 & finite, len>=3) 또는 None."""
     qm, v_sm, dvdq_sm, q_tot = w.vq
-    if len(w.v) < 8 or q_tot <= 0.005 or not np.any(np.isfinite(dvdq_sm)):
+    if len(w.v) < 6 or q_tot <= 0.005 or not np.any(np.isfinite(dvdq_sm)):
         return None
     fin = np.isfinite(dvdq_sm); vd = dvdq_sm[fin]
     return (qm, dvdq_sm, fin, vd) if len(vd) >= 3 else None
@@ -421,7 +421,7 @@ def diff_dqdv_area(w):
 def diff_v_trend_slope(w):
     """D10 구간 시작→끝 선형 기울기 ΔV/Δt_total [V/s]."""
     dt_tot = float(np.sum(w.dt))
-    return float(w.v[-1] - w.v[0]) / dt_tot if (len(w.v) >= 8 and dt_tot >= 1.0) else np.nan
+    return float(w.v[-1] - w.v[0]) / dt_tot if (len(w.v) >= 6 and dt_tot >= 1.0) else np.nan
 
 @hi
 def diff_dqdv_peak_asym(w):
@@ -456,7 +456,7 @@ def diff_dvdq_ent(w):
 @hi
 def diff_dv_di_seg(w):
     """D15 |ΔV/ΔI| 동적 저항. CC 구간(ΔI≈0) → 0.0 폴백."""
-    if len(w.v) < 8: return np.nan
+    if len(w.v) < 6: return np.nan
     dv = np.diff(w.v); di = np.diff(w.ai); dta = w.dt[1:]
     valid = (np.abs(di) > 0.01) & (dta < 2.0) & (dta > 0)
     if valid.sum() == 0:
@@ -502,7 +502,7 @@ def diff_dvdq_peak_q(w):
     """D18 max|dV/dQ| Q 위치, q_tot으로 정규화."""
     qm, v_sm, dvdq_sm, q_tot = w.vq
     fin = np.isfinite(dvdq_sm)
-    if len(w.v) < 8 or q_tot <= 0.005 or fin.sum() < 3: return np.nan
+    if len(w.v) < 6 or q_tot <= 0.005 or fin.sum() < 3: return np.nan
     return float(qm[fin][int(np.argmax(np.abs(dvdq_sm[fin])))]) / q_tot
 
 @hi
@@ -510,7 +510,7 @@ def diff_dvdq_flat_q(w):
     """D19 min|dV/dQ| Q 위치 (평탄점), q_tot으로 정규화."""
     qm, v_sm, dvdq_sm, q_tot = w.vq
     fin = np.isfinite(dvdq_sm)
-    if len(w.v) < 8 or q_tot <= 0.005 or fin.sum() < 3: return np.nan
+    if len(w.v) < 6 or q_tot <= 0.005 or fin.sum() < 3: return np.nan
     return float(qm[fin][int(np.argmin(np.abs(dvdq_sm[fin])))]) / q_tot
 
 @hi
@@ -528,7 +528,7 @@ def diff_dqdv_area_asym(w):
 
 def _plateau(w):
     """공유: (qm, v_sm, dvdq_sm, q_tot, fin_b, plt_mask, dq_b, n_b) 또는 None."""
-    if len(w.v) < 8: return None
+    if len(w.v) < 6: return None
     qm, v_sm, dvdq_sm, q_tot = w.vq
     if q_tot < 0.005: return None
     dq_b     = float(qm[1] - qm[0]) if len(qm) > 1 else 1.0
@@ -595,14 +595,14 @@ def lfp_v_dev_mid(w):
 
 @hi
 def lfp_v_flatness(w):
-    if len(w.v) < 8: return np.nan
+    if len(w.v) < 6: return np.nan
     if w.vq[3] < 0.005: return np.nan
     v_rng_raw = float(w.v.max() - w.v.min())
     return 1.0 - float(np.std(w.v)) / v_rng_raw if v_rng_raw > 1e-4 else np.nan
 
 @hi
 def lfp_delta_v_rms(w):
-    if len(w.v) < 8 or w.vq[3] < 0.005 or len(w.v) <= 1: return np.nan
+    if len(w.v) < 6 or w.vq[3] < 0.005 or len(w.v) <= 1: return np.nan
     slow = w.dt[1:] >= 1.0
     if slow.sum() == 0: return np.nan
     dv = np.diff(w.v)[slow]
@@ -645,7 +645,7 @@ def lfp_inflect_q_frac(w):
 
 @hi
 def lfp_v_concavity(w):
-    if len(w.v) < 8 or w.vq[3] < 0.005 or len(w.v) < 10: return np.nan
+    if len(w.v) < 6 or w.vq[3] < 0.005: return np.nan
     den = float(np.sum(w.ai * w.dt))
     v_mean = float(np.sum(w.v * w.ai * w.dt)) / den if den > 1e-9 else float(np.mean(w.v))
     return v_mean - (float(w.v[0]) + float(w.v[-1])) / 2.0
@@ -661,14 +661,14 @@ def lfp_phase_entry_dvdq(w):
 
 @hi
 def lfp_v_q_pearson(w):
-    if len(w.v) < 8 or w.vq[3] < 0.005: return np.nan
+    if len(w.v) < 6 or w.vq[3] < 0.005: return np.nan
     if np.std(w.v) > 1e-6 and np.std(w.q_rel) > 1e-9:
         return float(np.corrcoef(w.v, w.q_rel)[0, 1])
     return np.nan
 
 @hi
 def lfp_ica_peak_cnt(w):
-    if len(w.v) < 8 or w.vq[3] < 0.005: return np.nan
+    if len(w.v) < 6 or w.vq[3] < 0.005: return np.nan
     vmids, dqdv = w.ica
     if len(vmids) < 4: return np.nan
     try:
@@ -847,11 +847,15 @@ def benchmark_cost(samples, reps: int = 20) -> tuple:
 
 if __name__ == "__main__":
     import pandas as pd
+    import sys
     from pathlib import Path
     _root = Path(__file__).resolve().parent.parent
-    _pkl  = next((_root / "_4_data_hi" / "MIT").glob("*.pkl"), None)
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    from data_directories import DATA_4_HI_ROOT  # noqa: E402
+    _pkl  = next((DATA_4_HI_ROOT / "MIT").glob("*.pkl"), None)
     if _pkl:
-        import pickle, sys
+        import pickle
         sys.path.insert(0, str(_root / "5_model"))
         with open(_pkl, "rb") as f: df = pickle.load(f)
         cyc = df.iloc[9]

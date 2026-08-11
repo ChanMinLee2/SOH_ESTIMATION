@@ -36,6 +36,7 @@ from tqdm.auto import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT  # noqa: E402
 
 # HI 컬럼 순서 (segment_dataset._NATIVE_HI_COLS 와 동일해야 함)
 _STAT_EXCL = {"q_abs", "energy_seg"}
@@ -859,8 +860,8 @@ def _cache_exists(out_dir: Path) -> bool:
 def main() -> None:
     args = _parse_args()
 
-    out_dir   = PROJECT_ROOT / "_4_data_hi" / "test_rs"
-    clean_dir = PROJECT_ROOT / "_4_data_hi" / "clean"
+    out_dir   = DATA_4_HI_ROOT / "test_rs"
+    clean_dir = DATA_4_HI_ROOT / "clean"
 
     # ── --force: 기존 출력 삭제 ──────────────────────────────────────────────
     if args.force and out_dir.exists():

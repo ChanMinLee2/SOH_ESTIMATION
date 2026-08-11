@@ -24,6 +24,7 @@ _4_data_hi/clean/MIT/, _4_data_hi/clean/HUST/ 전체 pkl 무결성 검사.
 """
 
 import pickle
+import sys
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -33,8 +34,11 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MIT_DIR  = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
-HUST_DIR = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT  # noqa: E402
+MIT_DIR  = DATA_4_HI_ROOT / "clean" / "MIT"
+HUST_DIR = DATA_4_HI_ROOT / "clean" / "HUST"
 OUT_DIR  = Path(__file__).resolve().parent / "outputs"
 
 EXPECTED_COLS = {"cell_id", "cycle", "segment_id", "time_s",

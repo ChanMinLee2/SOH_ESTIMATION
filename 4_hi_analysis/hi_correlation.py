@@ -94,10 +94,16 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STEP_DIR     = Path(__file__).resolve().parent
-MIT_DIR      = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
-HUST_DIR     = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
-CACHE_PATH   = STEP_DIR / "hi_features.pkl"
-HI_ROOT      = PROJECT_ROOT / "_4_data_hi"
+# 2026-08-08: pkl 데이터(_4_data_hi 전체, 4_hi_analysis의 캐시 pkl)만 D로 이동 — STEP_DIR은
+# hi_segment_viz.py 등 실제 코드 파일 위치 조회에도 쓰이므로(아래 spec_from_file_location)
+# 그대로 두고, data_directories.py의 공유 상수를 쓴다.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT, PKL_CACHE_ROOT  # noqa: E402
+MIT_DIR      = DATA_4_HI_ROOT / "clean" / "MIT"
+HUST_DIR     = DATA_4_HI_ROOT / "clean" / "HUST"
+CACHE_PATH   = PKL_CACHE_ROOT / "hi_features.pkl"
+HI_ROOT      = DATA_4_HI_ROOT
 
 # common 패키지를 subprocess에서도 import 가능하게
 if str(PROJECT_ROOT) not in sys.path:
@@ -1990,14 +1996,26 @@ def _extract_one_cell(args) -> tuple:
             vc  = chg_grp["voltage_V"].values.astype(float)
             ic  = np.abs(chg_grp["current_A"].values.astype(float))
             dtc = np.clip(np.diff(tc, prepend=tc[0]), 0, None)
+
+            # chg_gap_seg=True인 행은 preprocess.py 필터4가 그 지점의 dt가
+            # 비정상적으로 크다고(CC 전환 갭 등) 판정한 곳이다(2026-08-05부터
+            # 행 단위 판정 — 사이클 전체가 아니라 그 행 하나만 플래그된다).
+            # 그 큰 dt를 누적적분(qcc)에 그대로 넣으면 그 지점 "이후" 값까지
+            # 전부 오염되므로, 이 행의 dt만 정상 구간 중앙값으로 대체한다 —
+            # V/I 값 자체는 그대로 쓰므로 정보 손실은 이 한 행의 시간정보로
+            # 국한된다(예전엔 chg_gap_seg가 하나라도 있으면 세그먼트 HI 계산
+            # 전체를 스킵했다 — MIT batch2 99.94% 사이클이 이렇게 날아갔었다).
+            if "chg_gap_seg" in chg_grp.columns:
+                _gap_mask = chg_grp["chg_gap_seg"].to_numpy(dtype=bool)
+                if _gap_mask.any():
+                    _dtc_pos = dtc[dtc > 0]
+                    _dtc_med = float(np.median(_dtc_pos)) if len(_dtc_pos) else 0.0
+                    dtc = np.where(_gap_mask, _dtc_med, dtc)
+
             qcc = np.cumsum(ic * dtc) / 3600.0
             q_tc = float(qcc[-1])
 
             _chg_incomplete = q_tc < cap * 0.60
-            _chg_gap_seg = (
-                bool(chg_grp["chg_gap_seg"].any())
-                if "chg_gap_seg" in chg_grp.columns else False
-            )
 
             if q_tc > 0.05 and not _chg_incomplete:
                 # G04 r_trans_est: CC→CV 전환 시점 ΔV/ΔI [mΩ]
@@ -2020,8 +2038,9 @@ def _extract_one_cell(args) -> tuple:
                 _, c_pk_h, _, _ = _global_ica(vc, ic, dtc)
                 row["chg_ica_peak1_h"] = c_pk_h
 
-                # 충전 세그먼트 HI (CC 전환 갭 없는 경우만, segmenter 기반)
-                if not _chg_gap_seg and q_tc >= 0.05:
+                # 충전 세그먼트 HI (segmenter 기반) — CC 전환 갭이 있던 행은 위에서
+                # 이미 dtc를 정상값으로 대체해뒀으므로 더 이상 전체 스킵할 필요 없음.
+                if q_tc >= 0.05:
                     _empty = np.empty(0, dtype=float)
                     # --exclude-cv: 세그먼터에 넘기는 사본만 CV 시작 지점에서 절단.
                     # ce/cv_q_frac/cv_time_frac 등 위의 전역 충전 HI는 원본(vc/ic/dtc/qcc)을
@@ -2285,7 +2304,25 @@ def _qfw_tag(axis_cfg: dict) -> str:
     n1 = int(round(axis_cfg.get("n1", 0.4) * 100))
     n2 = int(round(axis_cfg.get("n2", 0.2) * 100))
     ns = int(axis_cfg.get("n_samples", 4))
-    return f"n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix(axis_cfg)}"
+    # 2026-08-10: min_pts 기본값(10)이 아니면 접미사 — 세그먼트 최소 포인트 임계값이
+    # 달라지면 완전히 다른 데이터이므로 반드시 다른 경로에 저장(confound 방지, §4.6).
+    min_pts = int(axis_cfg.get("min_pts", 10))
+    minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
+    return f"n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix(axis_cfg)}{minpts_sfx}"
+
+
+def _qfref_tag(axis_cfg: dict) -> str:
+    """q_frac_ref 파라미터 → 파일/디렉터리 식별 태그.
+
+    n1/n2/N은 q_frac_wide와 동일 규칙(부모 클래스 파라미터 상속) + ref_lag/noise_amp/
+    noise_period를 덧붙여 lag·노이즈 파라미터가 다르면 반드시 다른 경로에 저장되게 한다
+    (docs/SOC.md §6 Phase 3 "데이터 경로 분리 확인" — §4.6 confound 방지)."""
+    base = _qfw_tag(axis_cfg)
+    lag = int(axis_cfg.get("ref_lag", 0))
+    noise_pct = int(round(axis_cfg.get("noise_amp", 0.03) * 100))
+    mode = str(axis_cfg.get("noise_mode", "ou"))
+    period = int(round(axis_cfg.get("noise_period_cycles", 200.0)))
+    return f"{base}_lag-{lag}_noise-{noise_pct}%_{mode}-{period}"
 
 
 def _qabs_tag(axis_cfg: dict) -> str:
@@ -2350,11 +2387,15 @@ def load_or_extract(
     axis: str = "qfrac",
     axis_cfg: dict | None = None,
     exclude_cv: bool = False,
+    no_shape: bool = False,
 ) -> pd.DataFrame:
     """캐시가 있으면 로드, 없으면 전체 추출 후 저장.
 
     exclude_cv=True: 결과 캐시/저장 경로에 '_ccOnly' 접미사를 붙여 CV 포함
     버전과 별도로 저장한다 (segmenter/axis_cfg 자체는 변경 없음, load_all 참고).
+    no_shape=True: preprocess.py --skip-shape로 만든 _4_data_hi/clean_noshape/를
+    입력으로 쓰고(main()에서 MIT_DIR/HUST_DIR을 그쪽으로 재지정), 결과 캐시/저장
+    경로에 '_noshape' 접미사를 붙여 필터7 있는 기본 버전과 절대 안 겹치게 한다.
     """
     axis_cfg = dict(axis_cfg or {})
 
@@ -2363,6 +2404,10 @@ def load_or_extract(
         _tag      = _qfw_tag(axis_cfg)
         _cache    = cache_path.parent / f"hi_features_{_tag}.pkl"
         _axis_dir = f"q_frac_wide/{_tag}"
+    elif axis == "q_frac_ref":
+        _tag      = _qfref_tag(axis_cfg)
+        _cache    = cache_path.parent / f"hi_features_qfref_{_tag}.pkl"
+        _axis_dir = f"q_frac_ref/{_tag}"
     elif axis == "q_abs":
         _tag      = _qabs_tag(axis_cfg)
         _cache    = cache_path.parent / f"hi_features_qabs_{_tag}.pkl"
@@ -2382,6 +2427,10 @@ def load_or_extract(
     if exclude_cv:
         _cache    = _cache.with_name(_cache.stem + "_ccOnly.pkl")
         _axis_dir = f"{_axis_dir}_ccOnly"
+
+    if no_shape:
+        _cache    = _cache.with_name(_cache.stem + "_noshape.pkl")
+        _axis_dir = f"{_axis_dir}_noshape"
 
     if not force and _cache.exists():
         print(f"  캐시 로드: {_cache}")
@@ -2651,6 +2700,8 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
     # 데이터 저장 경로 태그 (load_or_extract 와 동일 규칙)
     if axis == "q_frac_wide":
         _axis_dir = f"q_frac_wide/{_qfw_tag(axis_cfg)}"
+    elif axis == "q_frac_ref":
+        _axis_dir = f"q_frac_ref/{_qfref_tag(axis_cfg)}"
     elif axis == "q_abs":
         _axis_dir = f"q_abs/{_qabs_tag(axis_cfg)}"
     elif axis == "vqslope":
@@ -2662,6 +2713,8 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
     _exclude_cv = bool(getattr(args, "exclude_cv", False))
     if _exclude_cv:
         _axis_dir = f"{_axis_dir}_ccOnly"
+    if bool(getattr(args, "skip_shape", False)):
+        _axis_dir = f"{_axis_dir}_noshape"
 
     _is_rand = bool(axis_cfg.get("random_segment", False))
     w = 64
@@ -2738,16 +2791,45 @@ def main():
                         help="q_abs: mid 존 끝 (정격용량 비율, 기본 0.5). --axis-config 대체")
     parser.add_argument("--seg-len",   type=float, default=None, dest="seg_len",
                         help="q_abs: 세그먼트 길이 (정격용량 비율, 기본 0.15). --axis-config 대체")
+    # q_frac_ref 전용 단축 인자 (n1/n2/n_samples는 q_frac_wide와 공유해 위 인자 그대로 씀)
+    parser.add_argument("--ref-lag",   type=int, default=None, dest="ref_lag",
+                        help="q_frac_ref: 레퍼런스 지연 사이클 수 (기본 0=q_frac_wide와 동등). --axis-config 대체")
+    parser.add_argument("--noise-amp", type=float, default=None, dest="noise_amp",
+                        help="q_frac_ref: 레퍼런스 노이즈 최대 진폭, 분수 (기본 0.03=±3%%). --axis-config 대체")
+    parser.add_argument("--noise-mode", type=str, default=None, dest="noise_mode",
+                        choices=["ou", "sine"],
+                        help="q_frac_ref: 노이즈 드리프트 방식 ou(기본, bounded random walk)|"
+                             "sine(구버전, 결정론적). --axis-config 대체")
+    parser.add_argument("--noise-period", type=float, default=None, dest="noise_period_cycles",
+                        help="q_frac_ref: 노이즈 평균회귀 특성시간/파장(사이클 수, 기본 200). --axis-config 대체")
+    parser.add_argument("--min-pts", type=int, default=None, dest="min_pts",
+                        help="q_frac_wide/q_frac_ref: 세그먼트 최소 포인트 수(기본 10). "
+                             "기본값과 다르면 '_minptsN' 접미사 경로에 별도 저장(§4.6 confound 방지). "
+                             "--axis-config 대체")
     parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
                         help="충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간 제외 "
                              "(segmenter는 무수정, 세그먼터에 넘기는 충전 배열만 CV 시작 지점에서 절단; "
                              "결과는 '_ccOnly' 접미사 경로에 별도 저장)")
+    parser.add_argument("--skip-shape", action="store_true", dest="skip_shape",
+                        help="preprocess.py --skip-shape로 만든 _4_data_hi/clean_noshape/를 "
+                             "입력으로 사용 (MIT_DIR/HUST_DIR을 그쪽으로 재지정). 결과는 "
+                             "'_noshape' 접미사 경로에 별도 저장 — 필터7 있는 기본 데이터와 "
+                             "절대 안 겹침")
     args = parser.parse_args()
+
+    if args.skip_shape:
+        global MIT_DIR, HUST_DIR
+        MIT_DIR  = DATA_4_HI_ROOT / "clean_noshape" / "MIT"
+        HUST_DIR = DATA_4_HI_ROOT / "clean_noshape" / "HUST"
+        print(f"[--skip-shape] 입력 경로 재지정: MIT_DIR={MIT_DIR}  HUST_DIR={HUST_DIR}")
 
     # 단축 인자 → axis_config 자동 구성 (PowerShell JSON 우회)
     if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
             or args.mode is not None or args.random_segment or args.seg_len_pts is not None
-            or args.mid_start is not None or args.mid_end is not None or args.seg_len is not None):
+            or args.mid_start is not None or args.mid_end is not None or args.seg_len is not None
+            or args.ref_lag is not None or args.noise_amp is not None
+            or args.noise_mode is not None or args.noise_period_cycles is not None
+            or args.min_pts is not None):
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
         if args.n2        is not None: _quick["n2"]        = args.n2
@@ -2758,6 +2840,11 @@ def main():
         if args.mid_start is not None: _quick["mid_start"] = args.mid_start
         if args.mid_end   is not None: _quick["mid_end"]   = args.mid_end
         if args.seg_len   is not None: _quick["seg_len"]   = args.seg_len
+        if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
+        if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
+        if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
+        if args.noise_period_cycles is not None: _quick["noise_period_cycles"] = args.noise_period_cycles
+        if args.min_pts is not None: _quick["min_pts"] = args.min_pts
         args.axis_config = json.dumps(_quick)
 
     _axis = args.seg_axis
@@ -2807,14 +2894,16 @@ def main():
     if args.plateau_summary:
         print("\n=== Plateau fraction 전체 요약 플롯 ===")
         df_s = load_or_extract(n_workers=args.workers, force=args.force,
-                               axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv)
+                               axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv,
+                               no_shape=args.skip_shape)
         out_sum = STEP_DIR / "outputs" / "plateau_summary.png"
         plot_plateau_fraction_summary(df_s, out_path=out_sum)
         print("완료!")
         return
 
     df = load_or_extract(n_workers=args.workers, force=args.force,
-                         axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv)
+                         axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv,
+                         no_shape=args.skip_shape)
     print(f"\n총 사이클: {len(df):,}")
 
     print("\n=== Spearman ρ 계산 ===")
@@ -2832,6 +2921,8 @@ def main():
 
     if _axis == "q_frac_wide":
         _dir_suffix = f"_qfw_{_qfw_tag(_axis_cfg)}"          # random suffix(_qfw_tag) 포함
+    elif _axis == "q_frac_ref":
+        _dir_suffix = f"_qfref_{_qfref_tag(_axis_cfg)}"
     elif _axis == "q_abs":
         _dir_suffix = f"_qabs_{_qabs_tag(_axis_cfg)}"
     elif _axis == "vqslope":
@@ -2842,6 +2933,8 @@ def main():
         _dir_suffix = ""
     if args.exclude_cv:
         _dir_suffix += "_ccOnly"
+    if args.skip_shape:
+        _dir_suffix += "_noshape"
     hi_plot_dir = STEP_DIR / "hi_plot" / (date.today().strftime("%m%d") + _dir_suffix)
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
     out = hi_plot_dir / "hi_correlation.png"

@@ -30,6 +30,7 @@ from torch.utils.data import Dataset
 from utils.hi_schema import (
     STAT_KEYS, DIFF_KEYS, LFP_KEYS, MORPH_KEYS,
     get_hi_cols_for_seg, get_hi_cost_vector, N_HI, spec_from_qfrac,
+    EXCLUDE_STAT_LEAK,
     RAW_N, RAW_CH,
 )
 
@@ -166,12 +167,19 @@ def load_dataset_wide(
     if not all_segs:
         raise RuntimeError("No data loaded — check data_dir and datasets config.")
     combined = pd.concat(all_segs, ignore_index=True)
+    _hi_cols = [f"hi_{i:02d}" for i in range(N_HI)]
+    combined = combined.dropna(subset=_hi_cols, how="all")  # 정보량0 세그먼트 제외 (native seg 경로와 동일 정책)
     return combined
 
 
 def _get_native_hi_cols() -> list[str]:
-    """64 HI column names in native seg format (no seg suffix, stat_q_abs/stat_energy_seg excluded)."""
-    _STAT_EXCLUDE = {"q_abs", "energy_seg"}
+    """66 HI column names in native seg format (no seg suffix).
+
+    2026-08-07: stat_q_abs/stat_energy_seg 포함(5_model/utils/hi_schema.py와 동일
+    변경 — 이 함수가 그 파일의 _STAT_EXCLUDE 로직을 별도로 복제해서 갖고 있었음).
+    2026-08-08: EXCLUDE_STAT_LEAK도 hi_schema.py와 동일하게 반영(SOH_EXCLUDE_STAT_LEAK=1).
+    """
+    _STAT_EXCLUDE: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
     cols: list[str] = []
     for key in STAT_KEYS:
         if key in _STAT_EXCLUDE:
@@ -268,13 +276,20 @@ def load_dataset_native_seg(
             for i in range(len(available), N_HI):
                 df[f"hi_{i:02d}"] = np.nan
 
+            _hi_cols = [f"hi_{i:02d}" for i in range(N_HI)]
             keep = (["cell_id", "cycle", "seg_name", "seg_idx", "scen",
                      "direction", "level", "capacity_Ah"]
-                    + [f"hi_{i:02d}" for i in range(N_HI)])
+                    + _hi_cols)
             # 원시 곡선 컬럼(raw_v/raw_i/raw_t)이 있으면 함께 보존 (CNN 입력용)
             raw_cols = [c for c in ("raw_v", "raw_i", "raw_t") if c in df.columns]
             aux_cols = [c for c in ("aux_scen_target", "aux_intensity_target") if c in df.columns]
             df = df[keep + raw_cols + aux_cols].dropna(subset=["capacity_Ah"])
+            # HI 66개가 전부 NaN인 세그먼트 제외 — hi_correlation.py가 계산 자체를
+            # 못한 경우(예: 충전 데이터 부족으로 q_tc < cap*0.6, _chg_incomplete)로,
+            # SegmentNormalizer.fit()이 이미 nanmean/nanstd로 이런 행을 정규화 통계
+            # 계산에서 건너뛰므로(segment_dataset.py:308-309) 제거해도 부작용이 없다.
+            # "입력=0벡터, 타깃=실제 SOH"라는 학습 불가능한 잡음 쌍을 원천 배제한다.
+            df = df.dropna(subset=_hi_cols, how="all")
             df["dataset"] = ds
             all_dfs.append(df)
 
@@ -666,12 +681,36 @@ def build_datasets(
         print(f"[dataset] cross-dataset: train/val={train_src} | test={test_src}")
     else:
         cell_ids = df["cell_id"].unique().tolist()
-        train_cells, val_cells, test_cells = split_cells(
-            cell_ids,
-            train_ratio=train_ratio,
-            val_ratio=val_ratio,
-            seed=seed,
-        )
+        forced_test = data_cfg.get("forced_test_cells")
+        if forced_test:
+            # 실험9(§8-5, docs/260810_RESULTS.md): datasets 구성이 다른 run들(풀링/MIT-only/
+            # HUST-only) 간에 test 셀을 고정해 짝지어진(paired) 비교가 가능하도록 한다.
+            # split_cells()는 그 run의 cell_ids 리스트 "전체"를 shuffle하므로, datasets가
+            # 다르면 같은 seed를 써도 다른 셀이 뽑힌다(리스트 길이·내용이 달라지기 때문) —
+            # forced_test_cells를 먼저 떼어내 이 문제를 우회한다. 이 필드가 없으면(기본값)
+            # 아래 분기는 전혀 실행되지 않아 기존 동작과 100% 동일하다.
+            forced_test_set = set(forced_test) & set(cell_ids)
+            remaining = [c for c in cell_ids if c not in forced_test_set]
+            tv_total  = train_ratio + val_ratio
+            adj_train = train_ratio / tv_total
+            adj_val   = val_ratio   / tv_total
+            train_cells, val_cells, _ = split_cells(
+                remaining,
+                train_ratio=adj_train,
+                val_ratio=adj_val,
+                seed=seed,
+            )
+            test_cells = sorted(forced_test_set)
+            print(f"[dataset] forced_test_cells 지정: {len(test_cells)}개 고정 test "
+                  f"(전체 지정 {len(forced_test)}개 중 이 run에 존재하는 것만) — "
+                  f"나머지 {len(remaining)}개를 train/val로 재분할")
+        else:
+            train_cells, val_cells, test_cells = split_cells(
+                cell_ids,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                seed=seed,
+            )
 
         train_df = df[df["cell_id"].isin(train_cells)].reset_index(drop=True)
         val_df   = df[df["cell_id"].isin(val_cells)].reset_index(drop=True)

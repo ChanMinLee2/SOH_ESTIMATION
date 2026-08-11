@@ -37,6 +37,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
 
 try:
     from utils.compat import install_numpy2_shim
@@ -51,7 +54,7 @@ from utils.io_utils import load_config, save_config, save_json
 from datasets.segment_dataset import build_datasets, collate_fn, FastTensorLoader
 from models.scr_model import SCRModel
 from training.scr_trainer import SCRTrainer
-from utils.hi_schema import N_HI, spec_from_qfrac
+from utils.hi_schema import N_HI, spec_from_qfrac, EXCLUDE_STAT_LEAK
 
 _proj_root_common = Path(__file__).resolve().parent.parent
 if str(_proj_root_common) not in sys.path:
@@ -97,6 +100,11 @@ def _parse_args() -> argparse.Namespace:
                    help="hi_correlation.py --exclude-cv 로 추출된 '_ccOnly' 경로 사용 "
                         "(data_dir/seg_data_dir 미지정 시 자동 경로에 접미사 추가). "
                         "yaml data.exclude_cv 로도 설정 가능")
+    p.add_argument("--skip-shape",  action="store_true", dest="skip_shape",
+                   help="2_preprocess/preprocess.py --skip-shape 로 만든 필터7(형상 이상치) "
+                        "미적용 데이터 사용 — hi_correlation.py --skip-shape 로 추출된 "
+                        "'_noshape' 경로를 그대로 사용(data_dir/seg_data_dir 미지정 시 자동 "
+                        "접미사 추가, --exclude-cv와 동일 패턴). yaml data.skip_shape 로도 설정 가능")
     p.add_argument("--with-raw-cnn", action="store_true", dest="with_raw_cnn",
                    help="Phase 2 전용(REGRESSION_UPGRADE.md §5/§8): 회귀 헤드에 raw V/|I| "
                         "CNN 임베딩 융합(yaml model.with_raw_cnn 오버라이드). Phase 1은 "
@@ -470,12 +478,27 @@ def main() -> None:
     # random_segment=True 면 태그에 _random-L{seg_len_pts} suffix (hi_correlation._rand_suffix 와 동일)
     _rand_sfx = (f"_random-L{int(_axis_cfg.get('seg_len_pts', 20))}"
                  if _axis_cfg.get("random_segment", False) else "")
+    # min_pts 기본값(10)이 아니면 접미사 (hi_correlation._qfw_tag 와 동일 규칙, 2026-08-10)
+    _min_pts = int(_axis_cfg.get("min_pts", 10))
+    _minpts_sfx = f"_minpts{_min_pts}" if _min_pts != 10 else ""
     # q_frac_wide: n1/n2/n_samples 별 하위 디렉터리 결정
     if _axis_name == "q_frac_wide":
         _n1 = int(round(_axis_cfg.get("n1", 0.4) * 100))
         _n2 = int(round(_axis_cfg.get("n2", 0.2) * 100))
         _ns = int(_axis_cfg.get("n_samples", 4))
-        _axis_dir = f"q_frac_wide/n1-{_n1}%_n2-{_n2}%_N-{_ns}{_rand_sfx}"
+        _axis_dir = f"q_frac_wide/n1-{_n1}%_n2-{_n2}%_N-{_ns}{_rand_sfx}{_minpts_sfx}"
+    elif _axis_name == "q_frac_ref":
+        # q_frac_ref: n1/n2/n_samples(q_frac_wide와 동일 규칙) + ref_lag/noise_amp
+        # (hi_correlation._qfref_tag 와 동일 규칙)
+        _n1 = int(round(_axis_cfg.get("n1", 0.4) * 100))
+        _n2 = int(round(_axis_cfg.get("n2", 0.2) * 100))
+        _ns = int(_axis_cfg.get("n_samples", 4))
+        _lag = int(_axis_cfg.get("ref_lag", 0))
+        _noise = int(round(_axis_cfg.get("noise_amp", 0.03) * 100))
+        _nmode = str(_axis_cfg.get("noise_mode", "ou"))
+        _period = int(round(_axis_cfg.get("noise_period_cycles", 200.0)))
+        _axis_dir = (f"q_frac_ref/n1-{_n1}%_n2-{_n2}%_N-{_ns}{_rand_sfx}{_minpts_sfx}"
+                     f"_lag-{_lag}_noise-{_noise}%_{_nmode}-{_period}")
     elif _axis_name == "q_abs":
         # q_abs: mid_start/mid_end/seg_len/n_samples 별 하위 디렉터리 (hi_correlation._qabs_tag 와 동일)
         _ms = int(round(_axis_cfg.get("mid_start", 0.20) * 100))
@@ -498,13 +521,24 @@ def main() -> None:
     if _exclude_cv:
         _axis_dir = f"{_axis_dir}_ccOnly"
 
+    # --skip-shape: hi_correlation.py --skip-shape 로 추출된 '_noshape' 경로 사용
+    # (CLI > yaml data.skip_shape). hi_correlation.py의 접미사 순서(_ccOnly 다음 _noshape,
+    # hi_correlation.py:2419/2423 확인)와 동일하게 맞춘다.
+    _skip_shape = args.skip_shape or bool(cfg.get("data", {}).get("skip_shape", False))
+    if _skip_shape:
+        _axis_dir = f"{_axis_dir}_noshape"
+
     # 데이터 경로: null → scenario.axis 기반 자동 결정
+    # 2026-08-08: _4_data_hi를 D 드라이브로 이동 — 절대경로로 주면 segment_dataset.py의
+    # `PROJECT_ROOT / data_cfg["seg_data_dir"]` join에서 절대경로 쪽이 우선(pathlib 표준
+    # 동작)해 PROJECT_ROOT(C:)는 무시되고 D: 경로가 그대로 쓰인다.
     _data_cfg = cfg["data"]
     if not _data_cfg.get("seg_data_dir"):
-        _data_cfg["seg_data_dir"] = f"_4_data_hi/{_axis_dir}/seg"
+        _data_cfg["seg_data_dir"] = f"{DATA_4_HI_ROOT_STR}/{_axis_dir}/seg"
     if not _data_cfg.get("data_dir"):
-        _data_cfg["data_dir"] = f"_4_data_hi/{_axis_dir}/cycle"
+        _data_cfg["data_dir"] = f"{DATA_4_HI_ROOT_STR}/{_axis_dir}/cycle"
     _data_cfg["exclude_cv"] = _exclude_cv  # checkpoint에 저장되는 cfg에 명시 (재현/추적용)
+    _data_cfg["skip_shape"] = _skip_shape  # checkpoint에 저장되는 cfg에 명시 (재현/추적용)
     if args.gates_from is not None:
         _data_cfg["gates_from"] = args.gates_from  # CLI --gates-from도 저장되는 config.yaml에 반영
     print(f"[train] data_dir={_data_cfg['data_dir']}")
@@ -528,12 +562,19 @@ def main() -> None:
     _axis_short  = _AXIS_SHORT.get(_axis_name, _axis_name[:4])
     if _axis_name == "q_frac_wide":
         _axis_short += f"_{_n1}%_{_n2}%"
+    elif _axis_name == "q_frac_ref":
+        _axis_short += f"_{_n1}%_{_n2}%"
     elif _axis_name == "q_abs":
         _axis_short += f"_{_ms}-{_me}%"
     elif _axis_name == "vqslope":
         _axis_short += f"_{_vqmode}"
     if _rand_sfx:
         _axis_short += "_rand"
+    # SOH_EXCLUDE_STAT_LEAK=1로 프로세스를 띄운 경우 — N_HI가 64/66으로 달라져
+    # 체크포인트 구조 자체가 다르므로(hi_schema.py 모듈 docstring 참고) run 디렉터리명에도
+    # 반드시 남겨 나중에 --checkpoint로 잘못 섞어 로드하는 사고를 방지한다.
+    if EXCLUDE_STAT_LEAK:
+        _axis_short += "_noleak"
     _reg_model   = cfg.get("model", {}).get("regression_model", "mlp")
     _model_short = _MODEL_SHORT.get(_reg_model, _reg_model[:3])
     _phase_tag   = f"p{args.phase}" if args.phase else "p?"
@@ -543,12 +584,17 @@ def main() -> None:
     (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (output_dir / "gates").mkdir(parents=True, exist_ok=True)
     print(f"[train] run dir: {output_dir}")
+    print(f"[train] N_HI={N_HI} (SOH_EXCLUDE_STAT_LEAK={'1' if EXCLUDE_STAT_LEAK else '0'})")
 
     # run_dir에 spec 저장 (test_scr.py 재사용)
     spec.save(output_dir / "scenario_spec.json")
 
     # 원본 yaml을 그대로 복사하지 않고, CLI 오버라이드(--n1/--n2/--scen-k/--exclude-cv 등)가
     # 반영된 실제 실행 시점의 cfg를 저장 — 나중에 run_dir만 보고도 실행 조건을 알 수 있게 함.
+    # exclude_stat_leak은 CLI 인자가 아니라 환경변수(SOH_EXCLUDE_STAT_LEAK)로만 제어되므로
+    # (hi_schema.py 모듈 docstring 참고) 여기서 명시적으로 기록해 두지 않으면 저장된
+    # config.yaml만 봐서는 그 run의 N_HI가 64였는지 66이었는지 알 수 없다.
+    cfg.setdefault("data", {})["exclude_stat_leak"] = EXCLUDE_STAT_LEAK
     save_config(cfg, output_dir / "config.yaml")
 
     probe_json_out = output_dir / "gates" / "classification_HIs.json"

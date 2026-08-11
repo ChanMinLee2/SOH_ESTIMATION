@@ -39,7 +39,7 @@ routing/routing_table.csv / checkpoints/*.pt 를 읽어 하나의 비교 플롯�
       시나리오별 행 대신 시나리오 평균 1개 행으로 그린다.
 
 결과 저장 위치:
-  _5_data_model_scr/comparison/<MMDD_HHMM>_result_comparison/
+  _5_data_model_scr/comparison/<MMDD_HHMM>_result_comparison/   (기본, --title로 접미사 교체 가능)
     result_comparison.png
     summary.json
 
@@ -70,6 +70,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
 
 try:
     from utils.compat import install_numpy2_shim
@@ -118,7 +119,11 @@ def _parse_args() -> argparse.Namespace:
                    help="시나리오/전체당 gradient 계산에 사용할 최대 샘플 수")
     p.add_argument("--device", default="auto")
     p.add_argument("--out-name", default=None,
-                   help="결과 폴더명 오버라이드 (기본 <MMDD_HHMM>_result_comparison)")
+                   help="결과 폴더명 전체 오버라이드 (기본 <MMDD_HHMM>_result_comparison). "
+                        "--title과 동시 지정 시 이쪽이 우선")
+    p.add_argument("--title", default=None,
+                   help="결과 폴더명의 'result_comparison' 부분만 대체 "
+                        "(<MMDD_HHMM>_<title> 형태로 생성, 타임스탬프는 유지)")
     p.add_argument("--rep-cells", nargs="+", default=None,
                    help="SOH 예측 곡선 비교(capacity_curve_compare_*.png)에 쓸 셀 ID를 "
                         "직접 지정 (예: b1c0). 미지정 시 기존처럼 MIT/HUST 각각 최대 3개를 "
@@ -462,7 +467,23 @@ def _axis_dir_from_spec(spec: ScenarioSpec) -> str:
         n1 = int(round(p.get("n1", 0.4) * 100))
         n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
-        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}"
+        min_pts = int(p.get("min_pts", 10))
+        minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
+        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{minpts_sfx}"
+    if spec.axis == "q_frac_ref":
+        # q_frac_wide와 동일한 n1/n2/N % 표기 + lag/noise 태그
+        # (hi_correlation._qfref_tag, train_classifier._axis_dir_from_spec 와 동일 규칙)
+        p = spec.params or {}
+        n1 = int(round(p.get("n1", 0.4) * 100))
+        n2 = int(round(p.get("n2", 0.2) * 100))
+        ns = int(p.get("n_samples", 4))
+        lag = int(p.get("ref_lag", 0))
+        noise = int(round(p.get("noise_amp", 0.03) * 100))
+        nmode = str(p.get("noise_mode", "ou"))
+        period = int(round(p.get("noise_period_cycles", 200.0)))
+        min_pts = int(p.get("min_pts", 10))
+        minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
+        return f"q_frac_ref/n1-{n1}%_n2-{n2}%_N-{ns}{minpts_sfx}_lag-{lag}_noise-{noise}%_{nmode}-{period}"
     if spec.axis == "q_abs":
         p = spec.params or {}
         ms = int(round(p.get("mid_start", 0.20) * 100))
@@ -480,9 +501,9 @@ def _build_test_dataset_for_run(b: RunBundle):
     data_cfg = cfg.setdefault("data", {})
     axis_dir = _axis_dir_from_spec(b.spec)
     if not data_cfg.get("seg_data_dir"):
-        data_cfg["seg_data_dir"] = f"_4_data_hi/{axis_dir}/seg"
+        data_cfg["seg_data_dir"] = f"{DATA_4_HI_ROOT_STR}/{axis_dir}/seg"
     if not data_cfg.get("data_dir"):
-        data_cfg["data_dir"] = f"_4_data_hi/{axis_dir}/cycle"
+        data_cfg["data_dir"] = f"{DATA_4_HI_ROOT_STR}/{axis_dir}/cycle"
 
     _, _, test_ds, _ = build_datasets(cfg, spec=b.spec)
 
@@ -966,7 +987,7 @@ def main() -> None:
             _compute_jacobian_profiles(b, device, args.jacobian_max_samples)
 
     ts = datetime.now().strftime("%m%d_%H%M")
-    out_dir = OUT_ROOT / (args.out_name or f"{ts}_result_comparison")
+    out_dir = OUT_ROOT / (args.out_name or f"{ts}_{args.title or 'result_comparison'}")
     out_path = out_dir / "result_comparison.png"
 
     cap_cache, scalar_cache = _plot_all(bundles, args.with_jacobian, out_path, cross_axis=cross_axis)

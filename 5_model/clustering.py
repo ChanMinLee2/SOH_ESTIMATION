@@ -64,10 +64,13 @@ warnings.filterwarnings("ignore")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from data_directories import DATA_4_HI_ROOT  # noqa: E402
 
 SEG_DIRS = [
-    PROJECT_ROOT / "_4_data_hi" / "seg" / "MIT",
-    PROJECT_ROOT / "_4_data_hi" / "seg" / "HUST",
+    DATA_4_HI_ROOT / "seg" / "MIT",
+    DATA_4_HI_ROOT / "seg" / "HUST",
 ]
 META_COLS   = {"cell_id", "cycle", "segment_id", "capacity_Ah", "scen",
                "stat_q_abs", "stat_energy_seg"}
