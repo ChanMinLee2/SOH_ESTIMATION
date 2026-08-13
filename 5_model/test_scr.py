@@ -66,6 +66,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--scen-k",      type=int, default=None,
                    help="시나리오별 scen HI 수 (yaml regression.scen_k_count 오버라이드). "
                         "다른 k로 학습된 checkpoint를 평가할 때 필요")
+    p.add_argument("--cat-top-k",   type=int, default=None,
+                   help="HI 카테고리 랭킹 히트맵에서 표시할 상위 랭크 수 (기본: 전체 N_HI)")
     return p.parse_args()
 
 
@@ -339,6 +341,15 @@ def main() -> None:
         evaluator.plot_routing_heatmap(routing_dir,
                                        probe_sel=probe_sel,
                                        scen_sel=scen_sel)
+
+        # HI 카테고리 랭킹 히트맵 — regression_HIs.json의 랭크순 이름을 그대로 사용
+        if scen_json and scen_json.exists():
+            _rj = json.loads(scen_json.read_text())
+            scen_ranked_names = {
+                s: _rj.get(f"seg_{s}_names", []) for s in range(spec.n_scenarios)
+            }
+            evaluator.plot_hi_category_heatmap(routing_dir, scen_ranked_names,
+                                               top_k=args.cat_top_k)
 
     # Laplace UQ (train_scr.py Phase 2에서 uq.enabled=true 시 생성됨) — oracle 회귀 기준
     uq_ckpt = run_dir / "checkpoints" / "laplace_uq.pt"

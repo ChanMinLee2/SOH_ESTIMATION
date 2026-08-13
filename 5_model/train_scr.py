@@ -30,10 +30,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
@@ -92,7 +95,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--axis-config", default=None,
                    help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}')")
     p.add_argument("--seed",        type=int, default=None,
-                   help="재현성 시드 (yaml 오버라이드)")
+                   help="재현성 시드 — 모델 초기화/torch·numpy·random RNG (yaml training.seed 오버라이드)")
+    p.add_argument("--split-seed",  type=int, default=None,
+                   help="train/val/test 셀 분할 시드 (yaml data.split_seed 오버라이드)")
     p.add_argument("--lr",          type=float, default=None,
                    help="peak LR (yaml training.lr 오버라이드). Phase 1/2 공용 필드라서 "
                         "Phase 2만 따로 낮추고 싶을 때 이 옵션으로 지정")
@@ -408,6 +413,26 @@ def main() -> None:
     cfg   = load_config(str(PROJECT_ROOT / args.config))
     phase = _resolve_phase(args, cfg)
     print(f"[train] ═══ Phase {phase} ═══")
+
+    # 시드 적용 — 이전엔 --seed가 cfg["training"]["seed"]에 저장만 되고 실제로
+    # torch/numpy/random에 전달되지 않아 사실상 no-op이었다(2026-08-12 발견,
+    # docs/260811_RESULTS.md 참고). 모델 초기화(HardConcreteGate log_alpha,
+    # cap_head 가중치 등)의 재현성을 위해 여기서 직접 시드를 건다.
+    _seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed")
+    if _seed is not None:
+        random.seed(_seed)
+        np.random.seed(_seed)
+        torch.manual_seed(_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(_seed)
+        cfg.setdefault("training", {})["seed"] = _seed
+        print(f"[train] seed={_seed} (torch/numpy/random 전부 적용)")
+
+    # split-seed 오버라이드 — train/val/test 셀 분할 (yaml에만 있던 data.split_seed의
+    # CLI 대체 경로, 2026-08-12 추가)
+    if args.split_seed is not None:
+        cfg.setdefault("data", {})["split_seed"] = args.split_seed
+        print(f"[train] split_seed={args.split_seed}")
 
     # with_raw_cnn/raw_cnn_pretrained_from CLI 오버라이드 (run_pipeline.py가 분류기 run_dir을
     # 자동 주입할 때 사용 — yaml에 값이 없어도 파이프라인 한 번에 이어붙일 수 있게 함).

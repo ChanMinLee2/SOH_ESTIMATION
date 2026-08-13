@@ -664,6 +664,52 @@ class SCREvaluator:
         print(f"[eval] saved {path_csv}")
 
     # ------------------------------------------------------------------
+    # HI 카테고리 랭킹 히트맵 — 시나리오별 상위 HI가 어느 카테고리(A=stat/B=diff/
+    # C=lfp/D=morph)에 속하는지 랭크 순으로 시각화 (docs/260811_RESULTS.md 참고)
+    # ------------------------------------------------------------------
+    _CAT_PREFIX = {"stat": "A", "diff": "B", "lfp": "C", "morph": "D"}
+    _CAT_COLOR  = ["#d62728", "#1f77b4", "#2ca02c", "#7f7f7f", "#ffffff"]  # A/B/C/D/(빈칸)
+    _CAT_LABELS = ["A: stat(통계)", "B: diff(미분)", "C: lfp(LFP특징)", "D: morph(형태)"]
+
+    def plot_hi_category_heatmap(
+        self,
+        routing_dir: Path,
+        scen_ranked_names: dict[int, list[str]],   # {seg_idx: [rank순 HI이름, ...]}
+        top_k: int | None = None,
+    ) -> None:
+        """행=HI 랭크 순위, 열=시나리오, 셀 색=HI 카테고리(A/B/C/D)."""
+        if not _HAS_MPL:
+            return
+        n_scen   = self._n_scenarios
+        max_rank = top_k or max((len(v) for v in scen_ranked_names.values()), default=0)
+        if max_rank == 0:
+            return
+        cat_idx = {"A": 0, "B": 1, "C": 2, "D": 3}
+        mat = np.full((max_rank, n_scen), 4, dtype=int)   # 4 = 빈칸(랭크 부족/미분류)
+        for s in range(n_scen):
+            for rank, name in enumerate(scen_ranked_names.get(s, [])[:max_rank]):
+                prefix = name.split("_", 1)[0]
+                mat[rank, s] = cat_idx.get(self._CAT_PREFIX.get(prefix, ""), 4)
+
+        from matplotlib.colors import ListedColormap
+        from matplotlib.patches import Patch
+
+        cmap = ListedColormap(self._CAT_COLOR)
+        fig, ax = plt.subplots(figsize=(max(4, n_scen * 1.3), max(6, max_rank * 0.16)))
+        ax.imshow(mat, aspect="auto", cmap=cmap, vmin=0, vmax=4)
+        ax.set_xticks(range(n_scen))
+        ax.set_xticklabels(self._seg_names, rotation=45, ha="right", fontsize=9)
+        ax.set_ylabel("HI 랭크 (0=최상위)")
+        ax.set_title("시나리오별 HI 랭킹 — 카테고리 구성")
+        handles = [Patch(color=self._CAT_COLOR[i], label=l) for i, l in enumerate(self._CAT_LABELS)]
+        ax.legend(handles=handles, bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+        fig.tight_layout()
+        path = routing_dir / "hi_category_heatmap.png"
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[eval] saved {path}")
+
+    # ------------------------------------------------------------------
     # Confusion matrix
     # ------------------------------------------------------------------
     def _plot_confusion_matrix(self, pred_dict: dict, tag: str = "test") -> None:

@@ -304,3 +304,179 @@ L_total = L_mse(soh_pred, soh_true)                              # 최종 회귀
 **검증 계획**: 각 마이그레이션 단계 후 §10.3과 동일한 형식(R²/RMSE/MAPE, oracle vs hard)
 으로 baseline과 비교하고, 1~2단계는 별도 실험 번호(예: 실험 10/11)로 `docs/260810_RESULTS.md`
 에 이어서 기록하는 것을 권장한다.
+
+---
+
+## 8. 게이트 학습 자체의 구조적 문제 — Phase1/Phase2 분리보다 단일 단계 공동학습을 권장 (2026-08-12 추가)
+
+§0-1과 §6의 "2단계"가 이미 "Phase2의 순이익이 실측상 작다"는 관찰로 Phase1/Phase2 통합을
+제안했었다. 이번 세션에서 `full_cycle` 축을 튜닝하며 **왜** 그런지에 대한 훨씬 구체적인
+메커니즘과, 이게 이 프로젝트만의 우연이 아니라 희소 게이트 학습 문헌에서 이미 알려진
+설계 원칙과 정확히 일치한다는 근거를 확보했다. 이 절은 그 내용을 정리한다.
+
+**이 절이 겨냥하는 두 목적**: (1) §8.5 — 시나리오별로 최적화된 HI 서브셋을 **더 잘**
+찾는 방법(선택의 품질·안정성), (2) §8.6 — 게이트 구조와 별개로 모델 자체의 예측 성능을
+끌어올리는 방법. §8.1~8.4(공동학습 전환)는 두 목적 모두에 걸치는 공통 기반이고, §8.5/8.6은
+거기서 한 걸음 더 나아가 각 목적에 특화된 개선안을 제안한다.
+
+### 8.1 이번 세션에서 직접 확인한 메커니즘
+
+`common/scenario/full_cycle.py` 축을 baseline 하이퍼파라미터(`mlp_hidden_dims=
+[512,256,128,64]`, `lr=2e-4`, `weight_decay=1e-4`, `patience=30`) 그대로 돌렸더니
+Phase2가 5 에폭 만에 val R²가 급락해 최종 test R²=0.11로 붕괴했다(`0811_1521_p2_mlp_
+full_noleak`, `docs/260811_RESULTS.md` §Phase1/Phase2 분석). 같은 조건의 Phase1은
+붕괴하지 않고 105 에폭에 걸쳐 val R²=0.84까지 안정적으로 개선됐다. 두 로그를 직접
+대조해 원인을 특정했다:
+
+- `hard_concrete.py`의 `HardConcreteGate.forward()`는 `self.training=True`일 때
+  **매 forward마다 새로 샘플링되는 확률적(연속 완화) 마스크**를 곱한다(`_sample_train`).
+  Phase 1은 이 게이트를 통과한 뒤 회귀 헤드를 학습하므로, 학습 내내 64개 HI에
+  **배치마다 다시 뽑히는 노이즈**가 곱해진다 — 사실상 피처 단위 구조적 dropout이다.
+- Phase 2는 Phase 1이 학습한 게이트를 **결정론적 0/1 마스크로 고정**(`_hard_infer`)한
+  뒤, 완전히 새로운 회귀 헤드를 그 고정된 피처 집합 위에서 처음부터 학습한다 — 이때는
+  위의 확률적 정규화가 전혀 없다. 그 결과 (특히 학습 샘플이 적은 `full_cycle`처럼)
+  대용량 헤드가 몇 에폭 만에 과적합했다.
+- 실제로 모델 축소(`mlp_hidden_dims→[128,64]`)와 `weight_decay` 10배 인상으로 Phase 2에
+  **인위적으로 정규화를 다시 넣어줘야** R²=0.91~0.98 수준을 회복했다(§8, `docs/
+  260811_RESULTS.md`) — 즉 Phase 1이 공짜로 제공하던 정규화를 Phase 2에서 하이퍼파라미터로
+  재현해야 했다.
+
+### 8.2 문헌 근거 — 이건 이 코드베이스만의 우연이 아니다
+
+1. **`HardConcreteGate`의 근거 논문 자체가 단일 단계 공동학습을 전제로 설계됐다.**
+   Louizos, Welling & Kingma, *"Learning Sparse Neural Networks through L0
+   Regularization,"* ICLR 2018 — `hard_concrete.py` 상단 docstring이 이미 이 논문을
+   인용하고 있다. 이 논문의 원래 실험(MNIST/CIFAR MLP·CNN 희소화)은 **게이트와 본
+   네트워크를 처음부터 끝까지 하나의 loss로 동시에 학습**한다 — "게이트를 먼저 배워
+   고정한 뒤 본 네트워크를 다시 학습"하는 2단계 절차는 원 논문에 없다. 지금 코드베이스는
+   같은 게이트 메커니즘을 가져오면서 학습 절차만 2단계로 바꾼 셈이고, §8.1이 그 대가를
+   실측한 것이다.
+2. **미분 가능 피처 선택의 표준 설계도 "선택+다운스트림 태스크 공동학습"이다.**
+   Balın, Abid & Zou, *"Concrete Autoencoders: Differentiable Feature Selection and
+   Reconstruction,"* ICML 2019 — Concrete 분포(Maddison, Mnih & Teh, *"The Concrete
+   Distribution,"* ICLR 2017 / Jang, Gu & Poole, *"Categorical Reparameterization with
+   Gumbel-Softmax,"* ICLR 2017 — `HardConcreteGate`가 쓰는 것과 같은 계열의 완화 기법)를
+   써서 "어떤 피처를 고를지"와 "고른 피처로 무엇을 예측할지"를 **한 loss로 동시에** 학습해야
+   선택된 피처가 실제로 다운스트림 태스크에 최적이라는 게 이 논문의 핵심 설계 원칙이다.
+   지금 구조는 Phase 1의 다운스트림(항상 강제 "mlp" 프록시 헤드, `train_scr.py`의
+   `_p1_model_cfg = {**cfg["model"], "regression_model": "mlp", ...}` 주석: "Phase 1은
+   항상 MLPHead(design intent)")과 Phase 2의 실제 다운스트림(`mlp`/`transformer`/
+   `resnet_tab` 중 선택)이 다를 수 있어, 이 원칙에서 벗어나 있다.
+3. **대안 게이트 메커니즘도 전부 단일 단계다.** Yamada, Lindenbaum, Negahban & Kluger,
+   *"Feature Selection using Stochastic Gates,"* ICML 2020(STG) — 가우시안 기반 확률적
+   게이트를 예측 모델과 처음부터 끝까지 공동학습하며, L0(Louizos 외) 대비 비슷하거나 더
+   나은 선택 품질을 여러 벤치마크에서 보고한다. 이 계열 문헌 전체가 "게이트 고정 후
+   별도 재학습" 절차를 채택하지 않는다는 공통점이 있다.
+4. **프록시에서 학습한 "중요도"가 최종 아키텍처로 그대로 전이된다는 보장이 없다.**
+   Liu, Sun, Zhou, Huang & Darrell, *"Rethinking the Value of Network Pruning,"*
+   ICLR 2019 — pruning 문헌에서 한 아키텍처(프록시)로 찾은 "중요한 부분집합"을 다른
+   아키텍처에 그대로 이식했을 때 기대만큼 이득이 없는 경우가 많고, 오히려 그 구조를
+   처음부터 다시 학습하는 쪽이 경쟁력 있다는 결과를 보였다 — Phase 1(강제 mlp 프록시)이
+   고른 HI 서브셋을 Phase 2(다른 회귀 아키텍처)에 그대로 넘기는 지금 구조와 정확히
+   같은 위험 패턴이다.
+
+### 8.3 권장안 — 게이트와 최종 회귀 아키텍처를 하나의 loss로 공동학습
+
+§6의 "2단계"를 아래처럼 구체화한다:
+
+```
+L_total = MSE(soh_pred, soh_true)                 # regression_model 실제 선택값 그대로 사용
+        + λ_scen · CE(존 분류, 선택적)
+        + λ_l0(auto, m/k 기반) · Σ L0(게이트)        # 기존 공식(docs/formula.md) 그대로
+```
+
+- **`train_scr.py`의 `_p1_model_cfg` 강제 오버라이드(`"regression_model": "mlp"`)를
+  제거**하고, Phase 1 단계에서부터 yaml이 지정한 실제 `regression_model`
+  (mlp/transformer/resnet_tab)을 그대로 쓴다.
+- 게이트는 학습 내내 `HardConcreteGate`의 확률적 샘플링을 유지한 채로 최종 헤드와 함께
+  학습된다(Phase 2가 아예 없어짐) — §8.1에서 확인한 "Phase 1의 공짜 정규화"가 최종
+  헤드에도 자동으로 적용된다.
+- 평가(`test_scr.py`)는 지금처럼 `_hard_infer()`(결정론적 마스크)로 전환해 그대로 쓸 수
+  있다 — 이 부분은 코드 변경이 필요 없다.
+
+### 8.4 트레이드오프 — §6에서 이미 예견된 비용
+
+**회귀 아키텍처 비교(실험 8, `docs/260810_RESULTS.md` §8-4처럼 mlp vs transformer vs
+resnet_tab을 스윕하는 실험)의 비용이 늘어난다.** 지금은 게이트를 한 번만 학습해두고
+Phase 2만 아키텍처별로 갈아 끼우며 재사용하지만(`--gates-from`), 공동학습 구조에서는
+아키텍처마다 게이트까지 처음부터 다시 학습해야 한다 — 정확히 §6이 "raw 융합은 Phase 2
+전용 변경이라 Phase 1 재사용이 안전하다"고 짚었던 재사용성을 회귀 아키텍처 비교에서는
+잃는 셈이다. 이 프로젝트가 아키텍처 스윕을 자주 한다는 점(실험 8이 이미 존재)을 고려하면,
+**"최종 결과 보고용 run은 공동학습, 빠른 아키텍처 탐색은 지금의 2단계 재사용 방식"**을
+병행하는 절충이 현실적이다 — §6의 마이그레이션 경로 중 "2단계"를 진행할 때 이 트레이드오프를
+실측(§8.1과 동일한 방식으로 공동학습 run의 R²와 학습 시간을 baseline 2단계 방식과 비교)으로
+확인하고 결정할 것을 권장한다.
+
+### 8.5 목적 1 — 시나리오별 HI 서브셋을 "더 잘" 찾는 방법
+
+§8.3(공동학습)은 "선택된 서브셋이 실제 다운스트림 아키텍처에 맞다"는 문제를 해결하지만,
+**서브셋 자체의 안정성**은 별개 문제다. 이번 세션에서 이미 이 불안정성을 직접 관측했다:
+`random` 축에서 `scen_k=5/15/25`를 각각 독립적으로 새로 학습한 Phase 1 세 개의
+`regression_HIs.json`을 대조한 결과(`docs/260811_RESULTS.md` §9 "k=15 `random`이
+유독 나쁜 이유"), **상위 5개 HI는 세 번의 학습에서 사실상 동일**했지만(`diff_dqdv_
+area_chg`, `diff_dqdv_peak_h_chg` 등), **6~15위는 학습마다 15개 중 5개(1/3)가 바뀌었다.**
+즉 "핵심 신호"는 안정적으로 재현되는데 "그다음 순위"는 학습마다 흔들린다 — 이건 통계학의
+**피처 선택 안정성(feature selection stability)** 문제와 정확히 같은 현상이다.
+
+1. **선택 안정성 자체를 정량화·개선하는 표준 기법 — Stability Selection.**
+   Meinshausen & Bühlmann, *"Stability Selection,"* Journal of the Royal Statistical
+   Society: Series B, 72(4), 2010 — 데이터를 여러 번 서브샘플링(또는 여러 랜덤 시드로
+   재학습)해 **각 피처가 선택된 빈도**를 집계하고, 그 빈도가 높은 피처만 최종 채택한다.
+   지금 코드베이스에 바로 적용 가능한 형태로 옮기면: `scen_k`별로 이미 여러 seed로
+   Phase 1을 반복 실행하고 있으니(`docs/260812_RESULTS.md`의 3-seed 실험), 각 seed의
+   `regression_HIs.json`에서 나온 게이트 확률(`seg_{s}_probs`)을 **평균**(또는 선택
+   빈도를 집계)해 최종 HI 서브셋을 정하면, 6~15위처럼 흔들리는 순위를 훨씬 안정적으로
+   만들 수 있다 — 재학습 없이 이미 계획된 3-seed 실험 결과만으로 바로 시도 가능하다.
+2. **시나리오 간 "공유되는 핵심 + 시나리오별 차이"라는 구조를 모델에 직접 반영 — Multi-Task
+   Feature Learning.** Argyriou, Evgeniou & Pontil, *"Convex Multi-Task Feature
+   Learning,"* Machine Learning 73(3), 2008 — 여러 관련 태스크(여기서는 6개 시나리오)가
+   **공통 피처 부분집합을 공유**하면서 태스크별로 소수의 피처만 추가/차등 선택하도록
+   정규화하는 convex 공식을 제시한다. 지금 구조는 `scen_gates[s]`가 시나리오마다
+   **완전히 독립적인** `HardConcreteGate`라 시나리오 간 정보 공유가 전혀 없는데, 위에서
+   관측한 "top-5는 모든 시나리오/시드에서 공유, 6~15위만 시나리오별로 갈림" 패턴은 정확히
+   이 논문이 가정하는 구조와 일치한다 — 게이트에 "공유 성분 + 시나리오별 잔차" 형태의
+   계층 구조를 넣으면(예: 모든 `scen_gates[s]`가 공통 `log_alpha_shared`를 기반으로 하고
+   시나리오별로 작은 편차만 학습) 선택 품질과 안정성이 함께 좋아질 가능성이 크다.
+3. **개별 피처 단위가 아니라 카테고리(A/B/C/D) 단위로 구조화된 희소성 — Group Lasso.**
+   Yuan & Lin, *"Model Selection and Estimation in Regression with Grouped
+   Variables,"* JRSS-B 68(1), 2006 — 변수를 미리 정의된 그룹(여기서는 `stat`/`diff`/
+   `lfp`/`morph` 4개 카테고리, 이미 `CATEGORY_COSTS`로 비용 구조가 있음)으로 묶어 그룹
+   단위로 켜고 끄는 정규화다. 지금은 개별 HI 단위 L0라 같은 카테고리 안에서도 선택이
+   들쭉날쭉할 수 있는데, 그룹 희소성을 섞으면(예: L0 + 카테고리 단위 그룹 페널티 병행)
+   이번 세션에서 만든 카테고리 랭킹 히트맵(`scr_evaluator.py:plot_hi_category_heatmap`,
+   §Plot 1)에서 더 깔끔한 "카테고리 블록" 패턴이 나올 것으로 예상되고, 해석도 쉬워진다.
+
+### 8.6 목적 2 — 게이트와 별개로 모델 예측 성능 자체를 올리는 방법
+
+1. **공동학습 자체가 성능을 개선한다는 게 원 논문의 실험 결과다.** §8.2-1에서 인용한
+   Louizos, Welling & Kingma(2018)는 L0 공동학습이 같은 희소도(sparsity) 기준에서
+   사후 가지치기(post-hoc pruning) 베이스라인보다 test 정확도가 더 높다는 걸
+   MNIST/CIFAR 실험으로 보였다 — 즉 §8.3의 제안은 "버그를 피하는 것"을 넘어 문헌상
+   순수 성능 개선으로도 기대할 근거가 있다.
+2. **이 프로젝트 자신의 데이터에도 이미 같은 방향의 신호가 있다.** `docs/260811_
+   RESULTS.md` §8에서, Phase 2 정규화를 고친 뒤 `full_cycle`을 `scen_k=15/25/35`로
+   스윕했더니 test R²가 0.98 안팎까지 나왔다 — 이는 전체 64개 HI를 다 쓰는 `scen_k=65`
+   (R²=0.9146)보다 훨씬 좋고, 심지어 `q_frac_ref` baseline(R²=0.9524)보다도 높다.
+   **더 공격적으로 솎아낸 게이트가 성능 자체를 끌어올렸다** — 이건 목적 1(서브셋 품질)과
+   목적 2(성능)가 이 프로젝트에서 이미 서로 독립적이지 않다는 직접 증거다. §8.5의
+   안정성 선택으로 서브셋 품질을 올리면 목적 2에도 자동으로 도움이 될 가능성이 크다.
+3. **당장 재학습 없이 성능을 올리는 가장 저비용 방법 — 시드 앙상블.** Breiman,
+   *"Bagging Predictors,"* Machine Learning 24(2), 1996과 Lakshminarayanan, Pritzel
+   & Blundell, *"Simple and Scalable Predictive Uncertainty Estimation using Deep
+   Ensembles,"* NeurIPS 2017 — 서로 다른 초기화(시드)로 학습한 여러 모델의 예측을
+   평균하면 분산이 줄어 test 정확도가 보통 개선되고(Breiman), 딥러닝에서도 이 방식이
+   불확실성 정량화까지 함께 개선한다는 게 Lakshminarayanan 외의 결과다. 지금 진행 중인
+   `docs/260812_RESULTS.md`의 3-seed 실험(원래 목적은 "노이즈인지 실제 패턴인지 판정")을
+   **그대로 재사용**해서, 판정이 끝난 뒤 3개 seed의 test 예측값을 평균한 앙상블 성능도
+   같이 재보는 걸 권장한다 — 이 프로젝트가 이미 UQ에 Laplace 근사를 쓰고 있으므로
+   (§2.5 아님, `training.uq` 설정), 시드 앙상블은 그 위에 자연스럽게 얹을 수 있는
+   추가 개선이지 대체가 아니다.
+
+### 8.7 두 목적의 관계 정리
+
+§8.5(서브셋 품질)와 §8.6(성능)은 이 프로젝트에서 서로 강화하는 관계로 보인다 — §8.6-2의
+`scen_k=15~35` 결과가 그 직접 증거다. 우선순위를 정해야 한다면: **§8.5-1(시드 평균으로
+게이트 안정화)과 §8.6-3(시드 앙상블)은 모두 이미 계획된 3-seed 실험 결과만으로 재학습
+없이 바로 시도할 수 있어 가장 먼저 해볼 만하고**, §8.3(공동학습 구조 전환)과 §8.5-2/3
+(계층적·그룹 희소성 구조 변경)은 실제 코드 변경이 필요한 더 큰 작업이라 §6의 단계적
+마이그레이션 계획에 이어 붙이는 쪽을 권장한다.

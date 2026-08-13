@@ -29,6 +29,12 @@ except Exception:
 try:
     from .rcs import RCSSegmenter
     REGISTRY["rcs"] = RCSSegmenter
+    # "random" 별칭: 같은 RCSSegmenter를 다른 파라미터 프리셋(예: assign="none")으로 쓸 때
+    # 기존 "rcs" 캐시(_4_data_hi/rcs/)와 경로 충돌 없이 분리 저장하기 위함.
+    # --axis-config에 "axis_name": "random"을 반드시 포함해야 실제로 분리된다
+    # (안 넣으면 RCSSegmenter 기본값 axis_name="rcs"가 적용돼 그대로 rcs/ 경로를 씀) —
+    # docs/260811_RESULTS.md 실험 2 참고.
+    REGISTRY["random"] = RCSSegmenter
 except Exception:
     pass
 

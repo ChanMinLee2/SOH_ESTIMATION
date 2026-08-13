@@ -165,6 +165,12 @@ def main():
         help=f"종료 스텝 번호 포함 (미지정 시 끝까지, 범위: 1~{len(STEPS)})",
     )
     parser.add_argument(
+        "--skip-classifier", action="store_true",
+        help="Step 7(시나리오 분류기 학습) 건너뛰기 — test_scr.py가 분류기 체크포인트 "
+             "없으면 자동으로 oracle 모드만 평가하므로 안전함(2026-08-12). "
+             "hard/soft 라우팅 비교가 필요 없을 때 학습 시간 절약용.",
+    )
+    parser.add_argument(
         "--workers", type=int, default=min(8, os.cpu_count() or 1),
         help="데이터 스텝(1~5)에 전달할 병렬 프로세스 수 (기본: 8)",
     )
@@ -240,6 +246,10 @@ def main():
                         help="방전 probe 상위 m개 (yaml discharge_probe_m 오버라이드, Step 6/8 전달)")
     parser.add_argument("--scen-k",      type=int, default=None,
                         help="시나리오별 scen HI 수 (yaml scen_k_count 오버라이드, Step 6/8 전달)")
+    parser.add_argument("--seed",        type=int, default=None,
+                        help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (yaml training.seed 오버라이드, Step 6/8 전달)")
+    parser.add_argument("--split-seed",  type=int, default=None,
+                        help="train/val/test 셀 분할 시드 (yaml data.split_seed 오버라이드, Step 6/8 전달)")
     parser.add_argument("--phase1-lr",   type=float, default=None,
                         help="Phase 1 peak LR (yaml training.lr 오버라이드, Step 6에만 전달)")
     parser.add_argument("--phase2-lr",   type=float, default=None,
@@ -290,11 +300,14 @@ def main():
         parser.error("from_step 이 to_step 보다 클 수 없습니다.")
 
     selected = [s for s in STEPS if args.from_step <= s[0] <= to_step]
+    if args.skip_classifier:
+        selected = [s for s in selected if s[0] != 7]
 
     print("\n" + "="*60)
     print("  LFP SOH Prediction — 전체 파이프라인")
     print("="*60)
-    print(f"  스텝 범위   : {args.from_step} → {to_step}")
+    print(f"  스텝 범위   : {args.from_step} → {to_step}"
+          + ("  (Step 7 분류기 스킵)" if args.skip_classifier else ""))
     print(f"  병렬 워커   : {args.workers}  (데이터 스텝 전용)")
     print(f"  모델 설정   : {args.model_config}")
     if args.seg_axis:
@@ -359,6 +372,10 @@ def main():
                 step_extra += ["--discharge-m", str(args.discharge_m)]
             if args.scen_k is not None:
                 step_extra += ["--scen-k", str(args.scen_k)]
+            if args.seed is not None:
+                step_extra += ["--seed", str(args.seed)]
+            if args.split_seed is not None:
+                step_extra += ["--split-seed", str(args.split_seed)]
 
         # ── phase별 lr 오버라이드 (Step 6=Phase1, 8=Phase2 각각 독립) ──────────
         if num == 6 and args.phase1_lr is not None:

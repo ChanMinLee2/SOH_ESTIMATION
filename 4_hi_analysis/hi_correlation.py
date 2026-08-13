@@ -21,26 +21,33 @@ MIT + HUST _4_data_hi/clean 에서 HI를 사이클별로 추출하고
     python 4_hi_analysis/hi_correlation.py --seg-axis protocol
     # 파라미터 조정: max_steps(단계 수), nom_cap(정격 용량 Ah), i_step_thresh_c(C-rate 임계값)
     python 4_hi_analysis/hi_correlation.py --seg-axis protocol \
-        --axis-config '{"protocol": {"max_steps": 3, "nom_cap": 1.1, "i_step_thresh_c": 0.5}}'
+        --axis-config '{"max_steps": 3, "nom_cap": 1.1, "i_step_thresh_c": 0.5}'
 
 ③ vwindow (전압 구간 균등 분할)
     python 4_hi_analysis/hi_correlation.py --seg-axis vwindow
     # 파라미터 조정: n_windows(분할 수, 기본 3)
     python 4_hi_analysis/hi_correlation.py --seg-axis vwindow \
-        --axis-config '{"vwindow": {"n_windows": 4}}'
+        --axis-config '{"n_windows": 4}'
 
 ④ rcs (랜덤 구간 샘플링)
     python 4_hi_analysis/hi_correlation.py --seg-axis rcs
     # 파라미터 조정: n_samples(샘플 수), window(구간 폭 qfrac), seed(재현성)
     python 4_hi_analysis/hi_correlation.py --seg-axis rcs \
-        --axis-config '{"rcs": {"n_samples": 6, "window": 0.3, "seed": 42}}'
+        --axis-config '{"n_samples": 6, "window": 0.3, "seed": 42}'
 
 ⑤ cluster (K-means 클러스터)
     python 4_hi_analysis/hi_correlation.py --seg-axis cluster
     # [경고] fit() 없이 실행 시 모든 세그먼트가 cluster 0으로 분류됨
     # 파라미터 조정: n_fine(미세분할 수), split_direction(방향별 분리 여부)
     python 4_hi_analysis/hi_correlation.py --seg-axis cluster \
-        --axis-config '{"cluster": {"n_fine": 20, "split_direction": true}}'
+        --axis-config '{"n_fine": 20, "split_direction": true}'
+
+  [주의] --axis-config는 축 이름으로 감싸지 않은 "맨" 파라미터 dict를 받는다
+  (예: {"n_samples": 6, ...} — {"rcs": {"n_samples": 6, ...}}가 아님). main()이
+  내부에서 이미 {axis: axis_cfg}로 한 번 감싸 get_segmenter()에 넘기므로, 여기서
+  축 이름으로 한 번 더 감싸면 이중 래핑되어 axis_kwargs에 축 이름 자체가
+  키로 들어가 TypeError가 난다(2026-08-11 실제 재현: RCSSegmenter.__init__()
+  got an unexpected keyword argument 'random').
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 공통 옵션

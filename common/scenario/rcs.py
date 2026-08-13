@@ -60,6 +60,10 @@ class RCSSegmenter(Segmenter):
         min_pts: int = 10,
         cv_v_thresh: float = 3.60,   # CC→CV 전환 전압 임계값 [V]
         cv_cc_frac: float = 0.80,    # CC→CV: I < cv_cc_frac × I_max
+        axis_name: str = "rcs",   # 저장 경로/식별용 axis 이름. REGISTRY에 별칭으로
+                                   # 등록해 같은 클래스를 다른 파라미터 프리셋으로 쓸 때
+                                   # (예: "random") --axis-config로 넘겨 기존 "rcs" 캐시와
+                                   # 경로 충돌 없이 분리 저장한다(docs/260811_RESULTS.md 실험2 참고).
     ):
         self.n_samples = n_samples
         self.window = window
@@ -69,6 +73,7 @@ class RCSSegmenter(Segmenter):
         self.min_pts = min_pts
         self.cv_v_thresh = cv_v_thresh
         self.cv_cc_frac = cv_cc_frac
+        self.axis_name = axis_name
 
     def get_spec(self) -> ScenarioSpec:
         if self.assign == "position_bin":
@@ -86,7 +91,7 @@ class RCSSegmenter(Segmenter):
             scenario_names = ["chg", "dis"]
 
         return ScenarioSpec(
-            axis="rcs",
+            axis=self.axis_name,
             n_scenarios=n_scenarios,
             scenario_names=scenario_names,
             n_classes=n_classes,
