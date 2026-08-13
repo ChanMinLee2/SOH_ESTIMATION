@@ -167,3 +167,104 @@ x_hi(N_HI) ──► Stage A: charge/discharge probe gate(HardConcreteGate ×2) 
 - **`full_cycle`(이론적 상한)이 부분 관측 baseline을 이기지 못하는 조건이 있다**: scen_k를
   baseline과 동일하게 맞춘 지점에서 `full_cycle`이 오히려 `q_frac_ref`보다 낮은 R²를 보였다 —
   가설(세그먼트 수 차이, HI 신호 희석)은 있으나 검증되지 않았다.
+
+---
+
+## 6. 실행 스크립트 레퍼런스
+
+### 6-1. `run_pipeline.py` — Step 1~9 오케스트레이터
+
+```
+python run_pipeline.py [FROM_STEP] [--to-step N] [옵션들]
+```
+
+`FROM_STEP`(위치 인자, 기본 1)부터 `--to-step`(기본: 마지막 Step 9)까지 §2의 Step을 순서대로
+실행한다. 축 파라미터·m/k·시드 등은 CLI로 주면 Step 4~9 중 관련 있는 스텝에 자동으로 전달된다
+(예: `--seg-axis`/`--axis-config`는 Step 4/5/6/8에, 분류기인 Step 7은 `run_dir`의
+`scenario_spec.json`에서 축 정보를 읽으므로 전달 대상에서 제외).
+
+**예시**:
+```powershell
+# 전체 파이프라인(Step1~9)
+python run_pipeline.py
+
+# 학습+평가만(Step6~9), q_frac_ref 축, k=25, 시드 42
+$env:SOH_EXCLUDE_STAT_LEAK="1"
+python run_pipeline.py 6 --model-config 5_model/config/exp_qfw_mlp_S.yaml --seg-axis q_frac_ref --n1 0.35 --n2 0.20 --scen-k 25 --seed 42 --split-seed 42 --workers 40
+
+# Phase1→Phase2만(평가 제외), 분류기 스킵
+python run_pipeline.py 6 --to-step 8 --skip-classifier
+```
+
+| 플래그 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `FROM_STEP`(위치인자) | int | 1 | 시작 Step 번호(1~9) |
+| `--to-step` | int | 9(끝까지) | 종료 Step 번호(포함) |
+| `--skip-classifier` | flag | off | Step 7 건너뜀(oracle만 평가하게 됨) |
+| `--workers` | int | `min(8, cpu_count)` | Step 1~5(데이터) 병렬 프로세스 수 |
+| `--model-config` | str | `5_model/config/scr.yaml` | 학습/평가 yaml 경로 |
+| `--gates-from` | str | 자동탐색 | Step 7/8이 쓸 Phase 1 run 디렉터리 직접 지정 |
+| `--checkpoint` | str | 자동탐색 | Step 9 평가용 체크포인트 직접 지정 |
+| `--seg-axis` | str | yaml 값 | 세그멘테이션 축(Step 4/5/6/8) |
+| `--axis-config` | JSON str | `{}` | 축 파라미터(축 이름으로 감싸지 않은 "맨" dict — `{"n1":0.4,...}`이지 `{"q_frac_wide":{...}}`가 아님) |
+| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | — | None | `q_frac_wide`/`vqslope` 축 파라미터의 PowerShell용 단축 인자(`--axis-config` 대체) |
+| `--mid-start`/`--mid-end`/`--seg-len` | float | None | `q_abs` 축 전용 단축 인자 |
+| `--ref-lag`/`--noise-amp`/`--noise-mode`/`--noise-period`/`--min-pts` | — | None | `q_frac_ref` 축 전용 단축 인자 |
+| `--exclude-cv` | flag | off | 충전 세그먼트에서 CC→CV 전환 이후 구간 제외(Step 4/6/7/8) |
+| `--skip-shape` | flag | off | 전처리 필터7(형상 이상치 제거) 비활성화(Step 2/4/6/7/8) |
+| `--charge-m`/`--discharge-m` | int | yaml 값 | Stage A probe 게이트 예산(Step 6/8) |
+| `--scen-k` | int | yaml 값 | Stage B 시나리오 게이트 예산(Step 6/8) |
+| `--seed` | int | yaml 값 | 모델 초기화 RNG 시드(Step 6/8) |
+| `--split-seed` | int | yaml 값(42) | train/val/test 셀 분할 시드(Step 6/8) |
+| `--phase1-lr`/`--phase2-lr` | float | yaml 값 | Phase 1/Phase 2 각각 독립적인 peak LR 오버라이드 |
+| `--with-raw-cnn` | flag | off | Phase 2(Step 8)에 raw CNN 임베딩 융합, 분류기(Step 7)의 RawCNN을 자동으로 얼려 재사용 |
+
+**주의(PowerShell)**: `--axis-config`에 큰따옴표가 포함된 JSON을 줄 때는 `'{\"key\": ...}'`처럼
+전체를 작은따옴표로 감싸고 내부 큰따옴표를 `\"`로 이스케이프해야 한다 — 안 그러면 네이티브
+실행파일 인자 전달 과정에서 따옴표가 삭제된다(2026-08-12 확인된 PowerShell 5.1 특성).
+
+### 6-2. `5_model/visualize_results.py` — 여러 run 비교 시각화("result_comparison")
+
+```
+python 5_model/visualize_results.py --runs <run_dir> <run_dir> [... 2개 이상] [옵션들]
+```
+
+Step 8(Phase 2) 출력 run 폴더 2개 이상을 받아 `metrics.json`/`predictions/test_predictions.csv`/
+`routing/routing_table.csv`/`checkpoints/*.pt`를 읽고, 하나의 PNG로 다축 비교한다. 파일명은
+`result_comparison.py`가 아니라 `visualize_results.py`지만 산출물 폴더/파일명이
+`result_comparison`이라 그렇게 불린다.
+
+**결과 저장 위치**: `_5_data_model_scr/comparison/<MMDD_HHMM>_<title 또는 result_comparison>/`
+— `result_comparison.png`, `summary.json`.
+
+**PNG 구성(GridSpec)**:
+| 행 | 내용 |
+|---|---|
+| 1~3 | RMSE/MAE/MAPE — hard 라우팅 기준, Overall + 시나리오별 |
+| 4 | 스칼라 지표 7종(R², 분류정확도, 인퍼런스 시간, 파라미터 수, oracle→hard 저하율, 평균 HI 비용, random-seg RMSE) |
+| 5 | 선정 HI 자카드 유사도 히트맵(이진, top-k 컷 후) — 시나리오 간 HI 선택이 얼마나 다른지 |
+| 6 | 확률 가중 Jaccard(Ruzicka) 히트맵 — top-k로 자르기 전 원본 게이트 확률 기준 |
+| 7 | (`--with-jacobian` 지정 시) 선정 HI의 gradient 코사인 유사도 히트맵 |
+
+같은 시나리오 축을 공유하는 run들끼리는 시나리오별 서브플롯까지 다 나오고, 축이 다르면
+자동으로 "축 간 비교 모드"(Overall만, 행 5~7 생략)로 전환된다.
+
+**예시**:
+```powershell
+python 5_model/visualize_results.py --runs "_5_data_model_scr/0811_1612_p2_mlp_full_noleak" "_5_data_model_scr/0811_1628_p2_mlp_full_noleak" --labels k15 k25 --title full_scenk_sweep
+```
+
+| 플래그 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `--runs` | str 리스트 | (필수) | 비교할 run 디렉터리 경로 2개 이상 |
+| `--labels` | str 리스트 | 폴더명 | run별 표시 이름(`--runs`와 개수 일치 필요) |
+| `--with-jacobian` | flag | off | 행 7(gradient 코사인 유사도) 추가 — 느림, 데이터셋 재구축 필요 |
+| `--checkpoint-name` | str | `best.pt` | run별 사용할 체크포인트 파일명(없으면 `final.pt` 폴백) |
+| `--infer-batch-size` | int | 256 | 인퍼런스 시간 측정용 배치 크기 |
+| `--infer-warmup` | int | 10 | 인퍼런스 시간 측정 전 워밍업 반복 수 |
+| `--infer-reps` | int | 50 | 인퍼런스 시간 측정 반복 수 |
+| `--jacobian-max-samples` | int | 300 | 시나리오/전체당 gradient 계산에 쓸 최대 샘플 수 |
+| `--device` | str | `auto` | 연산 디바이스 |
+| `--out-name` | str | None | 결과 폴더명 전체 오버라이드(`--title`보다 우선) |
+| `--title` | str | `result_comparison` | 결과 폴더명의 접미사 부분만 대체(`<MMDD_HHMM>_<title>`) |
+| `--rep-cells` | str 리스트 | 자동선정(MIT/HUST 각 최대 3개) | 용량곡선 비교 플롯에 쓸 셀 ID 직접 지정 |
