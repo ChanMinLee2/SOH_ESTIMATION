@@ -35,6 +35,10 @@ try:
     # (안 넣으면 RCSSegmenter 기본값 axis_name="rcs"가 적용돼 그대로 rcs/ 경로를 씀) —
     # docs/260811_RESULTS.md 실험 2 참고.
     REGISTRY["random"] = RCSSegmenter
+    # "random_grid" 별칭: placement="grid"(결정론적 등간격 배치, 커버리지 100% 보장)로 쓸 때
+    # "random"(랜덤 배치, 평균 커버리지 <100%) 캐시와 분리 저장. --axis-config에
+    # "axis_name": "random_grid"와 "placement": "grid"를 반드시 함께 포함해야 한다.
+    REGISTRY["random_grid"] = RCSSegmenter
 except Exception:
     pass
 

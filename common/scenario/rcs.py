@@ -64,6 +64,13 @@ class RCSSegmenter(Segmenter):
                                    # 등록해 같은 클래스를 다른 파라미터 프리셋으로 쓸 때
                                    # (예: "random") --axis-config로 넘겨 기존 "rcs" 캐시와
                                    # 경로 충돌 없이 분리 저장한다(docs/260811_RESULTS.md 실험2 참고).
+        placement: str = "random",   # "random"(기본, 매 사이클 독립 균등분포 시작점) |
+                                      # "grid"(결정론적 등간격 시작점 — [0, 1-window] 구간에
+                                      # n_samples개를 np.linspace로 균등 배치, 커버리지 100%
+                                      # 보장). "random"은 겹침·경계 미커버로 평균 커버리지가
+                                      # window/n_samples 조합에 따라 100%에 못 미칠 수 있다
+                                      # (예: window=0.2,n_samples=12 → 실측 평균 86%,
+                                      # docs/260811_RESULTS.md 2026-08-14 분석 참고).
     ):
         self.n_samples = n_samples
         self.window = window
@@ -74,6 +81,9 @@ class RCSSegmenter(Segmenter):
         self.cv_v_thresh = cv_v_thresh
         self.cv_cc_frac = cv_cc_frac
         self.axis_name = axis_name
+        if placement not in ("random", "grid"):
+            raise ValueError(f"rcs: placement은 'random'|'grid' 중 하나여야 합니다. 현재={placement!r}")
+        self.placement = placement
 
     def get_spec(self) -> ScenarioSpec:
         if self.assign == "position_bin":
@@ -104,6 +114,7 @@ class RCSSegmenter(Segmenter):
                 "unit":      self.unit,
                 "assign":    self.assign,
                 "seed":      self.seed,
+                "placement": self.placement,
             },
         )
 
@@ -129,7 +140,16 @@ class RCSSegmenter(Segmenter):
         seg_local = seg_local_start
 
         max_start = max(0.0, 1.0 - self.window)
-        starts_qf = rng.uniform(0.0, max_start, size=self.n_samples)
+        if self.placement == "grid":
+            # 결정론적 등간격 배치 — window(예:0.2) > 간격(max_start/(n_samples-1))이면
+            # 인접 세그먼트끼리 겹치면서 [0, 1-window] 전체를 빈틈없이 덮는다. n_samples=1이면
+            # 중앙 시작점 하나만 사용(q_frac_wide._start_positions와 동일 관례).
+            if self.n_samples <= 1:
+                starts_qf = np.array([max_start / 2.0])
+            else:
+                starts_qf = np.linspace(0.0, max_start, self.n_samples)
+        else:
+            starts_qf = rng.uniform(0.0, max_start, size=self.n_samples)
 
         for start_qf in starts_qf:
             end_qf = start_qf + self.window
