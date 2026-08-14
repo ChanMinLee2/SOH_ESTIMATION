@@ -17,6 +17,11 @@ from pathlib import Path
 
 _D_ROOT = Path(r"D:\chanminLee\LFP_SOH_prediction_v2")
 
+# 외부 드라이브 루트 자체(원본 대용량 데이터 폴백용, 예: _1_data_unified가 로컬에 없을 때
+# 2_preprocess/preprocess.py가 여기서 찾는다). _D_ROOT의 공개 별칭 — 하위 상수
+# (DATA_4_HI_ROOT 등)로 커버되지 않는, 드라이브 루트 자체가 필요한 극소수 사용처 전용.
+EXTERNAL_DATA_ROOT = _D_ROOT
+
 # _2_data_clean: 2026-08-08 실사조사 결과 코드 어디서도 참조하지 않는 레거시 데이터로
 # 확인됨(2_preprocess/preprocess.py 실제 출력은 이미 _4_data_hi/clean 밑에 통합돼 있음).
 # 여기 상수는 문서화 목적으로만 남겨둔다 — 실제로 참조하는 코드는 없다.

@@ -32,7 +32,6 @@ from typing import Iterator
 import numpy as np
 
 from .base import ScenarioSpec, SegmentRecord, Segmenter
-from .vwindow import _detect_cv_start
 
 _BIN_EDGES = [0.0, 1 / 3, 2 / 3, 1.0]   # lo / mid / hi 경계 (q_frac 기준)
 
@@ -193,13 +192,15 @@ class RCSSegmenter(Segmenter):
                 dis_v, dis_i, dis_dt, dis_q, -1, cell_id, cycle, seg_local, rng)
             yield from recs
 
+        # 충전 (CC+CV 전체 사용 — q_frac_wide.py와 동일 원칙, 2026-08-14 정정).
+        # 예전엔 여기서 자체적으로 _detect_cv_start로 CV 구간을 항상 잘라냈는데, 이러면
+        # hi_correlation.py의 범용 --exclude-cv 플래그(기본 False=CV 포함)와 무관하게
+        # random/random_grid 축만 CV가 항상 빠지는 축 간 불일치가 생겼다(q_frac_ref는
+        # --exclude-cv 없이 돌린 모든 baseline에서 CV를 포함해왔음, docs/260811_RESULTS.md
+        # 참고). CV 포함/제외는 이제 다른 축과 동일하게 hi_correlation.py 호출부의
+        # --exclude-cv 하나로만 통제한다(cv_v_thresh/cv_cc_frac 파라미터는 하위호환을 위해
+        # 시그니처에 남겨두되 더 이상 쓰이지 않음).
         if chg_v is not None and len(chg_v) >= self.min_pts:
-            cv_start = _detect_cv_start(chg_v, chg_i, self.cv_v_thresh, self.cv_cc_frac)
-            cc_v  = chg_v[:cv_start]
-            cc_i  = chg_i[:cv_start]
-            cc_dt = chg_dt[:cv_start]
-            cc_q  = chg_q[:cv_start]
-            if len(cc_v) >= self.min_pts:
-                recs, seg_local = self._sample_segments(
-                    cc_v, cc_i, cc_dt, cc_q, +1, cell_id, cycle, seg_local, rng)
-                yield from recs
+            recs, seg_local = self._sample_segments(
+                chg_v, chg_i, chg_dt, chg_q, +1, cell_id, cycle, seg_local, rng)
+            yield from recs

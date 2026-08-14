@@ -53,17 +53,16 @@ _OUTPUTS_ROOT    = Path(__file__).resolve().parent / "outputs"
 OUTPUT_DIR       = _OUTPUTS_ROOT / date.today().strftime("%m%d")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from data_directories import DATA_4_HI_ROOT  # noqa: E402
+from data_directories import DATA_4_HI_ROOT, EXTERNAL_DATA_ROOT  # noqa: E402
 POSTPROCESS_ROOT = DATA_4_HI_ROOT / "clean"
 
 # _1_data_unified 원본(대용량)이 로컬에 없을 수 있음 — 이 경우 외부 드라이브로 폴백
 # (2_preprocess/diagnose_chg_gap_dt.py와 동일한 관례).
-_EXTERNAL_DATA_ROOT = Path(r"D:\chanminLee\LFP_SOH_prediction_v2")
 
 
 def _resolve_unified_src(dataset: str) -> Path:
     local = PROJECT_ROOT / "_1_data_unified" / dataset
-    return local if local.exists() else _EXTERNAL_DATA_ROOT / "_1_data_unified" / dataset
+    return local if local.exists() else EXTERNAL_DATA_ROOT / "_1_data_unified" / dataset
 
 
 # ─────────────────────────────────────────────────────────────────────────────
