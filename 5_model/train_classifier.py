@@ -56,12 +56,6 @@ def _parse_args() -> argparse.Namespace:
                    help="Phase 2 run 폴더 경로. 분류기를 {run_dir}/classifier/에 저장. "
                         "미지정 시 output_dir 내 가장 최신 폴더 사용")
     p.add_argument("--device",   default="auto")
-    p.add_argument("--epochs",   type=int, default=None,
-                   help="최대 에폭 (yaml training.epochs 오버라이드)")
-    p.add_argument("--lr",       type=float, default=None,
-                   help="학습률 (yaml training.lr 오버라이드)")
-    p.add_argument("--d-hidden", type=int, default=64,
-                   help="MLPProbeClassifier hidden dim (기본 64)")
     p.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
                    help="train_scr.py --exclude-cv 로 학습된 run의 '_ccOnly' 데이터 경로 사용 "
                         "(spec 기반 자동 경로 재구성에 접미사 추가). yaml data.exclude_cv 로도 설정 가능")
@@ -352,11 +346,11 @@ def main() -> None:
 
     # 하이퍼파라미터
     train_cfg = cfg.get("training", {})
-    epochs   = args.epochs or min(train_cfg.get("epochs", 500), 200)
-    lr       = args.lr    or train_cfg.get("lr", 1e-3)
+    epochs   = min(train_cfg.get("epochs", 500), 200)
+    lr       = train_cfg.get("lr", 1e-3)
     patience = train_cfg.get("early_stop_patience", 20)
     batch_sz = train_cfg.get("batch_size", 2048)
-    d_hidden = args.d_hidden
+    d_hidden = 64  # MLPProbeClassifier hidden dim — 튜닝 이력 없어 상수화(docs/params.md)
 
     # 분류기 타입: mlp(기본) | cnn (원시 V/I 곡선 CNN + HI probe 융합)
     clf_type = cfg.get("classifier", {}).get("type", "mlp").lower()

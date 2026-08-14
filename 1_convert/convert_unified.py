@@ -841,8 +841,6 @@ def main():
     parser = argparse.ArgumentParser(description="MIT/HUST → 통일 포맷 변환 (병렬 지원)")
     parser.add_argument("--dataset",      default="all", choices=["mit", "hust", "all"])
     parser.add_argument("--output-root",  default=str(OUTPUT_ROOT))
-    parser.add_argument("--cell",         default=None,
-                        help="HUST 단일 셀 ID (예: 1-1). MIT는 항상 전체 변환.")
     parser.add_argument("--workers",      type=int, default=3,
                         help="병렬 프로세스 수 (기본: 3)")
     parser.add_argument("--no-cache",     action="store_true",
@@ -852,11 +850,11 @@ def main():
     out_root = Path(args.output_root)
 
     if args.dataset in ("mit", "all"):
-        convert_mit(out_root, target_cell=args.cell, n_workers=args.workers,
+        convert_mit(out_root, n_workers=args.workers,
                     no_cache=args.no_cache)
 
     if args.dataset in ("hust", "all"):
-        convert_hust(out_root, target_cell=args.cell, n_workers=args.workers,
+        convert_hust(out_root, n_workers=args.workers,
                      no_cache=args.no_cache)
 
     _plot_sample_cells(

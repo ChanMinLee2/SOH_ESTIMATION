@@ -558,36 +558,13 @@ def main():
         description="세그먼트 분할 시각화 + HI 열화 추이 (카테고리 A–D, 다축 호환)")
     parser.add_argument("--workers",      type=int, default=4,
                         help="HI 추출 병렬 워커 수 (기본: 4)")
-    parser.add_argument("--n-cycles",     type=int, default=4,
-                        help="세그먼트 cuts 플롯 대표 사이클 수 (기본: 4)")
     parser.add_argument("--force",        action="store_true",
                         help="캐시 무시하고 HI 재추출")
     parser.add_argument("--seg-axis",     type=str, default="qfrac",
                         help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster (기본: qfrac)")
     parser.add_argument("--axis-config",  type=str, default="{}",
-                        help="축 파라미터 JSON (예: '{\"max_steps\": 3}'). "
-                             "PowerShell에서는 --n1/--n2/--n-samples/--mode 사용")
-    # q_frac_wide / vqslope 단축 인자 (PowerShell JSON 우회) — hi_correlation.py와 동일
-    parser.add_argument("--n1",        type=float, default=None)
-    parser.add_argument("--n2",        type=float, default=None)
-    parser.add_argument("--n-samples", type=int,   default=None, dest="n_samples")
-    parser.add_argument("--mode",      type=str,   default=None,
-                        help="vqslope: dva|ica")
-    parser.add_argument("--random-segment", action="store_true", dest="random_segment")
-    parser.add_argument("--seg-len-pts", type=int, default=None, dest="seg_len_pts")
+                        help="축 파라미터 JSON (예: '{\"max_steps\": 3}')")
     args = parser.parse_args()
-
-    # 단축 인자 → axis_config 자동 구성
-    if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
-            or args.mode is not None or args.random_segment or args.seg_len_pts is not None):
-        _quick: dict = {}
-        if args.n1        is not None: _quick["n1"]        = args.n1
-        if args.n2        is not None: _quick["n2"]        = args.n2
-        if args.n_samples is not None: _quick["n_samples"] = args.n_samples
-        if args.mode      is not None: _quick["mode"]      = args.mode
-        if args.random_segment:        _quick["random_segment"] = True
-        if args.seg_len_pts is not None: _quick["seg_len_pts"] = args.seg_len_pts
-        args.axis_config = json.dumps(_quick)
 
     _axis = args.seg_axis
     try:
@@ -628,7 +605,7 @@ def main():
         hust_pkls = sorted(HUST_DIR.glob("*.pkl"))
         plot_segment_cuts(mit_pkls, hust_pkls,
                           hi_plot_dir / "hi_segment_cuts.png",
-                          n_cycles=args.n_cycles)
+                          n_cycles=4)
 
     # HI 로드
     print("\n=== HI 로드/추출 ===")

@@ -591,36 +591,6 @@ def main():
     )
     parser.add_argument("--dataset",  default="all", choices=["mit", "hust", "all"],
                         help="처리할 데이터셋 (기본: all)")
-    # 필터4 파라미터
-    parser.add_argument("--dis-gap-s",      type=float, default=600.0,
-                        help="[필터4] 방전 단절 절대 기준 초 (기본: 600)")
-    parser.add_argument("--dis-gap-factor", type=float, default=50.0,
-                        help="[필터4] 방전 단절 배율 기준 median×N (기본: 50)")
-    parser.add_argument("--chg-gap-s",          type=float, default=600.0,
-                        help="[필터4] 충전 완전 중단 절대 기준 초 (기본: 600) — 행 삭제")
-    parser.add_argument("--chg-gap-factor",     type=float, default=50.0,
-                        help="[필터4] 충전 완전 중단 배율 기준 median×N (기본: 50) — 행 삭제")
-    parser.add_argument("--chg-seg-gap-s",      type=float, default=120.0,
-                        help="[필터4] 충전 CC 전환 갭 절대 기준 초 (기본: 120) — chg_gap_seg 플래그")
-    parser.add_argument("--chg-seg-gap-factor", type=float, default=30.0,
-                        help="[필터4] 충전 CC 전환 갭 배율 기준 median×N (기본: 30) — chg_gap_seg 플래그")
-    # 필터5 파라미터
-    parser.add_argument("--window",   type=int,   default=11,
-                        help="[필터5] Rolling Median 윈도우 (기본: 11)")
-    parser.add_argument("--sigma",    type=float, default=2.0,
-                        help="[필터5] 이상치 σ 임계값 (기본: 2.5)")
-    parser.add_argument("--min-std",  type=float, default=0.01,
-                        help="[필터5] std 플로어 Ah (기본: 0.01)")
-    # 필터6 파라미터
-    parser.add_argument("--vend-min", type=float, default=1.8,
-                        help="[필터6] 방전 종지전압 하한 V (기본: 1.8)")
-    # 필터7 파라미터
-    parser.add_argument("--shape-sigma",  type=float, default=30.0,
-                        help="[필터7] 형상 편차 robust z 임계값 (기본: 30.0). 낮을수록 더 많이 제거")
-    parser.add_argument("--shape-window", type=int,   default=11,
-                        help="[필터7] 기준 곡선 rolling median 윈도우 (기본: 11)")
-    parser.add_argument("--shape-grid",   type=int,   default=100,
-                        help="[필터7] q_frac 보간 격자 점 수 (기본: 100)")
     parser.add_argument("--skip-shape",   action="store_true",
                         help="[필터7] 완전 비활성화 — shape_sigma/KNOWN_SHAPE_ANOMALIES "
                              "무관하게 호출 자체를 건너뜀(기존 --shape-sigma 완화와 분리된 "
@@ -630,11 +600,13 @@ def main():
                         help="병렬 프로세스 수 (기본: 4)")
     args = parser.parse_args()
 
-    w, s, m, vm     = args.window, args.sigma, args.min_std, args.vend_min
-    dgs, dgf         = args.dis_gap_s, args.dis_gap_factor
-    cgs, cgf         = args.chg_gap_s, args.chg_gap_factor
-    csgs, csgf       = args.chg_seg_gap_s, args.chg_seg_gap_factor
-    ss, sw, sg       = args.shape_sigma, args.shape_window, args.shape_grid
+    # 튜닝 완료 후 고정된 필터 임계값 (CLI 오버라이드 이력 없어 상수로 승격, docs/params.md 참고).
+    # 필터7 비활성화만 --skip-shape로 계속 실험 축으로 다룬다.
+    w, s, m, vm      = 11, 2.0, 0.01, 1.8            # 필터5(window,sigma,min_std) / 필터6(vend_min)
+    dgs, dgf         = 600.0, 50.0                    # 필터4: 방전 단절 절대·배율 기준
+    cgs, cgf         = 600.0, 50.0                    # 필터4: 충전 완전중단 절대·배율 기준
+    csgs, csgf       = 120.0, 30.0                    # 필터4: 충전 CC전환갭 절대·배율 기준
+    ss, sw, sg       = 30.0, 11, 100                  # 필터7: shape_sigma / shape_window / shape_grid
 
     print("=== 이상 사이클·행 제거 (7단계) ===")
     print(f"  [필터1] 빈 사이클     : min_active_rows=5")

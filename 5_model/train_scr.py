@@ -20,9 +20,8 @@ Usage:
   python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0708_1533
   python 5_model/train_scr.py --phase 1 --charge-m 3 --discharge-m 1 --scen-k 5
 
-Legacy aliases (backward compat):
-  --no-gates  → equivalent to --phase 1
-  gates_from in yaml  → equivalent to --phase 2
+Legacy alias (backward compat):
+  gates_from in yaml  → equivalent to --phase 2 (미지정 시)
 """
 
 from __future__ import annotations
@@ -84,9 +83,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--gates-from",  default=None,
                    help="Phase 2 시 이전 run 폴더 경로 (gates JSON 자동 탐색). "
                         "미지정 시 yaml의 gates_from 사용")
-    # legacy aliases
-    p.add_argument("--no-gates",    action="store_true",
-                   help="[legacy] --phase 1과 동일")
     p.add_argument("--device",      default="auto")
     # 시나리오 축
     p.add_argument("--seg-axis",    default=None,
@@ -98,9 +94,6 @@ def _parse_args() -> argparse.Namespace:
                    help="재현성 시드 — 모델 초기화/torch·numpy·random RNG (yaml training.seed 오버라이드)")
     p.add_argument("--split-seed",  type=int, default=None,
                    help="train/val/test 셀 분할 시드 (yaml data.split_seed 오버라이드)")
-    p.add_argument("--lr",          type=float, default=None,
-                   help="peak LR (yaml training.lr 오버라이드). Phase 1/2 공용 필드라서 "
-                        "Phase 2만 따로 낮추고 싶을 때 이 옵션으로 지정")
     p.add_argument("--exclude-cv",  action="store_true", dest="exclude_cv",
                    help="hi_correlation.py --exclude-cv 로 추출된 '_ccOnly' 경로 사용 "
                         "(data_dir/seg_data_dir 미지정 시 자동 경로에 접미사 추가). "
@@ -118,10 +111,6 @@ def _parse_args() -> argparse.Namespace:
                    help="--with-raw-cnn과 함께: classifier clf_best.pt 경로를 주면 그 RawCNN을 "
                         "얼려서 재사용(방안 a). 미지정 시 랜덤 초기화 후 Phase2와 함께 학습(방안 b). "
                         "(yaml model.raw_cnn_pretrained_from 오버라이드)")
-    p.add_argument("--with-raw-flat", action="store_true", dest="with_raw_flat",
-                   help="Phase 2 전용(REGRESSION_UPGRADE.md §2 방안1): 회귀 헤드에 raw V/|I| "
-                        "곡선을 압축 없이 flatten(96D) 결합(yaml model.with_raw_flat 오버라이드). "
-                        "with_raw_cnn과 동시 사용 불가. Phase 1은 무조건 비활성화")
     return p.parse_args()
 
 
@@ -137,13 +126,10 @@ def _resolve_device(device_str: str) -> torch.device:
 
 def _resolve_phase(args: argparse.Namespace, cfg: dict) -> int:
     """
-    --phase > --no-gates(legacy) > yaml gates_from 유무 순서로 phase를 결정한다.
+    --phase > yaml gates_from 유무 순서로 phase를 결정한다.
     """
     if args.phase is not None:
         return args.phase
-    if args.no_gates:
-        print("[train] --no-gates detected → Phase 1 (legacy alias)")
-        return 1
     # gates_from이 설정되어 있으면 Phase 2로
     if cfg.get("data", {}).get("gates_from"):
         print("[train] yaml gates_from 설정 감지 → Phase 2 (legacy behavior)")
@@ -441,8 +427,6 @@ def main() -> None:
         _m_cfg_cli["with_raw_cnn"] = True
     if args.raw_cnn_pretrained_from is not None:
         _m_cfg_cli["raw_cnn_pretrained_from"] = args.raw_cnn_pretrained_from
-    if args.with_raw_flat:
-        _m_cfg_cli["with_raw_flat"] = True
 
     # raw_mlp 모드: HI/게이트 없이 raw_v/raw_i(flatten)만으로 회귀하는 베이스라인
     # (MODEL_DIRECTION.md B-4 계열 — "HI 추출 자체의 기여도" 측정용)
@@ -573,11 +557,6 @@ def main() -> None:
     # seed 오버라이드
     if args.seed is not None:
         cfg.setdefault("training", {})["seed"] = args.seed
-
-    # lr 오버라이드 (Phase 1/2가 yaml training.lr을 공유하므로, 한쪽만 바꾸고 싶을 때 사용)
-    if args.lr is not None:
-        cfg.setdefault("training", {})["lr"] = args.lr
-        print(f"[train] lr override: {args.lr}")
 
     _AXIS_SHORT  = {"qfrac": "qfr", "protocol": "prot", "vwindow": "vwin",
                     "rcs": "rcs", "cluster": "clst", "q_frac_wide": "qfw",

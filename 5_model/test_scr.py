@@ -57,7 +57,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--classifier-ckpt", default=None,
                    help="시나리오 분류기 체크포인트 (B안 E3 routing). "
                         "미지정 시 run_dir/classifier/clf_best.pt 자동 탐색")
-    p.add_argument("--rep-cells",       nargs="+", default=None)
     p.add_argument("--device",          default="auto")
     p.add_argument("--charge-m",    type=int, default=None,
                    help="충전 probe 상위 m개 (yaml classifier.charge_probe_m 오버라이드)")
@@ -66,8 +65,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--scen-k",      type=int, default=None,
                    help="시나리오별 scen HI 수 (yaml regression.scen_k_count 오버라이드). "
                         "다른 k로 학습된 checkpoint를 평가할 때 필요")
-    p.add_argument("--cat-top-k",   type=int, default=None,
-                   help="HI 카테고리 랭킹 히트맵에서 표시할 상위 랭크 수 (기본: 전체 N_HI)")
     return p.parse_args()
 
 
@@ -235,8 +232,7 @@ def main() -> None:
     # 대표 셀 선정
     # ------------------------------------------------------------------
     eval_cfg  = cfg.get("evaluation", {})
-    rep_cells = (args.rep_cells
-                 or eval_cfg.get("rep_cells")
+    rep_cells = (eval_cfg.get("rep_cells")
                  or _pick_rep_cells(test_ds, cfg_saved,
                                     eval_cfg.get("rep_cells_per_dataset", 1)))
     print(f"[test] rep_cells: {rep_cells}")
@@ -349,7 +345,7 @@ def main() -> None:
                 s: _rj.get(f"seg_{s}_names", []) for s in range(spec.n_scenarios)
             }
             evaluator.plot_hi_category_heatmap(routing_dir, scen_ranked_names,
-                                               top_k=args.cat_top_k)
+                                               top_k=None)
 
     # Laplace UQ (train_scr.py Phase 2에서 uq.enabled=true 시 생성됨) — oracle 회귀 기준
     uq_ckpt = run_dir / "checkpoints" / "laplace_uq.pt"

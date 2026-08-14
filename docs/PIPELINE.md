@@ -172,6 +172,57 @@ x_hi(N_HI) ──► Stage A: charge/discharge probe gate(HardConcreteGate ×2) 
 
 ## 6. 실행 스크립트 레퍼런스
 
+> **2026-08-14 CLI 정리**: 아래는 정리(`docs/params.md` — 실사용 이력 없는 디버그·상수형 옵션
+> 53개 제거) 이후의 현재 CLI다. 옵션 수가 예전보다 줄어서 이 문서에 나온 것이 곧 전체 목록이다.
+
+### 6-0. 처음 쓰는 사람을 위해 — `run_pipeline.py` 파라미터 전달법
+
+**이 프로젝트 구조를 몰라도 알아야 할 것은 딱 세 가지다.**
+
+1. **`run_pipeline.py`는 실행기일 뿐, 실제 작업은 안 한다.** Step 1~9는 각각 독립된 파이썬
+   스크립트(`1_convert/convert_unified.py`, `2_preprocess/preprocess.py`, ... `5_model/test_scr.py`)이고,
+   `run_pipeline.py`는 이걸 순서대로 `subprocess`로 실행하는 오케스트레이터다. 그래서
+   `run_pipeline.py --help`에 안 나오는 옵션이 하위 스크립트엔 있을 수 있다(예: `test_scr.py`의
+   `--classifier-ckpt`) — 그럴 땐 `run_pipeline.py`를 거치지 말고 그 스크립트를 직접 실행하면 된다
+   (§6-9 참고).
+2. **`run_pipeline.py`에 준 옵션은 "관련 있는 Step에만" 자동으로 골라 전달된다.** 예를 들어
+   `--seg-axis`는 세그멘테이션이 실제로 일어나는 Step 4/5/6/8에만 전달되고, 분류기 학습(Step 7)에는
+   안 간다(분류기는 자기가 붙는 Phase 1 run의 `scenario_spec.json`에서 축을 읽어오기 때문).
+   아래 표가 "이 옵션을 주면 어느 Step에 자동으로 흘러가는지"를 정리한 것이다 — 이 매핑이
+   `run_pipeline.py`의 `main()` 안에 그대로 코드로 있다(주석 `# ── ... 주입 ──` 블록들).
+
+   | 옵션 | 자동으로 전달되는 Step |
+   |---|---|
+   | `--seg-axis`, `--axis-config`(+단축 인자) | 4, 5, 6, 8 |
+   | `--exclude-cv` | 4, 6, 7, 8 |
+   | `--skip-shape` | 2, 4, 6, 7, 8 |
+   | `--charge-m`, `--discharge-m`, `--scen-k`, `--seed`, `--split-seed` | 6, 8 |
+   | `--with-raw-cnn` | 8만 (+ Step 7에서 학습된 분류기 체크포인트를 자동으로 찾아 같이 넘김) |
+   | `--workers` | 1, 2, 3, 4, 5(데이터 처리 스텝만 — 6~9는 GPU 학습이라 워커 개념이 없음) |
+   | `--model-config` | 6, 7, 8, 9(`--config`라는 이름으로 그대로 전달) |
+
+3. **CLI로 안 주면 yaml 값이 그대로 쓰인다.** `run_pipeline.py`의 옵션은 전부 기본값이 `None`이고,
+   `None`이면 그 옵션을 하위 스크립트에 아예 넘기지 않는다 — 그러면 각 스크립트가 `--model-config`로
+   지정한 yaml(§4의 `main.yaml`/`fixed.yaml` 개편 이전엔 `5_model/config/*.yaml`)의 값을 그대로 쓴다.
+   즉 **"이번 실험에서 바꾸고 싶은 값만" CLI로 주면 되고, 나머지는 yaml에 맡기면 된다** — 모든
+   파라미터를 CLI로 나열할 필요가 없다.
+
+**처음 실행해볼 때 최소 커맨드**(전체 파이프라인, 옵션 없이 yaml 기본값 그대로):
+```powershell
+python run_pipeline.py
+```
+
+**실험 하나 돌릴 때 흔한 패턴**(학습+평가만, 축·k·시드만 바꿈 — 나머지는 yaml 그대로):
+```powershell
+$env:SOH_EXCLUDE_STAT_LEAK="1"
+python run_pipeline.py 6 --model-config 5_model/config/exp_qfw_mlp_S.yaml --seg-axis q_frac_ref --n1 0.35 --n2 0.20 --scen-k 25 --seed 42 --split-seed 42 --workers 40
+```
+
+**PowerShell 주의**: `--axis-config`에 큰따옴표가 포함된 JSON을 직접 줄 때는
+`'{\"key\": ...}'`처럼 전체를 작은따옴표로 감싸고 내부 큰따옴표를 `\"`로 이스케이프해야 한다 —
+안 그러면 네이티브 실행파일 인자 전달 과정에서 따옴표가 삭제된다(PowerShell 5.1 특성). 헷갈리면
+아래 §6-1 표의 `--n1`/`--n2`/`--n-samples` 같은 단축 인자를 대신 쓰면 이 문제 자체가 없다.
+
 ### 6-1. `run_pipeline.py` — Step 1~9 오케스트레이터
 
 ```
@@ -179,9 +230,7 @@ python run_pipeline.py [FROM_STEP] [--to-step N] [옵션들]
 ```
 
 `FROM_STEP`(위치 인자, 기본 1)부터 `--to-step`(기본: 마지막 Step 9)까지 §2의 Step을 순서대로
-실행한다. 축 파라미터·m/k·시드 등은 CLI로 주면 Step 4~9 중 관련 있는 스텝에 자동으로 전달된다
-(예: `--seg-axis`/`--axis-config`는 Step 4/5/6/8에, 분류기인 Step 7은 `run_dir`의
-`scenario_spec.json`에서 축 정보를 읽으므로 전달 대상에서 제외).
+실행한다.
 
 **예시**:
 ```powershell
@@ -196,34 +245,169 @@ python run_pipeline.py 6 --model-config 5_model/config/exp_qfw_mlp_S.yaml --seg-
 python run_pipeline.py 6 --to-step 8 --skip-classifier
 ```
 
-| 플래그 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `FROM_STEP`(위치인자) | int | 1 | 시작 Step 번호(1~9) |
-| `--to-step` | int | 9(끝까지) | 종료 Step 번호(포함) |
-| `--skip-classifier` | flag | off | Step 7 건너뜀(oracle만 평가하게 됨) |
-| `--workers` | int | `min(8, cpu_count)` | Step 1~5(데이터) 병렬 프로세스 수 |
-| `--model-config` | str | `5_model/config/scr.yaml` | 학습/평가 yaml 경로 |
-| `--gates-from` | str | 자동탐색 | Step 7/8이 쓸 Phase 1 run 디렉터리 직접 지정 |
-| `--checkpoint` | str | 자동탐색 | Step 9 평가용 체크포인트 직접 지정 |
-| `--seg-axis` | str | yaml 값 | 세그멘테이션 축(Step 4/5/6/8) |
-| `--axis-config` | JSON str | `{}` | 축 파라미터(축 이름으로 감싸지 않은 "맨" dict — `{"n1":0.4,...}`이지 `{"q_frac_wide":{...}}`가 아님) |
-| `--n1`/`--n2`/`--n-samples`/`--mode`/`--random-segment`/`--seg-len-pts` | — | None | `q_frac_wide`/`vqslope` 축 파라미터의 PowerShell용 단축 인자(`--axis-config` 대체) |
-| `--mid-start`/`--mid-end`/`--seg-len` | float | None | `q_abs` 축 전용 단축 인자 |
-| `--ref-lag`/`--noise-amp`/`--noise-mode`/`--noise-period`/`--min-pts` | — | None | `q_frac_ref` 축 전용 단축 인자 |
-| `--exclude-cv` | flag | off | 충전 세그먼트에서 CC→CV 전환 이후 구간 제외(Step 4/6/7/8) |
-| `--skip-shape` | flag | off | 전처리 필터7(형상 이상치 제거) 비활성화(Step 2/4/6/7/8) |
-| `--charge-m`/`--discharge-m` | int | yaml 값 | Stage A probe 게이트 예산(Step 6/8) |
-| `--scen-k` | int | yaml 값 | Stage B 시나리오 게이트 예산(Step 6/8) |
-| `--seed` | int | yaml 값 | 모델 초기화 RNG 시드(Step 6/8) |
-| `--split-seed` | int | yaml 값(42) | train/val/test 셀 분할 시드(Step 6/8) |
-| `--phase1-lr`/`--phase2-lr` | float | yaml 값 | Phase 1/Phase 2 각각 독립적인 peak LR 오버라이드 |
-| `--with-raw-cnn` | flag | off | Phase 2(Step 8)에 raw CNN 임베딩 융합, 분류기(Step 7)의 RawCNN을 자동으로 얼려 재사용 |
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `FROM_STEP`(위치인자) | int | 1 | 시작 Step 번호(1~9) | `python run_pipeline.py 6` (Step6부터) |
+| `--to-step` | int | 9(끝까지) | 종료 Step 번호(포함) | `--to-step 8` (평가 Step9 제외하고 학습까지만) |
+| `--skip-classifier` | flag | off | Step 7 건너뜀 — `test_scr.py`가 분류기 체크포인트 없으면 자동으로 oracle만 평가 | hard/soft 라우팅 비교가 필요 없을 때 학습 시간 절약 |
+| `--workers` | int | `min(8, cpu_count)` | Step 1~5(데이터) 병렬 프로세스 수 | `--workers 40` |
+| `--model-config` | str | `5_model/config/scr.yaml` | 학습/평가 yaml 경로 | `--model-config 5_model/config/exp_qfw_mlp_S.yaml` |
+| `--seg-axis` | str | yaml 값 | 세그멘테이션 축(§2 REGISTRY 참고) | `--seg-axis q_frac_ref` |
+| `--axis-config` | JSON str | `{}` | 축 파라미터, "맨" dict(`{"n1":0.4,...}`이지 `{"q_frac_wide":{...}}`가 아님) | `--axis-config '{\"n_samples\": 12, \"window\": 0.2}'` |
+| `--n1` / `--n2` / `--n-samples` | float/float/int | None | `q_frac_wide`/`q_frac_ref`/`vqslope` 구간 크기·길이·개수(`--axis-config` 대체, PowerShell 호환) | `--n1 0.35 --n2 0.20` |
+| `--ref-lag` / `--noise-amp` / `--noise-mode` / `--noise-period` | int/float/str/float | None | `q_frac_ref` 전용: 레퍼런스 지연·노이즈 진폭·드리프트 방식(ou\|sine)·특성시간 | `--ref-lag 0 --noise-amp 0.03 --noise-mode ou --noise-period 200` |
+| `--min-pts` | int | None | 세그먼트 최소 포인트 수(기본과 다르면 `_minptsN` 경로로 분리 저장) | `--min-pts 10` |
+| `--exclude-cv` | flag | off | 충전 세그먼트에서 CC→CV 전환 이후 구간 제외 | `random`/`q_frac_ref` 등 축 간 CV 포함 여부를 통일할 때 |
+| `--skip-shape` | flag | off | 전처리 필터7(형상 이상치 제거) 비활성화 | 필터7 영향도를 어블레이션할 때 |
+| `--charge-m` / `--discharge-m` | int | yaml 값 | Stage A probe 게이트 예산(방향별) | `--charge-m 10 --discharge-m 10` |
+| `--scen-k` | int | yaml 값 | Stage B 시나리오 게이트 예산(k) | `--scen-k 25` |
+| `--seed` | int | yaml 값 | 모델 초기화 RNG 시드(torch/numpy/random) | `--seed 42` |
+| `--split-seed` | int | yaml 값(42) | train/val/test 셀 분할 시드 | `--split-seed 0` |
+| `--with-raw-cnn` | flag | off | Phase 2(Step 8)에 raw CNN 임베딩 융합, Step 7 분류기의 RawCNN을 자동으로 얼려 재사용 | Step 6→9를 한 번에 돌릴 때만 자동 연결 |
 
-**주의(PowerShell)**: `--axis-config`에 큰따옴표가 포함된 JSON을 줄 때는 `'{\"key\": ...}'`처럼
-전체를 작은따옴표로 감싸고 내부 큰따옴표를 `\"`로 이스케이프해야 한다 — 안 그러면 네이티브
-실행파일 인자 전달 과정에서 따옴표가 삭제된다(2026-08-12 확인된 PowerShell 5.1 특성).
+**과거 실행에서 특정 run을 다시 잇고 싶을 때(자동탐색이 안 통하는 경우)**: `run_pipeline.py`
+자체엔 `--gates-from`/`--checkpoint` 같은 수동 오버라이드가 없다(자동탐색만 함 — §6-7/§6-9의
+`--gates-from`/`--checkpoint`는 하위 스크립트를 **직접** 실행할 때만 쓰는 옵션이다). 예전 Phase 1
+run을 다시 붙이거나 특정 체크포인트만 평가하고 싶으면 `run_pipeline.py`를 거치지 말고
+`5_model/train_scr.py --phase 2 --gates-from <run_dir>` 또는 `5_model/test_scr.py --checkpoint <path>`를
+직접 실행한다.
 
-### 6-2. `5_model/visualize_results.py` — 여러 run 비교 시각화("result_comparison")
+### 6-2. Step 1 — `1_convert/convert_unified.py`
+
+```powershell
+python 1_convert/convert_unified.py --dataset all --workers 3
+```
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--dataset` | choice | `all` | 변환 대상: `mit`\|`hust`\|`all` | `--dataset mit` |
+| `--output-root` | str | `OUTPUT_ROOT` | 출력 루트 경로 | 기본값 그대로 두는 게 보통 |
+| `--workers` | int | 3 | 병렬 프로세스 수 | `--workers 8` |
+| `--no-cache` | flag | off | 캐시 무시 — `_0_data_raw/`가 있어도 원본부터 재변환 | 원본 파일이 바뀌었을 때 |
+
+### 6-3. Step 2 — `2_preprocess/preprocess.py`
+
+```powershell
+python 2_preprocess/preprocess.py --dataset all --workers 4
+```
+
+7단계 이상치 필터(필터1~7) 중 필터4~7의 임계값은 튜닝이 끝난 뒤 CLI에서 바꾼 이력이 없어
+코드 상수로 승격했다(`docs/params.md` §CLI 정리 참고). 남은 CLI는 아래 3개뿐이다.
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--dataset` | choice | `all` | 처리할 데이터셋: `mit`\|`hust`\|`all` | `--dataset hust` |
+| `--skip-shape` | flag | off | 필터7(형상 이상치) 완전 비활성화 — `_4_data_hi/clean_noshape/`에 별도 저장 | 필터7 있는/없는 데이터를 나란히 비교할 때 |
+| `--workers` | int | `min(4, cpu_count)` | 병렬 프로세스 수 | `--workers 8` |
+
+### 6-4. Step 3 — `3_integrity/check_integrity.py`
+
+```powershell
+python 3_integrity/check_integrity.py --workers 4
+```
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--workers` | int | `min(4, cpu_count)` | 병렬 프로세스 수 | `--workers 8` |
+
+옵션이 이거 하나뿐이다 — 데이터 무결성 검사는 조정할 임계값이 따로 없다.
+
+### 6-5. Step 4 — `4_hi_analysis/hi_correlation.py`
+
+```powershell
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_ref --n1 0.35 --n2 0.20 --force --workers 40
+```
+
+세그멘테이션 + HI 66종 계산을 실제로 수행하는 스크립트. 축 관련 옵션은 `run_pipeline.py`와
+이름·의미가 동일하다(§6-1 참고, 아래 표에선 축 옵션은 요약만).
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--workers` | int | `CPU수-2` | 병렬 프로세스 수 | `--workers 40` |
+| `--force` | flag | off | 캐시 무시하고 HI 재추출 | 코드나 축 파라미터를 바꾼 뒤 재추출할 때(`run_pipeline.py`는 Step4에 항상 이 플래그를 자동으로 붙인다) |
+| `--dataset` | str | `MIT` | 통계 스캔 대상: `MIT`\|`HUST` | `--dataset HUST` |
+| `--seg-axis` | str | `qfrac` | 세그멘테이션 축 | `--seg-axis q_frac_ref` |
+| `--axis-config` | JSON str | `{}` | 축 파라미터(맨 dict) | `--axis-config '{\"n1\": 0.35, \"n2\": 0.2}'` |
+| `--n1`/`--n2`/`--n-samples` | — | None | 축 파라미터 단축 인자(§6-1과 동일) | `--n1 0.35 --n2 0.20` |
+| `--ref-lag`/`--noise-amp`/`--noise-mode`/`--noise-period` | — | None | `q_frac_ref` 전용 단축 인자(§6-1과 동일) | `--ref-lag 0 --noise-amp 0.03` |
+| `--min-pts` | int | None | 세그먼트 최소 포인트 수 | `--min-pts 10` |
+| `--exclude-cv` | flag | off | CC→CV 전환 이후 구간 제외, `_ccOnly` 경로에 저장 | 축 간 CV 포함 여부 통일 |
+| `--skip-shape` | flag | off | `clean_noshape/`(Step2 `--skip-shape` 결과)를 입력으로 사용 | 필터7 영향도 어블레이션 |
+
+### 6-6. Step 5 — `4_hi_analysis/hi_segment_viz.py`
+
+```powershell
+python 4_hi_analysis/hi_segment_viz.py --seg-axis q_frac_ref --axis-config '{\"n1\": 0.35, \"n2\": 0.2}'
+```
+
+세그먼트 분할·HI 추이 시각화 전용 — 이 Step의 산출물(플롯)은 Step 6 이후 어디서도 다시 읽지
+않는다(순수 사람이 보는 용도). 그래서 옵션도 축 지정 + 캐시 제어뿐이다.
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--workers` | int | 4 | HI 추출 병렬 워커 수 | `--workers 8` |
+| `--force` | flag | off | 캐시 무시하고 HI 재추출 | Step4를 새로 돌린 직후 |
+| `--seg-axis` | str | `qfrac` | 세그멘테이션 축 | `--seg-axis q_frac_ref` |
+| `--axis-config` | JSON str | `{}` | 축 파라미터(맨 dict) | `--axis-config '{\"n1\": 0.35, \"n2\": 0.2}'` |
+
+### 6-7. Step 6 & 8 — `5_model/train_scr.py`
+
+```powershell
+python 5_model/train_scr.py --phase 1 --config 5_model/config/scr.yaml
+python 5_model/train_scr.py --phase 2 --gates-from _5_data_model_scr/0708_1533
+```
+
+Phase 1(Step6)/Phase 2(Step8)를 둘 다 이 스크립트 하나가 담당하며 `--phase`로 구분한다.
+`run_pipeline.py`로 Step6→8을 이어 돌리면 `--gates-from`은 자동으로 채워지므로 직접 지정할
+필요가 거의 없다 — **아래 표는 이 스크립트를 단독 실행할 때** 쓰는 전체 옵션이다.
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--config` | str | `5_model/config/scr.yaml` | 모델 설정 yaml | `--config 5_model/config/exp_qfw_mlp_S.yaml` |
+| `--phase` | int | None | 1(Gate 학습) \| 2(분류·회귀 정밀 학습) | `--phase 1` |
+| `--charge-m` / `--discharge-m` | int | yaml 값 | Stage A probe 게이트 예산(방향별) | `--charge-m 10 --discharge-m 10` |
+| `--scen-k` | int | yaml 값 | Stage B 시나리오 게이트 예산(k) | `--scen-k 25` |
+| `--gates-from` | str | yaml `data.gates_from` | Phase 2가 쓸 Phase 1 run 폴더(gates JSON 자동 탐색) | `--gates-from _5_data_model_scr/0708_1533` |
+| `--device` | str | `auto` | 연산 장치 | `--device cuda:0` |
+| `--seg-axis` | str | yaml `scenario.axis` | 세그멘테이션 축 | `--seg-axis q_frac_ref` |
+| `--axis-config` | JSON str | yaml 값 | 축 파라미터(맨 dict) | `--axis-config '{\"n1\": 0.35}'` |
+| `--seed` | int | yaml `training.seed` | 모델 초기화 RNG 시드 | `--seed 42` |
+| `--split-seed` | int | yaml `data.split_seed` | train/val/test 셀 분할 시드 | `--split-seed 0` |
+| `--exclude-cv` | flag | off | `_ccOnly` 데이터 경로 사용 | Step4를 `--exclude-cv`로 돌렸을 때 짝을 맞춤 |
+| `--skip-shape` | flag | off | `_noshape` 데이터 경로 사용 | Step2/4를 `--skip-shape`로 돌렸을 때 짝을 맞춤 |
+| `--with-raw-cnn` | flag | off | Phase 2 전용, raw CNN 임베딩 융합 | REGRESSION_UPGRADE.md §5/§8 실험 |
+| `--raw-cnn-pretrained-from` | str | None | `--with-raw-cnn`과 함께: 분류기 체크포인트 경로(RawCNN 재사용) | `--raw-cnn-pretrained-from <run>/classifier/clf_best.pt` |
+
+### 6-8. Step 7 — `5_model/train_classifier.py`
+
+```powershell
+python 5_model/train_classifier.py --run-dir _5_data_model_scr/0716_1200_p2_mlp_prot
+```
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--config` | str | `5_model/config/scr.yaml` | 모델 설정 yaml | — |
+| `--run-dir` | str | 최신 폴더 자동탐색 | Phase 1 run 폴더 — 분류기를 `{run_dir}/classifier/`에 저장 | `--run-dir _5_data_model_scr/0716_1200_p2_mlp_prot` |
+| `--device` | str | `auto` | 연산 장치 | `--device cuda:0` |
+| `--exclude-cv` | flag | off | `_ccOnly` 데이터 경로 사용 | Step4/6과 짝을 맞춤 |
+| `--skip-shape` | flag | off | `_noshape` 데이터 경로 사용 | Step2/4/6과 짝을 맞춤 |
+
+### 6-9. Step 9 — `5_model/test_scr.py`
+
+```powershell
+python 5_model/test_scr.py --checkpoint _5_data_model_scr/0811_1612_p2_mlp_full/checkpoints/best.pt
+```
+
+| 플래그 | 타입 | 기본값 | 의미 | 예시 |
+|---|---|---|---|---|
+| `--config` | str | `5_model/config/scr.yaml` | 모델 설정 yaml | — |
+| `--checkpoint` | str | None | 평가 체크포인트 경로 | `--checkpoint <run>/checkpoints/best.pt` |
+| `--classifier-ckpt` | str | `run_dir/classifier/clf_best.pt` 자동 탐색 | 시나리오 분류기 체크포인트(hard/soft 라우팅용) | 다른 run의 분류기를 재사용하고 싶을 때 |
+| `--device` | str | `auto` | 연산 장치 | `--device cuda:0` |
+| `--charge-m` / `--discharge-m` | int | yaml 값 | probe m 오버라이드 — 체크포인트 학습 당시 값과 일치해야 함 | `--charge-m 10 --discharge-m 10` |
+| `--scen-k` | int | yaml 값 | scen k 오버라이드 — 체크포인트 학습 당시 값과 일치해야 함 | `--scen-k 25` |
+
+### 6-10. (부록) `5_model/visualize_results.py` — 여러 run 비교 시각화("result_comparison")
 
 ```
 python 5_model/visualize_results.py --runs <run_dir> <run_dir> [... 2개 이상] [옵션들]

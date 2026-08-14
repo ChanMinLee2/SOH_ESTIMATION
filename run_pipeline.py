@@ -15,7 +15,7 @@ LFP SOH Prediction 전체 파이프라인 실행기.
   python run_pipeline.py 6                        # 학습/평가만 (Step 6~9)
   python run_pipeline.py 6 --to-step 8            # Phase1→분류기→Phase2 학습만(평가 제외)
   python run_pipeline.py 6 --to-step 8 --with-raw-cnn  # 위와 동일 + Phase2에 raw CNN 융합(방안 a, 단일 패스)
-  python run_pipeline.py 9 --checkpoint path/to/best.pt  # 평가만
+  python run_pipeline.py 9                         # 평가만(직전 Phase2 run의 best.pt 자동 탐색)
   python run_pipeline.py 3 --workers 8
   python run_pipeline.py --model-config 5_model/config/scr.yaml
 """
@@ -179,15 +179,6 @@ def main():
         help="모델 학습/평가 설정 파일 (기본: 5_model/config/scr.yaml)",
     )
     parser.add_argument(
-        "--gates-from", default=None, metavar="DIR",
-        help="분류기 학습(Step 7)/Phase 2 학습(Step 8) 시 gates 디렉터리(=Phase 1 run) "
-             "직접 지정 (미지정 시 Phase 1 출력 자동 탐색)",
-    )
-    parser.add_argument(
-        "--checkpoint", default=None, metavar="PATH",
-        help="SCR 평가 체크포인트 직접 지정 (미지정 시 Phase 2 출력 자동 탐색)",
-    )
-    parser.add_argument(
         "--seg-axis", default=None, metavar="AXIS",
         help="세그멘테이션 축 (Step 4~6, 8에 전달 — 분류기(Step 7)는 run_dir의 "
              "scenario_spec.json에서 축을 읽으므로 이 옵션이 필요 없음). 예: qfrac, q_frac_wide",
@@ -203,19 +194,6 @@ def main():
                         help="q_frac_wide 세그먼트 길이 (--axis-config 대체)")
     parser.add_argument("--n-samples", type=int,   default=None, dest="n_samples",
                         help="q_frac_wide/vqslope 구간당 세그먼트 수 (--axis-config 대체)")
-    parser.add_argument("--mode",      default=None,
-                        help="vqslope 플래토 검출 모드 dva|ica (--axis-config 대체)")
-    parser.add_argument("--random-segment", action="store_true", dest="random_segment",
-                        help="q_frac_wide/vqslope 구간 내 고정길이 랜덤 창 (--axis-config 대체)")
-    parser.add_argument("--seg-len-pts", type=int, default=None, dest="seg_len_pts",
-                        help="random_segment 시 창의 고정 관측 포인트 수 (기본 20)")
-    # q_abs 전용 단축 인자 (정격용량 비율) — Step 4~7에 그대로 전달
-    parser.add_argument("--mid-start", type=float, default=None, dest="mid_start",
-                        help="q_abs mid 존 시작 (정격용량 비율, 기본 0.2, --axis-config 대체)")
-    parser.add_argument("--mid-end",   type=float, default=None, dest="mid_end",
-                        help="q_abs mid 존 끝 (정격용량 비율, 기본 0.5, --axis-config 대체)")
-    parser.add_argument("--seg-len",   type=float, default=None, dest="seg_len",
-                        help="q_abs 세그먼트 길이 (정격용량 비율, 기본 0.15, --axis-config 대체)")
     # q_frac_ref 전용 단축 인자 (n1/n2/n_samples는 q_frac_wide와 공유해 위 인자 그대로 씀)
     parser.add_argument("--ref-lag",   type=int, default=None, dest="ref_lag",
                         help="q_frac_ref 레퍼런스 지연 사이클 수 (기본 0=q_frac_wide와 동등, --axis-config 대체)")
@@ -250,11 +228,6 @@ def main():
                         help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (yaml training.seed 오버라이드, Step 6/8 전달)")
     parser.add_argument("--split-seed",  type=int, default=None,
                         help="train/val/test 셀 분할 시드 (yaml data.split_seed 오버라이드, Step 6/8 전달)")
-    parser.add_argument("--phase1-lr",   type=float, default=None,
-                        help="Phase 1 peak LR (yaml training.lr 오버라이드, Step 6에만 전달)")
-    parser.add_argument("--phase2-lr",   type=float, default=None,
-                        help="Phase 2 peak LR (yaml training.lr 오버라이드, Step 8에만 전달). "
-                             "Phase 1/2가 yaml lr을 공유하므로 Phase 2만 낮추고 싶을 때 사용")
     parser.add_argument("--with-raw-cnn", action="store_true", dest="with_raw_cnn",
                         help="Phase 2(Step 8)에 회귀 헤드 raw CNN 융합 적용 (REGRESSION_UPGRADE.md "
                              "§5/§8/§10). Step 7에서 학습된 분류기의 RawCNN을 자동으로 얼려서 "
@@ -267,8 +240,6 @@ def main():
     # 모든 하위 스텝(4~7)에 올바른 JSON을 넘긴다. subprocess는 shell 없이 인자를 그대로
     # 전달하므로 PowerShell 따옴표 벗김 문제가 발생하지 않는다.
     if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
-            or args.mode is not None or args.random_segment or args.seg_len_pts is not None
-            or args.mid_start is not None or args.mid_end is not None or args.seg_len is not None
             or args.ref_lag is not None or args.noise_amp is not None
             or args.noise_mode is not None or args.noise_period_cycles is not None
             or args.min_pts is not None):
@@ -277,12 +248,6 @@ def main():
         if args.n1        is not None: _quick["n1"]        = args.n1
         if args.n2        is not None: _quick["n2"]        = args.n2
         if args.n_samples is not None: _quick["n_samples"] = args.n_samples
-        if args.mode      is not None: _quick["mode"]      = args.mode
-        if args.random_segment:        _quick["random_segment"] = True
-        if args.seg_len_pts is not None: _quick["seg_len_pts"] = args.seg_len_pts
-        if args.mid_start is not None: _quick["mid_start"] = args.mid_start
-        if args.mid_end   is not None: _quick["mid_end"]   = args.mid_end
-        if args.seg_len   is not None: _quick["seg_len"]   = args.seg_len
         if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
         if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
         if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
@@ -314,10 +279,6 @@ def main():
         print(f"  seg-axis    : {args.seg_axis}")
     if args.axis_config:
         print(f"  axis-config : {args.axis_config}")
-    if args.gates_from:
-        print(f"  gates-from  : {args.gates_from}")
-    if args.checkpoint:
-        print(f"  checkpoint  : {args.checkpoint}")
     if args.exclude_cv:
         print(f"  exclude-cv  : True")
     if args.skip_shape:
@@ -328,10 +289,6 @@ def main():
         print(f"  discharge-m : {args.discharge_m}")
     if args.scen_k is not None:
         print(f"  scen-k      : {args.scen_k}")
-    if args.phase1_lr is not None:
-        print(f"  phase1-lr   : {args.phase1_lr}")
-    if args.phase2_lr is not None:
-        print(f"  phase2-lr   : {args.phase2_lr}")
     print(f"  실행 스텝   :")
     for n, name, _, _, _ in selected:
         print(f"    Step {n}  {name}")
@@ -377,12 +334,6 @@ def main():
             if args.split_seed is not None:
                 step_extra += ["--split-seed", str(args.split_seed)]
 
-        # ── phase별 lr 오버라이드 (Step 6=Phase1, 8=Phase2 각각 독립) ──────────
-        if num == 6 and args.phase1_lr is not None:
-            step_extra += ["--lr", str(args.phase1_lr)]
-        if num == 8 and args.phase2_lr is not None:
-            step_extra += ["--lr", str(args.phase2_lr)]
-
         # ── Phase 1 전: 스냅샷 ──────────────────────────────────────────────
         if num == 6:
             snapshot = _snapshot_run_dirs()
@@ -391,7 +342,7 @@ def main():
         #    게이트만 있으면 되므로 Phase 2보다 먼저 학습해, Phase 2가 with_raw_cnn으로
         #    이 분류기의 CNN을 그 자리에서 재사용할 수 있게 한다) ──────────────────────
         if num == 7:
-            clf_run = args.gates_from or (str(p1_run_dir) if p1_run_dir else None)
+            clf_run = str(p1_run_dir) if p1_run_dir else None
             if clf_run is None:
                 latest = _find_new_run_dir(set(), phase=1)
                 clf_run = str(latest) if latest else None
@@ -405,7 +356,7 @@ def main():
         # ── Phase 2 전: 스냅샷 + gates-from 주입 (+ --with-raw-cnn 자동 연결) ──────
         if num == 8:
             snapshot = _snapshot_run_dirs()
-            gates_src = args.gates_from or (str(p1_run_dir) if p1_run_dir else None)
+            gates_src = str(p1_run_dir) if p1_run_dir else None
             if gates_src is None:
                 latest = _find_new_run_dir(set(), phase=1)  # Phase 1 run 중 최신
                 gates_src = str(latest) if latest else None
@@ -430,7 +381,7 @@ def main():
 
         # ── 평가 전: checkpoint 주입 ─────────────────────────────────────────
         if num == 9:
-            ckpt = args.checkpoint or _find_checkpoint(p2_run_dir)
+            ckpt = _find_checkpoint(p2_run_dir)
             if ckpt is None:
                 # fallback: 가장 최신 Phase 2 run의 best.pt
                 latest = _find_new_run_dir(set(), phase=2)
