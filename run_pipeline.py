@@ -9,6 +9,17 @@ LFP SOH Prediction 전체 파이프라인 실행기.
 --with-raw-cnn으로 그 분류기의 CNN을 바로 재사용할 수 있게 했다(REGRESSION_UPGRADE.md
 §8/§10). Step 6=Phase1, Step 7=분류기, Step 8=Phase2, Step 9=평가.
 
+2026-08-15: Step 4(HI 추출)가 예전엔 항상 `--force`로 캐시를 무시하고 재추출했다
+(코드/파라미터를 바꾸고 전체 파이프라인을 처음부터 돌릴 때 낡은 캐시를 실수로 쓰는 걸
+막기 위함). 하지만 `python run_pipeline.py 4 --to-step 4 ...`처럼 캐시만 미리
+만들어두려는 실행에서도 매번 강제 재추출이 되는 게 비효율적이라, 기본값을
+"캐시 있으면 재사용"으로 바꾸고 강제 재추출은 `--force-extract`로 명시할 때만
+하도록 뒤집었다 — `hi_correlation.py` 직접 실행과 동일한 기본 동작이 됐다. 단,
+`random`/`random_grid`/`protocol`/`vwindow`/`cluster` 등 축 파라미터가 캐시 파일명에
+안 들어가는 축(`load_or_extract`의 `else` 분기)은 axis_config 값만 바꾸고 축 이름은
+그대로면 옛 캐시를 조용히 재사용할 수 있으니, 그런 축의 파라미터를 바꿀 땐
+`--force-extract`를 꼭 같이 줘야 한다.
+
 사용:
   python run_pipeline.py                          # 전체 파이프라인 (Step 1부터)
   python run_pipeline.py 2                        # Step 2부터 재실행
@@ -18,6 +29,7 @@ LFP SOH Prediction 전체 파이프라인 실행기.
   python run_pipeline.py 9                         # 평가만(직전 Phase2 run의 best.pt 자동 탐색)
   python run_pipeline.py 3 --workers 8
   python run_pipeline.py --model-config 5_model/config/scr.yaml
+  python run_pipeline.py 4 --to-step 4 --force-extract --seg-axis random_grid --axis-config '{...}'  # 캐시 무시하고 강제 재추출
 """
 
 import argparse
@@ -46,7 +58,7 @@ STEPS = [
     (1, "데이터 변환",          "1_convert/convert_unified.py",    ["--dataset", "all"], True),
     (2, "이상 사이클 제거",     "2_preprocess/preprocess.py",       [],                   True),
     (3, "무결성 검사",          "3_integrity/check_integrity.py",   [],                   True),
-    (4, "HI 상관 분석",         "4_hi_analysis/hi_correlation.py",  ["--force"],          True),
+    (4, "HI 상관 분석",         "4_hi_analysis/hi_correlation.py",  [],                   True),
     (5, "HI 세그먼트 시각화",   "4_hi_analysis/hi_segment_viz.py",  [],                   True),
     (6, "SCR Phase 1 학습",     "5_model/train_scr.py",             ["--phase", "1"],     False),
     (7, "시나리오 분류기 학습", "5_model/train_classifier.py",       [],                   False),
@@ -175,6 +187,14 @@ def main():
         help="데이터 스텝(1~5)에 전달할 병렬 프로세스 수 (기본: 8)",
     )
     parser.add_argument(
+        "--force-extract", action="store_true", dest="force_extract",
+        help="Step 4(HI 추출) 캐시를 무시하고 강제 재추출. 기본은 캐시가 있으면 재사용 "
+             "(2026-08-15부터 — 예전엔 항상 강제 재추출이었음). 코드/파라미터를 바꾼 뒤나, "
+             "random/random_grid처럼 캐시 파일명에 axis_config 값이 안 들어가는 축의 "
+             "파라미터만 바꿨을 때는 이 플래그를 꼭 같이 줘야 한다(안 그러면 옛 캐시를 "
+             "조용히 재사용함).",
+    )
+    parser.add_argument(
         "--model-config", default="5_model/config/scr.yaml",
         help="모델 학습/평가 설정 파일 (기본: 5_model/config/scr.yaml)",
     )
@@ -289,6 +309,8 @@ def main():
         print(f"  discharge-m : {args.discharge_m}")
     if args.scen_k is not None:
         print(f"  scen-k      : {args.scen_k}")
+    if args.force_extract:
+        print(f"  force-extract: True  (Step4 캐시 무시)")
     print(f"  실행 스텝   :")
     for n, name, _, _, _ in selected:
         print(f"    Step {n}  {name}")
@@ -311,6 +333,10 @@ def main():
                 step_extra += ["--seg-axis", args.seg_axis]
             if args.axis_config:
                 step_extra += ["--axis-config", args.axis_config]
+
+        # ── 강제 재추출 옵션 주입 (Step 4만 — 기본은 캐시 재사용, 2026-08-15) ──
+        if num == 4 and args.force_extract:
+            step_extra += ["--force"]
 
         # ── CV 제외 옵션 주입 (Step 4=추출, 6=Phase1, 7=분류기, 8=Phase2 — 모두 '_ccOnly' 경로 인지 필요) ──
         if num in (4, 6, 7, 8) and args.exclude_cv:
