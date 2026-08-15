@@ -1691,17 +1691,24 @@ def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
             if im_s is not None and ref_im is None:
                 ref_im = im_s
 
-    # ── 공유 컬러바 ──────────────────────────────────────────────────────
+    # ── 공유 컬러바 ── 이 시점의 fig.get_axes()는 전부 Global+세그먼트 히트맵
+    # (산점도 axes는 아직 생성 전) — 예전엔 n_segs=6(qfrac 계열) 기준 [:7]로
+    # 하드코딩돼 있었는데, random/random_grid(assign="none")처럼 n_segs=2인
+    # 축에서는 무해했지만 우연히 맞았을 뿐이라 명시적으로 전체를 쓰도록 고침.
     if ref_im is not None:
-        cbar = plt.colorbar(ref_im, ax=fig.get_axes()[:7], shrink=0.25, pad=0.01)
+        cbar = plt.colorbar(ref_im, ax=fig.get_axes(), shrink=0.25, pad=0.01)
         cbar.set_label("Spearman ρ", fontsize=10)
 
-    # ── 행 7: 상위 HI 산점도 ─────────────────────────────────────────────
+    # ── 마지막 행: 상위 HI 산점도 ── gs_main은 n_segs+2행(0=Global, 1..n_segs=세그먼트,
+    # 마지막=산점도)이라 마지막 행 인덱스는 n_segs+1. 예전엔 이 값이 항상 7(=n_segs=6인
+    # qfrac/q_frac_wide/q_frac_ref 표준 6-시나리오 축 기준)로 하드코딩돼 있어서
+    # n_segs가 다른 축(random/random_grid의 assign="none"=2시나리오, protocol/vwindow/
+    # cluster/full_cycle 등)에서 GridSpec 범위를 벗어나 IndexError가 났다(2026-08-15).
     abs_mean = corr_df.abs().mean(axis=1).fillna(0).sort_values(ascending=False)
     top_his  = abs_mean.index[:n_top].tolist()
 
     gs_sc = gridspec.GridSpecFromSubplotSpec(
-        2, n_top, subplot_spec=gs_main[7], hspace=0.52, wspace=0.30)
+        2, n_top, subplot_spec=gs_main[n_segs + 1], hspace=0.52, wspace=0.30)
     cmaps  = {"MIT": "Blues",   "HUST": "Oranges"}
     colors = {"MIT": "#1f77b4", "HUST": "#d55e00"}
 
@@ -1967,11 +1974,23 @@ def main():
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
     out = hi_plot_dir / "hi_correlation.png"
     print(f"\n=== Plot 저장: {out} ===")
-    plot_correlation(corr, df, out, n_top=4)
+    # HI 캐시(load_or_extract)는 이 시점에 이미 디스크에 저장 완료된 상태 — 아래는
+    # 순수 시각화라 실패해도 캐시/추출 결과에는 영향 없다. 시나리오 개수(n_segs)가
+    # 다른 축(random/random_grid 등)에서 레이아웃 가정이 깨지는 경우가 실제로
+    # 있었으므로(2026-08-15, gs_main 인덱스 하드코딩 버그), 트렌드/오버레이 플롯과
+    # 동일하게 예외를 잡아 경고만 출력하고 계속 진행한다 — --to-step 4처럼 캐시
+    # 빌드만 필요한 실행이 순전히 플롯 문제로 실패 처리(exit!=0)되지 않게 하기 위함.
+    try:
+        plot_correlation(corr, df, out, n_top=4)
+    except Exception as _e:
+        print(f"[경고] hi_correlation.png 생성 실패(캐시는 정상 저장됨): {_e}")
 
     out_dir = STEP_DIR / "outputs" / (date.today().strftime("%m%d") + _dir_suffix)
     print("\n=== 대표 셀 HI 플롯 ===")
-    _plot_sample_hi(df, corr, out_dir)
+    try:
+        _plot_sample_hi(df, corr, out_dir)
+    except Exception as _e:
+        print(f"[경고] 대표 셀 HI 플롯 생성 실패(캐시는 정상 저장됨): {_e}")
 
     # ── hi_segment_viz.py 플롯 (trend + overlay) ─────────────────────────────
     try:
