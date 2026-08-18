@@ -64,6 +64,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--scen-k", type=int, default=None)
     p.add_argument("--seeds", type=int, nargs="+", required=True)
     p.add_argument("--beta-min", type=float, default=0.1)
+    p.add_argument("--max-epochs", type=int, default=300,
+                   help="Stage1+2(v2) epochs 상한 (기본 300 — cfg 기본 500 대신). "
+                        "Stage0(baseline)은 --model-config 자체의 early_stop_patience를 "
+                        "따르므로, Stage0도 줄이려면 5_model/config/main_qfref_S_p60.yaml "
+                        "처럼 patience를 낮춘 config를 --model-config로 지정할 것")
+    p.add_argument("--v2-patience", type=int, default=60,
+                   help="Stage1+2(v2) 조기종료 patience (기본 60, phase1_trainer_v2.py --patience)")
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="Stage1+2(v2) batch_size 오버라이드 (성능 영향 가능성 있음 — §시간단축 옵션 참고)")
     p.add_argument("--k-values", type=int, nargs="+", default=[5, 15, 25],
                    help="Stage0/1+2/4 수렴성 분석에 쓸 k 목록")
     p.add_argument("--synergy-k", type=int, default=None,
@@ -123,8 +132,11 @@ def main() -> None:
         # ── Stage 1+2: 체크포인트 기준 변경 + temperature annealing ──────────
         if "12" in active_stages:
             pbar.set_description("Stage1+2 개선판 다중시드")
+            v2_extra = ["--max-epochs", str(args.max_epochs), "--patience", str(args.v2_patience)]
+            if args.batch_size is not None:
+                v2_extra += ["--batch-size", str(args.batch_size)]
             _run([py, str(LAB_DIR / "run_convergence_seeds.py"), "--trainer", "v2",
-                  "--beta-min", str(args.beta_min),
+                  "--beta-min", str(args.beta_min), *v2_extra,
                   "--model-config", args.model_config, *common_axis, *common_mk,
                   "--seeds", *[str(s) for s in args.seeds], "--tag", f"{args.tag}_stage12",
                   "--parallel", str(args.parallel)],

@@ -80,6 +80,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--split-seed", type=int, required=True)
     p.add_argument("--beta-min", type=float, default=0.1, help="annealing 종착 BETA(기본 0.1, 원래값 2/3)")
     p.add_argument("--device", default="auto")
+    p.add_argument("--max-epochs", type=int, default=None,
+                   help="cfg의 training.epochs(기본 500) 대신 쓸 상한. 시간 단축용 — "
+                        "--patience 조기종료가 그 전에 걸리면 이 값까지 안 감")
+    p.add_argument("--patience", type=int, default=60,
+                   help="L0 완전 램프 이후, 게이트 포화도가 이 에폭 수만큼 연속 개선 없으면 "
+                        "조기 종료(기본 60 — main_qfref_S_p60.yaml과 동일 근거). "
+                        "베스트 체크포인트 자체는 patience 길이와 무관하게 항상 보존되므로 "
+                        "결과에는 영향 없고 학습 시간만 줄어듦. 0이면 조기종료 비활성(항상 --max-epochs까지)")
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="cfg의 training.batch_size 오버라이드. 배치가 클수록 에폭당 배치 수가 "
+                        "줄어 Stage A/B 게이트 루프(방향×시나리오별 서브포워드)의 배치당 "
+                        "오버헤드 총합이 줄어든다 — 값 자체이 학습 결과를 바꿀 수 있으니 "
+                        "(선형 학습이 아니라 완전 무해하지는 않음) 처음 켤 때는 baseline과 "
+                        "1개 seed로 비교 검증 권장")
     p.add_argument("--tag", required=True)
     return p.parse_args()
 
@@ -133,6 +147,9 @@ def main() -> None:
 
     train_ds, val_ds, _test_ds, norm = build_datasets(cfg, spec=spec)
     tr_cfg = cfg["training"]
+    if args.batch_size is not None:
+        print(f"[p1v2] batch_size 오버라이드: {tr_cfg['batch_size']} -> {args.batch_size}")
+        tr_cfg["batch_size"] = args.batch_size
     train_loader = FastTensorLoader(train_ds, tr_cfg["batch_size"], shuffle=True)
     val_loader = FastTensorLoader(val_ds, tr_cfg["batch_size"], shuffle=False)
 
@@ -155,7 +172,9 @@ def main() -> None:
         loss_cfg["lambda_l0"] = auto_lambda
         print(f"[p1v2] lambda_l0_auto: charge_m={charge_m} discharge_m={discharge_m} scen_k={scen_k} -> {auto_lambda}")
 
-    epochs = tr_cfg["epochs"]
+    epochs = args.max_epochs if args.max_epochs is not None else tr_cfg["epochs"]
+    if args.max_epochs is not None:
+        print(f"[p1v2] epochs 상한 오버라이드: {tr_cfg['epochs']} -> {epochs}")
     warmup_ep = tr_cfg.get("warmup_epochs", 10)
     l0_scheduler = L0LambdaScheduler(target=loss_cfg["lambda_l0"], loss_cfg=loss_cfg, total_epochs=epochs)
     l0_warmup_ep = loss_cfg.get("lambda_l0_warmup_epochs", 50)
@@ -182,6 +201,7 @@ def main() -> None:
 
     best_sat = float("inf")
     best_epoch = -1
+    no_improve = 0  # L0 완전 램프 이후, best_sat 갱신 없이 지난 에폭 수
 
     for epoch in trange(epochs, desc=f"[p1v2:{args.tag}] seed={args.seed}"):
         if epoch < warmup_ep:
@@ -238,12 +258,16 @@ def main() -> None:
 
         # Stage1: 체크포인트 선택 = "L0가 완전히 램프된 이후" 구간에서 포화도 최소
         is_selected = False
-        if epoch >= l0_fully_ramped_ep and sat < best_sat:
-            best_sat = sat
-            best_epoch = epoch
-            is_selected = True
-            torch.save({"model_state": model.state_dict(), "epoch": epoch, "gate_saturation": sat,
-                        "val_rmse": val_rmse_v}, ckpt_path)
+        if epoch >= l0_fully_ramped_ep:
+            if sat < best_sat:
+                best_sat = sat
+                best_epoch = epoch
+                is_selected = True
+                no_improve = 0
+                torch.save({"model_state": model.state_dict(), "epoch": epoch, "gate_saturation": sat,
+                            "val_rmse": val_rmse_v}, ckpt_path)
+            else:
+                no_improve += 1
 
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{epoch+1},{eff_l0:.6f},{beta_now:.4f},{tr_rmse_v:.6f},{tr_r2_v:.6f},"
@@ -253,12 +277,21 @@ def main() -> None:
             tqdm_write(f"epoch {epoch+1:4d}  lambda_l0={eff_l0:.4f}  beta={beta_now:.3f}  "
                        f"tr_r2={tr_r2_v:.4f}  val_r2={val_r2_v:.4f}  sat={sat:.3f}" + (" *selected*" if is_selected else ""))
 
+        # 조기종료: best_sat 갱신 없이 --patience 에폭이 지나면 중단. 이후 남은 에폭을
+        # 더 돌아도 이미 저장된 best_sat 체크포인트가 바뀌지 않으므로(항상 진짜 best만
+        # 저장) 결과에는 영향 없이 시간만 절약된다 — SCRTrainer의 patience와 동일 원리.
+        if args.patience > 0 and no_improve >= args.patience:
+            best_ep_str = str(best_epoch + 1) if best_epoch >= 0 else "없음(한 번도 개선 안 됨)"
+            tqdm_write(f"[p1v2] 조기종료: epoch {epoch+1} (best epoch={best_ep_str}, "
+                       f"{args.patience}에폭 연속 포화도 개선 없음)")
+            break
+
     if best_epoch < 0:
         tqdm_write("[p1v2] 경고: L0 완전 램프 이후 구간에서 포화도가 한 번도 개선되지 않음 — "
-                   "마지막 에폭을 그대로 채택합니다(epochs를 늘리거나 beta_min을 더 낮춰보세요).")
-        torch.save({"model_state": model.state_dict(), "epoch": epochs - 1, "gate_saturation": sat,
+                   "마지막으로 돈 에폭을 그대로 채택합니다(epochs를 늘리거나 beta_min을 더 낮춰보세요).")
+        torch.save({"model_state": model.state_dict(), "epoch": epoch, "gate_saturation": sat,
                     "val_rmse": val_rmse_v}, ckpt_path)
-        best_epoch = epochs - 1
+        best_epoch = epoch
 
     # ---- 최종 선택 체크포인트 복원 후 게이트 JSON 저장 (기존 함수 그대로 재사용) ----
     ckpt = torch.load(ckpt_path, map_location="cpu")

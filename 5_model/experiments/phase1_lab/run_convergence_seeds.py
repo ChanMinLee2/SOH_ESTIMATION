@@ -69,6 +69,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--discharge-m", type=int, default=None)
     p.add_argument("--scen-k", type=int, default=None)
     p.add_argument("--beta-min", type=float, default=0.1, help="--trainer v2 전용")
+    p.add_argument("--max-epochs", type=int, default=None, help="--trainer v2 전용 (phase1_trainer_v2.py --max-epochs)")
+    p.add_argument("--patience", type=int, default=None, help="--trainer v2 전용 (phase1_trainer_v2.py --patience)")
+    p.add_argument("--batch-size", type=int, default=None, help="--trainer v2 전용 (phase1_trainer_v2.py --batch-size)")
     p.add_argument("--seeds", type=int, nargs="+", required=True,
                    help="예: --seeds 42 0 123 7 2024  (split-seed도 동일 값 사용)")
     p.add_argument("--tag", required=True, help="manifest 파일명 구분용 태그")
@@ -100,6 +103,12 @@ def _build_cmd(seed: int, args: argparse.Namespace) -> list[str]:
             "--beta-min", str(args.beta_min),
             "--tag", args.tag,
         ]
+        if args.max_epochs is not None:
+            cmd += ["--max-epochs", str(args.max_epochs)]
+        if args.patience is not None:
+            cmd += ["--patience", str(args.patience)]
+        if args.batch_size is not None:
+            cmd += ["--batch-size", str(args.batch_size)]
     if args.charge_m is not None:
         cmd += ["--charge-m", str(args.charge_m)]
     if args.discharge_m is not None:
