@@ -61,6 +61,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--charge-m", type=int, default=None)
     p.add_argument("--discharge-m", type=int, default=None)
     p.add_argument("--scen-k", type=int, default=None)
+    p.add_argument("--data-dir", default=None, help="cfg에 없으면 필수 (cycle pkl 경로)")
+    p.add_argument("--seg-data-dir", default=None, help="cfg에 없으면 필수 (seg pkl 경로)")
     p.add_argument("--seed", type=int, required=True, help="모든 헤드에 공통으로 쓸 고정 seed")
     p.add_argument("--split-seed", type=int, default=None, help="기본: --seed와 동일")
     p.add_argument("--heads", nargs="+", default=["mlp", "resnet_tab", "transformer"],
@@ -91,6 +93,10 @@ def _build_cmd(head: str, args: argparse.Namespace) -> list[str]:
         "--patience", str(args.patience),
         "--tag", f"{args.tag}_{head}",
     ]
+    if args.data_dir is not None:
+        cmd += ["--data-dir", args.data_dir]
+    if args.seg_data_dir is not None:
+        cmd += ["--seg-data-dir", args.seg_data_dir]
     if args.batch_size is not None:
         cmd += ["--batch-size", str(args.batch_size)]
     if args.charge_m is not None:

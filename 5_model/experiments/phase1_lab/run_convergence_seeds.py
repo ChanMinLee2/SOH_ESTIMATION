@@ -68,6 +68,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--charge-m", type=int, default=None)
     p.add_argument("--discharge-m", type=int, default=None)
     p.add_argument("--scen-k", type=int, default=None)
+    p.add_argument("--data-dir", default=None, help="--trainer v2 전용 (cfg에 없으면 필수)")
+    p.add_argument("--seg-data-dir", default=None, help="--trainer v2 전용 (cfg에 없으면 필수)")
     p.add_argument("--beta-min", type=float, default=0.1, help="--trainer v2 전용")
     p.add_argument("--max-epochs", type=int, default=None, help="--trainer v2 전용 (phase1_trainer_v2.py --max-epochs)")
     p.add_argument("--patience", type=int, default=None, help="--trainer v2 전용 (phase1_trainer_v2.py --patience)")
@@ -103,6 +105,10 @@ def _build_cmd(seed: int, args: argparse.Namespace) -> list[str]:
             "--beta-min", str(args.beta_min),
             "--tag", args.tag,
         ]
+        if args.data_dir is not None:
+            cmd += ["--data-dir", args.data_dir]
+        if args.seg_data_dir is not None:
+            cmd += ["--seg-data-dir", args.seg_data_dir]
         if args.max_epochs is not None:
             cmd += ["--max-epochs", str(args.max_epochs)]
         if args.patience is not None:

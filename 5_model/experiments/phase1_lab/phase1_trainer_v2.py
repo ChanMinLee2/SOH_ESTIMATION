@@ -78,6 +78,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--scen-k", type=int, default=None)
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--split-seed", type=int, required=True)
+    p.add_argument("--data-dir", default=None, help="cycle pkl 경로 (cfg['data']['data_dir'] 오버라이드)")
+    p.add_argument("--seg-data-dir", default=None, help="seg pkl 경로 (cfg['data']['seg_data_dir'] 오버라이드)")
     p.add_argument("--beta-min", type=float, default=0.1, help="annealing 종착 BETA(기본 0.1, 원래값 2/3)")
     p.add_argument("--device", default="auto")
     p.add_argument("--max-epochs", type=int, default=None,
@@ -130,6 +132,10 @@ def main() -> None:
     cfg.setdefault("scenario", {})["axis"] = args.seg_axis
     cfg["scenario"]["axis_config"] = axis_cfg
     cfg.setdefault("data", {})["split_seed"] = args.split_seed
+    if args.data_dir is not None:
+        cfg["data"]["data_dir"] = args.data_dir
+    if args.seg_data_dir is not None:
+        cfg["data"]["seg_data_dir"] = args.seg_data_dir
 
     cls_cfg = cfg.setdefault("classifier", {})
     reg_cfg = cfg.setdefault("regression", {})
@@ -142,13 +148,13 @@ def main() -> None:
 
     spec = get_segmenter(args.seg_axis, {args.seg_axis: axis_cfg}).get_spec()
 
-    # 데이터 경로: train_scr.py와 동일 규칙으로 자동 계산하지 않고, main_qfref_S.yaml처럼
-    # 이미 실행해본 축이라면 data_dir/seg_data_dir이 비어있을 수 있으니 최소한만 방어.
+    # 데이터 경로: train_scr.py의 자동 경로계산(_axis_dir) 로직을 재사용하지 않으므로,
+    # yaml에 없으면 --data-dir/--seg-data-dir로 직접 줘야 한다.
     if not cfg["data"].get("data_dir") or not cfg["data"].get("seg_data_dir"):
         raise RuntimeError(
             "cfg['data']['data_dir']/['seg_data_dir']가 비어 있습니다 — "
             "이 v2 트레이너는 train_scr.py의 자동 경로계산 로직을 재사용하지 않으므로, "
-            "--model-config에 data_dir/seg_data_dir을 직접 명시해서 넘겨주세요."
+            "--model-config에 이미 박혀있지 않다면 --data-dir/--seg-data-dir을 직접 넘겨주세요."
         )
 
     train_ds, val_ds, _test_ds, norm = build_datasets(cfg, spec=spec)

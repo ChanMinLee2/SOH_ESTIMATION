@@ -138,6 +138,7 @@ def main() -> None:
             _run([py, str(LAB_DIR / "run_convergence_seeds.py"), "--trainer", "v2",
                   "--beta-min", str(args.beta_min), *v2_extra,
                   "--model-config", args.model_config, *common_axis, *common_mk,
+                  "--data-dir", args.data_dir, "--seg-data-dir", args.seg_data_dir,
                   "--seeds", *[str(s) for s in args.seeds], "--tag", f"{args.tag}_stage12",
                   "--parallel", str(args.parallel)],
                  "Stage1+2: 개선판 다중시드 학습")
