@@ -94,6 +94,12 @@ def _parse_args() -> argparse.Namespace:
                         "오버헤드 총합이 줄어든다 — 값 자체이 학습 결과를 바꿀 수 있으니 "
                         "(선형 학습이 아니라 완전 무해하지는 않음) 처음 켤 때는 baseline과 "
                         "1개 seed로 비교 검증 권장")
+    p.add_argument("--regression-model", default="mlp",
+                   choices=["mlp", "transformer", "i_transformer", "resnet_tab", "ft_transformer"],
+                   help="Phase1 cap_head 종류. 원래 train_scr.py는 이걸 항상 'mlp'로 강제한다"
+                        "(design intent: 게이트 선택이 최종 헤드 아키텍처와 무관해야 함) — "
+                        "이 오버라이드는 그 전제가 실제로 맞는지 검증하기 위한 sanity check 전용. "
+                        "기본값(mlp)이면 기존 train_scr.py Phase1과 동일하게 동작.")
     p.add_argument("--tag", required=True)
     return p.parse_args()
 
@@ -155,7 +161,11 @@ def main() -> None:
 
     lambda_scen = cfg.get("loss", {}).get("lambda_scen", 0.0)
     with_probe_mlp = lambda_scen > 0
-    p1_model_cfg = {**cfg["model"], "regression_model": "mlp", "with_raw_cnn": False, "with_raw_flat": False}
+    # 원래 train_scr.py는 여기를 항상 "mlp"로 강제한다(design intent) — 이 v2 트레이너는
+    # --regression-model로 그 전제를 sanity-check할 수 있게 열어둔다(기본값은 "mlp"라
+    # 오버라이드 안 주면 기존과 100% 동일 동작).
+    p1_model_cfg = {**cfg["model"], "regression_model": args.regression_model,
+                     "with_raw_cnn": False, "with_raw_flat": False}
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
