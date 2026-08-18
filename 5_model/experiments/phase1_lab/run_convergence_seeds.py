@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -87,8 +88,20 @@ def main() -> None:
         if args.dry_run:
             continue
 
+        # train_scr.py stdout에 박스 문자(═ 등)가 섞여 있는데, capture_output=True로
+        # 파이프에 리다이렉트되면 자식 프로세스의 print()가 콘솔 코드페이지(한국어
+        # Windows면 cp949)를 기본 인코딩으로 써서 UnicodeEncodeError가 난다
+        # (PYTHONIOENCODING 미지정 시 파이프 스트림은 tty가 아니라 locale
+        # preferred encoding을 씀). 자식 프로세스에 UTF-8을 강제해 방지.
+        child_env = dict(os.environ)
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
+
         t0 = time.time()
-        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+        result = subprocess.run(
+            cmd, cwd=str(PROJECT_ROOT), capture_output=True,
+            text=True, encoding="utf-8", errors="replace", env=child_env,
+        )
         elapsed = time.time() - t0
         print(result.stdout[-3000:])  # 마지막 부분만 (전체 로그는 각 run_dir에 이미 남음)
         if result.returncode != 0:
