@@ -140,37 +140,48 @@ A vs B vs C 3자 비교 (같은 seed/split)
 $env:SOH_EXCLUDE_STAT_LEAK="1"
 ```
 
-### 7-1. Phase1 cap_head 종류 sanity check (§4-1 근거)
+`n_samples=2`(n1=35%/n2=20%)로 진행하기로 함 — 이 조합의 seg pkl 캐시가 아직
+없으므로(`n1-35%_n2-20%_N-4_...`만 존재) **§7-1 전에 Step4 추출이 먼저 필요**하다.
 
-seed 1개로 `mlp`/`resnet_tab`/`transformer` 3개 헤드의 게이트 랭킹이 얼마나
-다른지 먼저 확인 — Stage0-6 전체(5×2=10회 학습)보다 훨씬 싸게 "헤드 종류가
-게이트 선택에 영향을 주는가"부터 검증한다.
+### 7-0. (사전 준비) n_samples=2 캐시 추출
+
+```powershell
+python run_pipeline.py 4 --to-step 4 --force-extract --seg-axis q_frac_ref `
+  --axis-config '{\"n1\": 0.35, \"n2\": 0.20, \"ref_lag\": 0, \"noise_amp\": 0.03, \"noise_mode\": \"ou\", \"noise_period_cycles\": 200, \"n_samples\": 2}' `
+  --workers 8
+```
+완료되면 `.../q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/{cycle,seg}/`가 생긴다
+(`--data-dir`/`--seg-data-dir`을 아래처럼 그 경로로 맞춰야 함).
+
+### 7-1. Phase1 cap_head 종류 sanity check (§4-1 근거)
 
 ```powershell
 python 5_model/experiments/phase1_lab/run_head_comparison.py `
   --model-config 5_model/config/main_qfref_S.yaml `
   --seg-axis q_frac_ref `
-  --axis-config '{\"n1\": 0.35, \"n2\": 0.20, \"ref_lag\": 0, \"noise_amp\": 0.03, \"noise_mode\": \"ou\", \"noise_period_cycles\": 200, \"n_samples\": 4}' `
-  --data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/cycle" `
-  --seg-data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/seg" `
+  --axis-config '{\"n1\": 0.35, \"n2\": 0.20, \"ref_lag\": 0, \"noise_amp\": 0.03, \"noise_mode\": \"ou\", \"noise_period_cycles\": 200, \"n_samples\": 2}' `
+  --data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle" `
+  --seg-data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg" `
   --scen-k 25 --seed 42 --heads mlp resnet_tab transformer `
-  --max-epochs 300 --patience 60 --beta-min 0.1 --tag head_sanity_k25
+  --max-epochs 300 --patience 60 --beta-min 0.1 --tag head_sanity_k25_N2
 
 python 5_model/experiments/phase1_lab/analyze_convergence.py `
-  --manifest 5_model/experiments/phase1_lab/results/convergence_manifest_head_sanity_k25.json `
+  --manifest 5_model/experiments/phase1_lab/results/convergence_manifest_head_sanity_k25_N2.json `
   --k-values 5 15 25
 ```
 
-**예상 시간**: L0 페널티가 완전히 램프되는 epoch 150(`warmup 50 + ramp 100`)
-이전엔 체크포인트 후보가 안 되므로, 헤드당 최소 150+patience(60)=210epoch,
-최대 `--max-epochs`(300)까지. 실측 epoch당 ≈68초(N_HI=64, 이 축·데이터 기준) 기준:
+**예상 시간**: epoch **개수** 자체는 n_samples와 무관(L0 스케줄이 좌우 — 최소
+150+patience60=210, 최대 `--max-epochs`(300))하지만, **epoch당 시간은 데이터
+행 수에 비례**한다. `n_samples=2`는 zone당 세그먼트가 절반(6zone×2=12개/cycle,
+기존 24개/cycle의 절반)이라 train 행 수도 대략 절반(≈1.68M) — 실측
+≈68초/epoch(N-4, N_HI=64 기준)의 **≈절반인 ≈34초/epoch**로 추정:
 
 | | epoch 범위 | 헤드당 시간 |
 |---|---|---|
-| 최소 | 210 | ≈4.0시간 |
-| 최대(cap) | 300 | ≈5.7시간 |
+| 최소 | 210 | ≈2.0시간 |
+| 최대(cap) | 300 | ≈2.8시간 |
 
-**3개 헤드 순차(`--parallel` 기본 1) 합계 ≈ 12~17시간.**
+**3개 헤드 순차 합계 ≈ 6~8.5시간.**(N-4 기준이던 12~17시간의 절반)
 
 ### 7-2. Stage0-6 통합 검증 (7-1에서 헤드 영향이 미미하다고 확인된 뒤)
 
@@ -178,25 +189,26 @@ python 5_model/experiments/phase1_lab/analyze_convergence.py `
 python 5_model/experiments/phase1_lab/run_all_stages.py `
   --model-config 5_model/config/main_qfref_S_p60.yaml `
   --seg-axis q_frac_ref `
-  --axis-config '{\"n1\": 0.35, \"n2\": 0.20, \"ref_lag\": 0, \"noise_amp\": 0.03, \"noise_mode\": \"ou\", \"noise_period_cycles\": 200, \"n_samples\": 4}' `
-  --data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/cycle" `
-  --seg-data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/seg" `
+  --axis-config '{\"n1\": 0.35, \"n2\": 0.20, \"ref_lag\": 0, \"noise_amp\": 0.03, \"noise_mode\": \"ou\", \"noise_period_cycles\": 200, \"n_samples\": 2}' `
+  --data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle" `
+  --seg-data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg" `
   --scen-k 25 --seeds 42 0 123 7 2024 --beta-min 0.1 `
   --max-epochs 300 --v2-patience 60 `
-  --k-values 5 15 25 --synergy-k 15 --tag k25_full
+  --k-values 5 15 25 --synergy-k 15 --tag k25_full_N2
 ```
 
-**예상 시간** (동일 실측 epoch당 ≈68초 기준, seed 5개 순차):
+**예상 시간** (≈34초/epoch, `n_samples=2` 기준, seed 5개 순차):
 
 | 단계 | seed당 epoch | 계산 | 소요 시간 |
 |---|---|---|---|
-| Stage0 (baseline, `_p60.yaml`이라 patience=60) | best≈50 + patience60 ≈ 110 | 5 × 110 × 68s | ≈10.4시간 |
-| Stage1+2 (v2, 위 §7-1과 동일 210~300 범위, 평균≈250 가정) | ≈250 | 5 × 250 × 68s | ≈23.6시간 |
+| Stage0 (baseline, `_p60.yaml`이라 patience=60) | best≈50 + patience60 ≈ 110 | 5 × 110 × 34s | ≈5.2시간 |
+| Stage1+2 (v2, §7-1과 동일 210~300 범위, 평균≈250 가정) | ≈250 | 5 × 250 × 34s | ≈11.8시간 |
 | Stage3 (앙상블 합성) | — | JSON 처리만 | ≈수초 |
-| Stage4 (클러스터링, 6시나리오) | — | 데이터 로드+상관행렬 | ≈5~10분 |
-| Stage5 (시너지, 6시나리오) | — | 시나리오당 재로드+MI+greedy | ≈30~60분 |
-| **합계** | | | **≈35~36시간 (약 1.5일)** |
+| Stage4 (클러스터링, 6시나리오) | — | 데이터 로드+상관행렬 (행수 절반이라 더 빠름) | ≈3~7분 |
+| Stage5 (시너지, 6시나리오) | — | 시나리오당 재로드+MI+greedy (행수 절반) | ≈20~40분 |
+| **합계** | | | **≈17.5~18시간 (약 하루 이내)** |
 
-7-1(≈12~17h) + 7-2(≈35~36h)를 순서대로 다 돌리면 총 **≈47~53시간(약 2일)**.
-GPU가 1개뿐이라 두 단계를 동시에 돌리면 안 되고(§5 `run_convergence_seeds.py`
-`--parallel` 경고 참고), 반드시 7-1이 끝난 뒤 7-2를 시작할 것.
+7-1(≈6~8.5h) + 7-2(≈17.5~18h)를 순서대로 다 돌리면 총 **≈24~26.5시간(약 1일)**
+— 7-0 추출 시간(수십 분~1시간 내외, `--workers 8` 기준)은 별도. `n_samples=4`
+대비 대략 절반으로 줄었다. GPU가 1개뿐이라 두 단계를 동시에 돌리면 안 되고
+(§5 `run_convergence_seeds.py` `--parallel` 경고 참고), 7-0→7-1→7-2 순서를 지킬 것.
