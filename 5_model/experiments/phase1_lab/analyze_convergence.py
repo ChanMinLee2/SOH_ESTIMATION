@@ -29,6 +29,8 @@ from pathlib import Path
 
 from scipy.stats import kendalltau
 
+from log_utils import append_log_entry, current_command_str
+
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
@@ -161,6 +163,29 @@ def main() -> None:
     print(to_markdown(report))
     print(f"\n[analyze] 저장: {json_out}")
     print(f"[analyze] 저장: {md_out}")
+
+    # ── 실험 로그 자동 기록 ──────────────────────────────────────────────────
+    mean_tau_all = sum(d["mean_kendall_tau"] for d in report["per_scenario"].values()) / len(report["per_scenario"])
+    jac_by_k = {
+        k: sum(d["by_k"][k]["mean_jaccard"] for d in report["per_scenario"].values()) / len(report["per_scenario"])
+        for k in args.k_values
+    }
+    jac_str = ", ".join(f"k={k}: {v:.3f}" for k, v in jac_by_k.items())
+    unstable = mean_tau_all < 0.5 or any(v < 0.5 for v in jac_by_k.values())
+    interpretation = (
+        ("⚠ 불안정 — Kendall τ 또는 Jaccard가 0.5 미만인 항목 있음. "
+         "Stage1(체크포인트 기준)/Stage2(temperature annealing) 적용 후 같은 명령으로 재측정 필요.")
+        if unstable else
+        "안정적 — 지표가 0.5 이상. 다음 seed 수를 늘려 재확인하거나 Stage4(상관클러스터링)로 넘어가도 됨."
+    )
+    append_log_entry(
+        tag=f"convergence_{report['tag']}",
+        purpose=f"Phase1 랭킹 시드-수렴성 측정 ({len(report['seeds'])}개 seed, k={args.k_values})",
+        command=current_command_str(),
+        result_files=[str(json_out), str(md_out)],
+        key_metrics=f"평균 Kendall τ={mean_tau_all:.4f}, 평균 Jaccard({jac_str})",
+        interpretation=interpretation,
+    )
 
 
 if __name__ == "__main__":

@@ -33,6 +33,8 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -46,8 +48,28 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.io_utils import load_config  # noqa: E402
+from utils.tqdm_utils import tqdm, write as tqdm_write  # noqa: E402
 from datasets.segment_dataset import build_datasets  # noqa: E402
 from common.scenario import get_segmenter  # noqa: E402
+
+from log_utils import append_log_entry, current_command_str  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# ProcessPoolExecutor 워커 — 큰 배열(x_tr/x_val 등)을 매 태스크마다 다시 pickle하지
+# 않도록, 워커 프로세스당 한 번만 initializer로 전달해 전역에 캐싱한다.
+# ---------------------------------------------------------------------------
+_WORKER: dict = {}
+
+
+def _init_worker(x_tr, mask_tr, y_tr, x_val, mask_val, y_val, n_bins) -> None:
+    _WORKER["x_tr"] = x_tr
+    _WORKER["mask_tr"] = mask_tr
+    _WORKER["y_tr"] = y_tr
+    _WORKER["x_val"] = x_val
+    _WORKER["mask_val"] = mask_val
+    _WORKER["y_val"] = y_val
+    _WORKER["n_bins"] = n_bins
 
 
 def _parse_args() -> argparse.Namespace:
@@ -63,6 +85,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n-mi-candidates", type=int, default=20, help="pairwise MI 스크리닝 후보 수(상관계수 상위 N개)")
     p.add_argument("--n-ablation-pairs", type=int, default=8, help="초가법성 검증할 상위 시너지 쌍 개수")
     p.add_argument("--split-seed", type=int, default=42)
+    p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1),
+                   help="Stage B/C 병렬 워커 수 (기본: CPU 코어수-1)")
     p.add_argument("--tag", required=True)
     args = p.parse_args()
     return args
@@ -127,22 +151,26 @@ def _bin(col: np.ndarray, n_bins: int = 8) -> np.ndarray:
     return np.minimum((ranks * n_bins) // len(col), n_bins - 1)
 
 
-def pairwise_interaction_info(x: np.ndarray, y: np.ndarray, candidates: list[int],
-                               n_bins: int = 8) -> list[tuple[int, int, float]]:
+def _mi_pair_task(pair: tuple[int, int]) -> tuple[int, int, float]:
+    """워커 프로세스에서 실행 — _WORKER 전역(initializer로 한 번만 세팅됨)을 읽는다."""
     from sklearn.metrics import mutual_info_score
 
-    y_bin = _bin(y, n_bins)
-    marg = {}
-    for i in candidates:
-        marg[i] = mutual_info_score(_bin(x[:, i], n_bins), y_bin)
+    i, j = pair
+    x_tr, y_tr, n_bins = _WORKER["x_tr"], _WORKER["y_tr"], _WORKER["n_bins"]
+    y_bin = _bin(y_tr, n_bins)
+    bi, bj = _bin(x_tr[:, i], n_bins), _bin(x_tr[:, j], n_bins)
+    mi_i = mutual_info_score(bi, y_bin)
+    mi_j = mutual_info_score(bj, y_bin)
+    joint = bi * n_bins + bj
+    i_joint = mutual_info_score(joint, y_bin)
+    return i, j, float(i_joint - mi_i - mi_j)
 
-    results = []
-    for i, j in itertools.combinations(candidates, 2):
-        bi, bj = _bin(x[:, i], n_bins), _bin(x[:, j], n_bins)
-        joint = bi * n_bins + bj
-        i_joint = mutual_info_score(joint, y_bin)
-        synergy = i_joint - marg[i] - marg[j]
-        results.append((i, j, float(synergy)))
+
+def pairwise_interaction_info(executor: ProcessPoolExecutor,
+                               candidates: list[int]) -> list[tuple[int, int, float]]:
+    pairs = list(itertools.combinations(candidates, 2))
+    results = list(tqdm(executor.map(_mi_pair_task, pairs), total=len(pairs),
+                         desc="[B] pairwise interaction info", unit="pair"))
     results.sort(key=lambda t: -t[2])
     return results
 
@@ -163,22 +191,29 @@ def _fit_eval(x_tr, mask_tr, y_tr, x_val, mask_val, y_val, indices: list[int]) -
     return float(np.sqrt(mean_squared_error(y_val, pred)))
 
 
-def greedy_forward_selection(x_tr, mask_tr, y_tr, x_val, mask_val, y_val,
+def _eval_candidate_task(indices: list[int]) -> tuple[list[int], float]:
+    """워커 프로세스에서 실행 — _WORKER 전역을 읽어 후보 HI 집합 하나를 평가."""
+    d = _WORKER
+    rmse = _fit_eval(d["x_tr"], d["mask_tr"], d["y_tr"], d["x_val"], d["mask_val"], d["y_val"], indices)
+    return indices, rmse
+
+
+def greedy_forward_selection(executor: ProcessPoolExecutor, n_hi: int,
                               k: int, pool: list[int] | None = None) -> list[int]:
-    n_hi = x_tr.shape[1]
     pool = pool if pool is not None else list(range(n_hi))
     selected: list[int] = []
     remaining = list(pool)
 
-    for step in range(k):
-        best_idx, best_rmse = None, float("inf")
-        for cand in remaining:
-            rmse = _fit_eval(x_tr, mask_tr, y_tr, x_val, mask_val, y_val, selected + [cand])
-            if rmse < best_rmse:
-                best_rmse, best_idx = rmse, cand
+    for step in tqdm(range(k), desc="[C] greedy forward selection", unit="step"):
+        candidate_sets = [selected + [c] for c in remaining]
+        results = list(tqdm(executor.map(_eval_candidate_task, candidate_sets),
+                             total=len(candidate_sets), desc=f"  step {step+1}/{k} 후보평가",
+                             unit="cand", leave=False))
+        best_indices, best_rmse = min(results, key=lambda r: r[1])
+        best_idx = best_indices[-1]
         selected.append(best_idx)
         remaining.remove(best_idx)
-        print(f"  [greedy] step {step+1}/{k}: +HI_{best_idx:02d}  val_rmse={best_rmse:.5f}")
+        tqdm_write(f"  [greedy] step {step+1}/{k}: +HI_{best_idx:02d}  val_rmse={best_rmse:.5f}")
 
     return selected
 
@@ -223,15 +258,22 @@ def main() -> None:
     baseline_rmse = _fit_eval(x_tr, mask_tr, y_tr, x_val, mask_val, y_val, baseline_top_k)
     print(f"  top-{args.k} (상관계수 기준): {baseline_top_k}  val_rmse={baseline_rmse:.5f}")
 
-    print(f"\n=== B. Pairwise Interaction Information (후보 {args.n_mi_candidates}개) ===")
-    mi_candidates = corr_ranking[:args.n_mi_candidates]
-    interactions = pairwise_interaction_info(x_tr, y_tr, mi_candidates)
-    for i, j, syn in interactions[:10]:
-        tag = "시너지" if syn > 0 else "중복"
-        print(f"  HI_{i:02d} x HI_{j:02d}: interaction_info={syn:+.5f} ({tag})")
+    print(f"\n[병렬] Stage B/C용 워커 {args.workers}개 프로세스 풀 생성 중...")
+    with ProcessPoolExecutor(
+        max_workers=args.workers, initializer=_init_worker,
+        initargs=(x_tr, mask_tr, y_tr, x_val, mask_val, y_val, 8),
+    ) as executor:
 
-    print(f"\n=== C. Greedy Forward Selection (k={args.k}) ===")
-    greedy_top_k = greedy_forward_selection(x_tr, mask_tr, y_tr, x_val, mask_val, y_val, args.k)
+        print(f"\n=== B. Pairwise Interaction Information (후보 {args.n_mi_candidates}개) ===")
+        mi_candidates = corr_ranking[:args.n_mi_candidates]
+        interactions = pairwise_interaction_info(executor, mi_candidates)
+        for i, j, syn in interactions[:10]:
+            tag = "시너지" if syn > 0 else "중복"
+            print(f"  HI_{i:02d} x HI_{j:02d}: interaction_info={syn:+.5f} ({tag})")
+
+        print(f"\n=== C. Greedy Forward Selection (k={args.k}) ===")
+        greedy_top_k = greedy_forward_selection(executor, x_tr.shape[1], args.k)
+
     greedy_rmse = _fit_eval(x_tr, mask_tr, y_tr, x_val, mask_val, y_val, greedy_top_k)
 
     print(f"\n=== D. Ablation 초가법성 검증 (상위 {args.n_ablation_pairs}쌍) ===")
@@ -261,6 +303,24 @@ def main() -> None:
     out_path = RESULTS_DIR / f"synergy_report_{args.tag}.json"
     out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[synergy] 저장: {out_path}")
+
+    # ── 실험 로그 자동 기록 ──────────────────────────────────────────────────
+    n_superadditive = sum(1 for r in ablation_results if r["superadditive_gap"] > 0)
+    interpretation = (
+        f"시너지 이득 확인(개선폭 {gain:+.5f}) — 초가법 쌍 {n_superadditive}/{len(ablation_results)}개. "
+        "실제 SCRModel(HardConcreteGate)로 재검증 권장."
+        if gain > 0 else
+        f"이득 없음(개선폭 {gain:+.5f}) — 개별 상관계수 랭킹으로 충분, 조합탐색 불필요."
+    )
+    append_log_entry(
+        tag=f"synergy_{args.tag}",
+        purpose=f"HI 조합 시너지 검증 (scenario={args.scenario}, k={args.k})",
+        command=current_command_str(),
+        result_files=[str(out_path)],
+        key_metrics=(f"baseline_val_rmse={baseline_rmse:.5f}, greedy_val_rmse={greedy_rmse:.5f}, "
+                      f"synergy_gain={gain:+.5f}, 초가법쌍={n_superadditive}/{len(ablation_results)}"),
+        interpretation=interpretation,
+    )
 
 
 if __name__ == "__main__":
