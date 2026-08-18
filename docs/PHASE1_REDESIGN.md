@@ -104,19 +104,99 @@ A vs B vs C 3자 비교 (같은 seed/split)
 
 - **브랜치**: `exp/phase1-isolated-lab`
 - **`5_model/experiments/phase1_lab/run_convergence_seeds.py`**: 여러 시드로 Phase1을
-  반복 실행(기존 `train_scr.py`를 그대로 호출, 코드 중복 없음)
-- **`5_model/experiments/phase1_lab/analyze_convergence.py`**: 그 결과들의 랭킹
-  일치도(Jaccard/Kendall τ) 계산 + 다중시드 앙상블 랭킹 산출
-- **`5_model/experiments/phase1_lab/analyze_hi_synergy.py`**: HI 조합 시너지 스크리닝
-  (상호정보량 → 조합 인식형 순위 → 초가법성 검증)
-- **`docs/phase1_lab/RESULTS_LOG.md`**: 실험 기록 누적 로그
+  반복 실행(`--trainer baseline`=기존 `train_scr.py` 그대로 / `--trainer v2`=
+  아래 `phase1_trainer_v2.py`), `--parallel`/tqdm 지원
+- **`phase1_trainer_v2.py`**: Stage1(체크포인트 기준=게이트 포화도, L0 완전 램프
+  이후 구간에서만 후보 인정)+Stage2(temperature annealing) 적용한 독립 트레이너.
+  `--max-epochs`/`--patience`(결과 영향 없이 시간만 절약)/`--batch-size`(영향
+  가능성 있어 opt-in)/`--regression-model`(기본 mlp — §4-1 sanity check용 오버라이드)
+- **`run_head_comparison.py`**: 같은 seed로 cap_head 종류만 바꿔가며
+  `phase1_trainer_v2.py` 반복 실행 (§4-1 sanity check 전용)
+- **`analyze_convergence.py`**: 여러 run의 랭킹 일치도(Jaccard/Kendall τ) 계산 +
+  다중시드 앙상블 랭킹 산출 — seed 비교/헤드 비교 양쪽에 재사용
+- **`analyze_hi_synergy.py`**: HI 조합 시너지 스크리닝(상호정보량 → 조합 인식형
+  순위 → 초가법성 검증), `--workers` 병렬화
+- **`analyze_hi_clusters.py`**: 상관 클러스터링으로 랭킹 불안정성 재해석(Stage4)
+- **`materialize_ensemble_gates.py`**: 다중시드 앙상블을 Phase2 `--gates-from`이
+  바로 먹는 합성 run 디렉터리로 저장(Stage6, `PROVENANCE.json`으로 출처 명시)
+- **`run_all_stages.py`**: Stage0→1+2→3→4→5를 한 번에 실행하는 마스터
+  오케스트레이터
+- **`docs/phase1_lab/RESULTS_LOG.md`**: 실험 기록 누적 로그 — 위 분석 스크립트들이
+  실행 끝에 자동으로 append
 
 ## 6. 진행 상태 / 다음 단계
 
 - [x] 문제 진단 (k=5/15/25 랭킹 동일 문제 실증 확인)
 - [x] 로드맵 설계 (§3, §4)
 - [x] 독립 실험 환경 구축 (§5)
-- [ ] Stage 0 — 현재 구조 기준선 측정 (**다음 할 일**: `run_convergence_seeds.py`로
-      시드 5개 실행 → `analyze_convergence.py`로 baseline 수치 확보)
-- [ ] Stage 1~6 순차 적용 및 검증
+- [ ] §4-1 Phase1 cap_head 종류 sanity check (**다음 할 일** — §7 명령어 참고)
+- [ ] Stage 0~6 순차 적용 및 검증 (§7 명령어 참고)
 - [ ] Phase2 통합 방식 A/B/C 비교 실험
+
+## 7. 실행 절차 — 헤드 sanity check → Stage0-6 통합 검증
+
+세션마다 먼저 설정:
+```powershell
+$env:SOH_EXCLUDE_STAT_LEAK="1"
+```
+
+### 7-1. Phase1 cap_head 종류 sanity check (§4-1 근거)
+
+seed 1개로 `mlp`/`resnet_tab`/`transformer` 3개 헤드의 게이트 랭킹이 얼마나
+다른지 먼저 확인 — Stage0-6 전체(5×2=10회 학습)보다 훨씬 싸게 "헤드 종류가
+게이트 선택에 영향을 주는가"부터 검증한다.
+
+```powershell
+python 5_model/experiments/phase1_lab/run_head_comparison.py `
+  --model-config 5_model/config/main_qfref_S.yaml `
+  --seg-axis q_frac_ref `
+  --axis-config '{\"n1\": 0.35, \"n2\": 0.20, \"ref_lag\": 0, \"noise_amp\": 0.03, \"noise_mode\": \"ou\", \"noise_period_cycles\": 200, \"n_samples\": 4}' `
+  --data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/cycle" `
+  --seg-data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/seg" `
+  --scen-k 25 --seed 42 --heads mlp resnet_tab transformer `
+  --max-epochs 300 --patience 60 --beta-min 0.1 --tag head_sanity_k25
+
+python 5_model/experiments/phase1_lab/analyze_convergence.py `
+  --manifest 5_model/experiments/phase1_lab/results/convergence_manifest_head_sanity_k25.json `
+  --k-values 5 15 25
+```
+
+**예상 시간**: L0 페널티가 완전히 램프되는 epoch 150(`warmup 50 + ramp 100`)
+이전엔 체크포인트 후보가 안 되므로, 헤드당 최소 150+patience(60)=210epoch,
+최대 `--max-epochs`(300)까지. 실측 epoch당 ≈68초(N_HI=64, 이 축·데이터 기준) 기준:
+
+| | epoch 범위 | 헤드당 시간 |
+|---|---|---|
+| 최소 | 210 | ≈4.0시간 |
+| 최대(cap) | 300 | ≈5.7시간 |
+
+**3개 헤드 순차(`--parallel` 기본 1) 합계 ≈ 12~17시간.**
+
+### 7-2. Stage0-6 통합 검증 (7-1에서 헤드 영향이 미미하다고 확인된 뒤)
+
+```powershell
+python 5_model/experiments/phase1_lab/run_all_stages.py `
+  --model-config 5_model/config/main_qfref_S_p60.yaml `
+  --seg-axis q_frac_ref `
+  --axis-config '{\"n1\": 0.35, \"n2\": 0.20, \"ref_lag\": 0, \"noise_amp\": 0.03, \"noise_mode\": \"ou\", \"noise_period_cycles\": 200, \"n_samples\": 4}' `
+  --data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/cycle" `
+  --seg-data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/seg" `
+  --scen-k 25 --seeds 42 0 123 7 2024 --beta-min 0.1 `
+  --max-epochs 300 --v2-patience 60 `
+  --k-values 5 15 25 --synergy-k 15 --tag k25_full
+```
+
+**예상 시간** (동일 실측 epoch당 ≈68초 기준, seed 5개 순차):
+
+| 단계 | seed당 epoch | 계산 | 소요 시간 |
+|---|---|---|---|
+| Stage0 (baseline, `_p60.yaml`이라 patience=60) | best≈50 + patience60 ≈ 110 | 5 × 110 × 68s | ≈10.4시간 |
+| Stage1+2 (v2, 위 §7-1과 동일 210~300 범위, 평균≈250 가정) | ≈250 | 5 × 250 × 68s | ≈23.6시간 |
+| Stage3 (앙상블 합성) | — | JSON 처리만 | ≈수초 |
+| Stage4 (클러스터링, 6시나리오) | — | 데이터 로드+상관행렬 | ≈5~10분 |
+| Stage5 (시너지, 6시나리오) | — | 시나리오당 재로드+MI+greedy | ≈30~60분 |
+| **합계** | | | **≈35~36시간 (약 1.5일)** |
+
+7-1(≈12~17h) + 7-2(≈35~36h)를 순서대로 다 돌리면 총 **≈47~53시간(약 2일)**.
+GPU가 1개뿐이라 두 단계를 동시에 돌리면 안 되고(§5 `run_convergence_seeds.py`
+`--parallel` 경고 참고), 반드시 7-1이 끝난 뒤 7-2를 시작할 것.
