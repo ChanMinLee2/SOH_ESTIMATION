@@ -40,7 +40,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -54,8 +53,17 @@ RESULTS_DIR = LAB_DIR / "results"
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
 from utils.tqdm_utils import tqdm, write as tqdm_write  # noqa: E402
 
-_RUN_DIR_RE = re.compile(r"\[train\] run dir:\s*(.+)")
-_P1V2_RUN_DIR_RE = re.compile(r"\[p1v2\] run dir:\s*(.+)")
+# train_scr.py(baseline)/phase1_trainer_v2.py(v2) 각각의 실제 run 출력 위치.
+# run_dir 발견을 stdout 파싱이 아니라 이 디렉터리들의 스냅샷 비교로 하므로
+# (아래 _run_one_seed 참고) 이 경로들이 실제 저장 위치와 일치해야 한다.
+_BASELINE_OUTPUT_ROOT = PROJECT_ROOT / "_5_data_model_scr"
+_V2_OUTPUT_ROOT = LAB_DIR / "results" / "p1v2_runs"
+
+
+def _snapshot_dirs(root: Path) -> set[Path]:
+    if not root.exists():
+        return set()
+    return {p for p in root.iterdir() if p.is_dir()}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -125,33 +133,41 @@ def _build_cmd(seed: int, args: argparse.Namespace) -> list[str]:
 
 
 def _run_one_seed(seed: int, args: argparse.Namespace) -> dict:
+    """capture_output을 쓰지 않고 자식 프로세스가 터미널에 직접 쓰게 둔다 —
+    train_scr.py/phase1_trainer_v2.py 내부의 tqdm(에폭별 진행률/ETA)이 그대로
+    실시간으로 보인다(캡처하면 프로세스가 끝나야 한꺼번에 출력되어 tqdm이 무의미해짐).
+    run_dir은 stdout 파싱 대신 디렉터리 스냅샷 비교로 찾는다."""
     cmd = _build_cmd(seed, args)
 
-    # train_scr.py/phase1_trainer_v2.py stdout에 박스 문자(═ 등)가 섞여 있는데,
-    # capture_output=True로 파이프에 리다이렉트되면 자식 프로세스의 print()가
-    # 콘솔 코드페이지(한국어 Windows면 cp949)를 기본 인코딩으로 써서
-    # UnicodeEncodeError가 난다. 자식 프로세스에 UTF-8을 강제해 방지.
+    # PYTHONIOENCODING: 콘솔 코드페이지(한국어 Windows cp949) UnicodeEncodeError 방지.
+    # capture_output을 안 쓰는 지금은 자식이 이 터미널에 직접 쓰므로 보통 불필요하지만,
+    # 혹시 자식 내부에서 별도로 파일/파이프에 쓰는 경로가 있을 수 있어 방어적으로 유지.
     child_env = dict(os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["PYTHONUTF8"] = "1"
 
+    root = _V2_OUTPUT_ROOT if args.trainer == "v2" else _BASELINE_OUTPUT_ROOT
+    before = _snapshot_dirs(root)
+
     t0 = time.time()
-    result = subprocess.run(
-        cmd, cwd=str(PROJECT_ROOT), capture_output=True,
-        text=True, encoding="utf-8", errors="replace", env=child_env,
-    )
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=child_env)
     elapsed = time.time() - t0
 
-    out = {"seed": seed, "cmd": cmd, "elapsed": elapsed, "ok": result.returncode == 0,
-           "run_dir": None, "tail": result.stdout[-1500:]}
+    out = {"seed": seed, "cmd": cmd, "elapsed": elapsed, "ok": result.returncode == 0, "run_dir": None}
     if not out["ok"]:
-        out["tail"] = result.stderr[-1500:]
         return out
 
-    pattern = _RUN_DIR_RE if args.trainer == "baseline" else _P1V2_RUN_DIR_RE
-    m = pattern.search(result.stdout)
-    if m:
-        out["run_dir"] = m.group(1).strip()
+    new_dirs = _snapshot_dirs(root) - before
+    if args.trainer == "v2":
+        marker = f"_{args.tag}_seed{seed}"
+        new_dirs = {d for d in new_dirs if marker in d.name}
+    else:
+        # train_scr.py 디렉터리명엔 seed가 안 박히므로 Phase1 패턴(_p1_)으로만 거름
+        # (run_pipeline.py._RUN_DIR_RE와 동일 관례) — 동시 실행(--parallel>1) 시
+        # 여러 seed가 동시에 새 폴더를 만들면 구분이 안 되니 baseline은 --parallel 1 권장.
+        new_dirs = {d for d in new_dirs if "_p1_" in d.name}
+    if new_dirs:
+        out["run_dir"] = str(max(new_dirs, key=lambda p: p.stat().st_mtime))
     return out
 
 
@@ -183,9 +199,10 @@ def main() -> None:
                 if r["ok"] and r["run_dir"]:
                     tqdm_write(f"  seed={seed:>6}  OK  ({r['elapsed']:.0f}s)  -> {r['run_dir']}")
                 elif r["ok"]:
-                    tqdm_write(f"  seed={seed:>6}  완료했지만 run dir 파싱 실패 — 수동 확인 필요\n{r['tail']}")
+                    tqdm_write(f"  seed={seed:>6}  완료했지만 run dir을 못 찾음 "
+                               f"({r['elapsed']:.0f}s) — 결과 디렉터리 수동 확인 필요")
                 else:
-                    tqdm_write(f"  seed={seed:>6}  실패:\n{r['tail']}")
+                    tqdm_write(f"  seed={seed:>6}  실패(exit != 0) — 위 실시간 출력의 에러 메시지 참고")
                 pbar.update(1)
 
     for r in sorted(results, key=lambda x: x["seed"]):

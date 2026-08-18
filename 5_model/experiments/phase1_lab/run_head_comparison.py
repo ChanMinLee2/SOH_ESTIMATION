@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -48,9 +47,15 @@ RESULTS_DIR = LAB_DIR / "results"
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
 from utils.tqdm_utils import tqdm, write as tqdm_write  # noqa: E402
 
-_P1V2_RUN_DIR_RE = re.compile(r"\[p1v2\] run dir:\s*(.+)")
+_P1V2_RUNS_DIR = RESULTS_DIR / "p1v2_runs"  # phase1_trainer_v2.py의 실제 출력 위치와 일치시킴
 
 _VALID_HEADS = ["mlp", "transformer", "i_transformer", "resnet_tab", "ft_transformer"]
+
+
+def _snapshot_p1v2_dirs() -> set[Path]:
+    if not _P1V2_RUNS_DIR.exists():
+        return set()
+    return {p for p in _P1V2_RUNS_DIR.iterdir() if p.is_dir()}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -109,26 +114,29 @@ def _build_cmd(head: str, args: argparse.Namespace) -> list[str]:
 
 
 def _run_one_head(head: str, args: argparse.Namespace) -> dict:
+    """capture_output을 안 쓰고 자식 프로세스가 터미널에 직접 쓰게 둔다 —
+    phase1_trainer_v2.py 내부의 trange(에폭별 진행률/ETA)가 그대로 실시간으로 보인다
+    (캡처하면 프로세스가 끝나야 한꺼번에 출력되어 tqdm 의미가 없어짐).
+    run_dir은 stdout 파싱 대신 디렉터리 스냅샷 비교로 찾는다(--parallel>1일 때도
+    태그+헤드+seed로 유일하게 매칭되므로 안전)."""
     cmd = _build_cmd(head, args)
     child_env = dict(os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["PYTHONUTF8"] = "1"
 
+    before = _snapshot_p1v2_dirs()
+    marker = f"_{args.tag}_{head}_seed{args.seed}"
     t0 = time.time()
-    result = subprocess.run(
-        cmd, cwd=str(PROJECT_ROOT), capture_output=True,
-        text=True, encoding="utf-8", errors="replace", env=child_env,
-    )
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=child_env)
     elapsed = time.time() - t0
 
-    out = {"head": head, "cmd": cmd, "elapsed": elapsed, "ok": result.returncode == 0,
-           "run_dir": None, "tail": result.stdout[-1500:]}
+    out = {"head": head, "cmd": cmd, "elapsed": elapsed, "ok": result.returncode == 0, "run_dir": None}
     if not out["ok"]:
-        out["tail"] = result.stderr[-1500:]
         return out
-    m = _P1V2_RUN_DIR_RE.search(result.stdout)
-    if m:
-        out["run_dir"] = m.group(1).strip()
+
+    new_dirs = [d for d in (_snapshot_p1v2_dirs() - before) if marker in d.name]
+    if new_dirs:
+        out["run_dir"] = str(max(new_dirs, key=lambda p: p.stat().st_mtime))
     return out
 
 
@@ -158,8 +166,11 @@ def main() -> None:
                 results.append(r)
                 if r["ok"] and r["run_dir"]:
                     tqdm_write(f"  head={head:<14}  OK  ({r['elapsed']:.0f}s)  -> {r['run_dir']}")
+                elif r["ok"]:
+                    tqdm_write(f"  head={head:<14}  완료했지만 run_dir을 못 찾음 "
+                               f"({r['elapsed']:.0f}s) — results/p1v2_runs/ 수동 확인 필요")
                 else:
-                    tqdm_write(f"  head={head:<14}  실패/파싱실패:\n{r['tail']}")
+                    tqdm_write(f"  head={head:<14}  실패(exit != 0) — 위 실시간 출력의 에러 메시지 참고")
                 pbar.update(1)
 
     for r in sorted(results, key=lambda x: args.heads.index(x["head"])):
