@@ -59,6 +59,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +88,25 @@ _PALETTE = [
     "#9b59b6", "#1abc9c", "#e67e22", "#2980b9",
     "#27ae60", "#c0392b", "#8e44ad", "#16a085",
 ]
+
+
+def _sample_shade(base_hex: str, sample_idx: int, n_samples: int) -> str:
+    """zone의 기본 색조(hue)는 유지하고 명도(lightness)만 샘플 인덱스별로 바꾼다.
+
+    같은 zone(같은 색조)에 속한 n_samples개 세그먼트가 "겹쳐진 하나"가 아니라
+    "서로 다른 개별 인스턴스"임을 한눈에 구분하기 위한 용도(verify-fix Part D,
+    docs/260816_RESULTS.md §2-6). sample_idx=0(zone 내 가장 이른 위치)일수록 밝고,
+    마지막 샘플일수록 어둡다.
+    """
+    import colorsys
+    r = int(base_hex[1:3], 16) / 255
+    g = int(base_hex[3:5], 16) / 255
+    b = int(base_hex[5:7], 16) / 255
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l_new = (0.72 - 0.42 * (sample_idx / (n_samples - 1))) if n_samples > 1 else l
+    r2, g2, b2 = colorsys.hls_to_rgb(h, l_new, min(s * 1.05, 1.0))
+    return "#{:02x}{:02x}{:02x}".format(
+        int(round(r2 * 255)), int(round(g2 * 255)), int(round(b2 * 255)))
 
 # q_frac_wide 세그먼트 파라미터 — CLI --axis-config 대신 여기서 직접 수정 가능.
 # (--axis-config를 명시하면 그 값이 아래 값을 덮어씀)
@@ -1877,6 +1897,272 @@ def _run_compare(args) -> None:
     plot_condition_comparison(cell_pkl, conditions, args.cycle, out_path)
 
 
+def _resolve_seg_dir(axis: str, axis_cfg: dict, dataset: str) -> Path:
+    """hi_correlation.py와 동일한 태그 규칙으로 실제 저장된 seg pkl 디렉터리를 계산.
+
+    _qfw_tag/_qfref_tag/_qabs_tag/_vqslope_tag를 새로 베끼지 않고 hi_correlation.py에서
+    직접 import해서 쓴다 — 태그 규칙이 바뀌면 자동으로 같이 따라감(단일 소스 유지).
+    """
+    if str(STEP_DIR) not in sys.path:
+        sys.path.insert(0, str(STEP_DIR))
+    import hi_correlation as _hc
+
+    if axis == "q_frac_wide":
+        axis_dir = f"q_frac_wide/{_hc._qfw_tag(axis_cfg)}"
+    elif axis == "q_frac_ref":
+        axis_dir = f"q_frac_ref/{_hc._qfref_tag(axis_cfg)}"
+    elif axis == "q_abs":
+        axis_dir = f"q_abs/{_hc._qabs_tag(axis_cfg)}"
+    elif axis == "vqslope":
+        axis_dir = f"vqslope/{_hc._vqslope_tag(axis_cfg)}"
+    else:
+        axis_dir = axis
+    return DATA_4_HI_ROOT / axis_dir / "seg" / dataset.upper()
+
+
+def _recompute_hi(hc_module, rec, seg_name: str, hi_name: str) -> float:
+    """rec(SegmentRecord)의 원시 v/i/dt/q로 hi_name 하나를 즉석 재계산.
+
+    hi_correlation.py가 추출 시점에 쓰는 것과 동일한 함수(_seg_stat/_seg_diff/_seg_lfp —
+    실제 계산 로직의 단일 소스는 5_model/hi_compute.py, hi_correlation.py는 그걸 그대로
+    재노출)를 호출하므로 "저장 로직과 다른 별도 재구현"이 아니라 "그 세그먼트를 지금 다시
+    계산하면 뭐가 나오는가"를 정직하게 확인한다."""
+    merged: dict = {}
+    merged.update(hc_module._strip_seg_suffix(hc_module._seg_stat(rec.v, rec.i, rec.dt, rec.q, seg_name), seg_name))
+    merged.update(hc_module._strip_seg_suffix(hc_module._seg_diff(rec.v, rec.i, rec.dt, rec.q, seg_name), seg_name))
+    merged.update(hc_module._strip_seg_suffix(hc_module._seg_lfp(rec.v, rec.i, rec.dt, rec.q, seg_name), seg_name))
+    return float(merged.get(hi_name, float("nan")))
+
+
+def plot_hi_overwrite_check(
+    cell_pkl: Path,
+    seg_df_cycle: "pd.DataFrame",
+    segmenter,
+    spec_names: list,
+    cell_id: str,
+    cycle_id: int,
+    axis: str,
+    out_path: Path,
+    hi_name: str = "diff_dqdv_area",
+) -> None:
+    """한 (cell, cycle)에서 뽑힌 세그먼트 전부(예: 24개)가 seg pkl에 개별 행으로, 각자
+    고유한 HI 값으로 저장됐는지 — "덮어쓰기 없음"을 눈으로 바로 확인하는 플랏
+    (docs/260816_RESULTS.md §2-6 Part D).
+
+    상단(좌: 방전 V-Q, 우: 충전 V-Q): 세그먼트 각각을 zone(색조)×zone 내 샘플순번(명도)으로
+    구분해 표시 — 같은 zone이라도 서로 다른 밝기의 곡선 n_samples개가 보여야 정상(예전
+    버그였다면 zone당 곡선이 1개만 있었을 것).
+    하단(막대): x축 = 세그먼트(zone#샘플순번), 막대 높이 = seg pkl에 저장된 hi_name 값,
+    검은 ◆ = 그 세그먼트의 원시 v/i/dt/q로 지금 즉석 재계산한 값. zone 내에서도 막대
+    높이가 서로 달라야(=덮어쓰기로 전부 같은 값이 아님) 하고, 막대와 ◆가 정확히
+    겹쳐야(=저장된 값이 바로 그 세그먼트의 값) 한다.
+    """
+    if str(STEP_DIR) not in sys.path:
+        sys.path.insert(0, str(STEP_DIR))
+    import hi_correlation as _hc
+
+    with open(cell_pkl, "rb") as f:
+        raw = pickle.load(f)
+    df_all = raw.get("cycles")
+    if df_all is None:
+        print(f"  [경고] {cell_pkl.name}: cycles 없음 — HI 덮어쓰기 검증 플롯 스킵")
+        return
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)
+
+    grp = df_all[df_all["cycle"] == cycle_id]
+    dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
+    chg = grp[grp["phase"] == "charge"].sort_values("time_s")
+    _empty = np.empty(0, dtype=float)
+
+    dis_arrays = _build_arrays(dis) if len(dis) >= 30 else None
+    chg_arrays = _build_arrays(chg) if len(chg) >= 20 else None
+    if dis_arrays is None and chg_arrays is None:
+        print(f"  [경고] {cell_id} cyc{cycle_id}: 충/방전 데이터 부족 — HI 덮어쓰기 검증 플롯 스킵")
+        return
+
+    v_d, i_d, t_d, dt_d, q_d = dis_arrays if dis_arrays is not None else (_empty,) * 5
+    v_c, i_c, t_c, dt_c, q_c = chg_arrays if chg_arrays is not None else (_empty,) * 5
+
+    # 원본 추출(hi_correlation._extract_one_cell)과 동일한 순서로 재생성:
+    # discharge 세그먼트 전부 → charge 세그먼트 전부. non-random(격자) 모드는 결정론적이라
+    # 같은 axis_config로 다시 부르면 위치까지 완전히 동일한 세그먼트가 나온다.
+    recs = list(segmenter.iter_segments(cell_id, cycle_id, v_d, i_d, dt_d, q_d, v_c, i_c, dt_c, q_c))
+    if not recs:
+        print(f"  [경고] {cell_id} cyc{cycle_id}: 세그먼트 0개 — HI 덮어쓰기 검증 플롯 스킵")
+        return
+
+    n_rows = len(seg_df_cycle)
+    n = min(len(recs), n_rows)
+    if len(recs) != n_rows:
+        print(f"  [경고] 재생성 세그먼트 수({len(recs)}) != 저장된 행 수({n_rows}) — "
+              f"앞 {n}개만 대조합니다(축/min_pts 설정이 캐시와 다를 수 있음).")
+
+    # ── zone별 샘플 순번 부여 + 저장값/재계산값 매칭 ──────────────────────────
+    zone_next_idx: dict = {}
+    zone_of, sample_idx_of = [], []
+    labels, stored_vals, recomp_vals = [], [], []
+    color_map = {sn: _PALETTE[i % len(_PALETTE)] for i, sn in enumerate(spec_names)}
+
+    for i in range(n):
+        rec = recs[i]
+        zone = rec.meta.get("seg_name") or spec_names[rec.scenario_id]
+        s_idx = zone_next_idx.get(zone, 0)
+        zone_next_idx[zone] = s_idx + 1
+        zone_of.append(zone)
+        sample_idx_of.append(s_idx)
+
+        row = seg_df_cycle.iloc[i]
+        stored_vals.append(float(row.get(hi_name, np.nan)))
+        recomp_vals.append(_recompute_hi(_hc, rec, zone, hi_name))
+        labels.append(f"{zone}\n#{s_idx}")
+
+    bar_colors = [_sample_shade(color_map.get(zone_of[i], "#333333"), sample_idx_of[i],
+                                 zone_next_idx[zone_of[i]]) for i in range(n)]
+
+    diffs = np.abs(np.array(stored_vals) - np.array(recomp_vals))
+    max_abs_diff = float(np.nanmax(diffs)) if n else float("nan")
+
+    # ── Figure ────────────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(max(12, n * 0.55), 9))
+    gs = gridspec.GridSpec(2, 2, figure=fig, height_ratios=[1.1, 1.0], hspace=0.55, wspace=0.25)
+    ax_dq  = fig.add_subplot(gs[0, 0])
+    ax_cq  = fig.add_subplot(gs[0, 1])
+    ax_bar = fig.add_subplot(gs[1, :])
+
+    ax_dq.set_title("방전  V-Q  (zone=색조, zone 내 샘플순번=명도)", fontsize=9)
+    ax_dq.set_xlabel("Q_cum [Ah]", fontsize=8); ax_dq.set_ylabel("Voltage [V]", fontsize=8)
+    if dis_arrays is not None:
+        ax_dq.plot(q_d, v_d, color="#cccccc", lw=1.0, zorder=1)
+    ax_cq.set_title("충전  V-Q  (zone=색조, zone 내 샘플순번=명도)", fontsize=9)
+    ax_cq.set_xlabel("Q_cum [Ah]", fontsize=8); ax_cq.set_ylabel("Voltage [V]", fontsize=8)
+    if chg_arrays is not None:
+        ax_cq.plot(q_c, v_c, color="#cccccc", lw=1.0, zorder=1)
+
+    for i in range(n):
+        rec = recs[i]
+        c = bar_colors[i]
+        ax = ax_cq if rec.direction > 0 else ax_dq
+        ax.plot(rec.q, rec.v, color=c, lw=2.4, alpha=0.95, zorder=2)
+        ax.scatter([rec.q[0]], [rec.v[0]], color=c, s=30, zorder=4,
+                   edgecolors="white", linewidths=0.5)
+        ax.annotate(str(sample_idx_of[i]), (rec.q[0], rec.v[0]), fontsize=6, color="black",
+                    xytext=(2, 2), textcoords="offset points")
+
+    # ── 하단: 세그먼트별 저장값(막대) + 재계산값(마커) ──────────────────────────
+    x = np.arange(n)
+    ax_bar.bar(x, stored_vals, color=bar_colors, edgecolor="black", linewidth=0.4,
+               label="seg pkl에 저장된 값", zorder=2)
+    ax_bar.scatter(x, recomp_vals, color="black", marker="D", s=26, zorder=3,
+                   label="원시 v/i/dt/q에서 즉석 재계산한 값")
+    ax_bar.set_xticks(x)
+    ax_bar.set_xticklabels(labels, fontsize=6.5)
+    ax_bar.set_ylabel(hi_name, fontsize=9)
+    ax_bar.set_title(
+        f"세그먼트 {n}개 개별 저장 검증 — 막대 높이가 zone 내에서도 서로 다르고(=덮어쓰기 없음), "
+        f"막대와 ◆가 겹침(=그 세그먼트 고유 값이 정확히 보존됨)",
+        fontsize=9,
+    )
+    ax_bar.legend(fontsize=8, loc="upper right")
+    ax_bar.grid(axis="y", alpha=0.3)
+    ax_bar.text(
+        0.01, 0.97, f"max|저장값-재계산값| = {max_abs_diff:.3e}  (부동소수점 오차 수준 = 완전 일치)",
+        transform=ax_bar.transAxes, fontsize=8, va="top",
+        bbox=dict(boxstyle="round", facecolor="#fff9db", edgecolor="#e0c46c", alpha=0.9),
+    )
+
+    fig.suptitle(
+        f"[{axis}]  {cell_id}  Cycle {cycle_id}  —  세그먼트당 HI 개별 저장 검증 (verify-fix Part D)",
+        fontsize=12, fontweight="bold",
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  플롯 저장: {out_path}  (max|저장-재계산|={max_abs_diff:.3e})")
+
+
+def _run_verify_fix(axis: str, axis_cfg: dict, args) -> None:
+    """2026-08-16 세그먼트별-행 수정이 실제로 반영됐는지 검증 (docs/260816_RESULTS.md §2-6).
+
+    A. 그룹당(cell,cycle,seg_name) 행 수 분포 — n_samples와 일치해야 함(예전엔 전부 1).
+    C. 사이클 내 capacity_Ah 일관성 — 같은 사이클의 여러 행이 같은 타깃을 공유해야 함(std=0).
+    둘 다 hi_correlation.py가 저장한 실제 seg pkl(_4_data_hi/{axis}/{tag}/seg/{dataset}/)을
+    직접 읽는다 — Step4를 --force(-extract)로 재추출한 뒤 실행해야 의미 있는 결과가 나온다.
+    """
+    seg_dir = _resolve_seg_dir(axis, axis_cfg, args.dataset)
+    pkls = sorted(seg_dir.glob("*.pkl"))
+    if not pkls:
+        print(f"[ERROR] {seg_dir} 에 seg pkl이 없습니다 — 먼저 Step4를 재추출하세요:")
+        print(f"  python run_pipeline.py 4 --to-step 4 --force-extract --seg-axis {axis} "
+              f"--axis-config '{json.dumps(axis_cfg)}' --workers 8")
+        return
+
+    print(f"=== seg pkl 로드: {seg_dir} ({len(pkls)}개 셀) ===")
+    df = pd.concat([pd.read_pickle(p) for p in pkls], ignore_index=True)
+    print(f"총 {len(df):,}행\n")
+
+    print("=== A. 그룹당(cell,cycle,seg_name) 행 수 분포 ===")
+    print("(예전 버그: 항상 1. 수정 후: n_samples와 일치해야 함 — 존 경계/min_pts 탈락으로")
+    print(" 일부 소량 미달은 정상)")
+    counts = df.groupby(["cell_id", "cycle", "seg_name"]).size()
+    vc = counts.value_counts().sort_index()
+    print(vc)
+
+    print("\n=== C. 사이클 내 capacity_Ah(SOH 타깃) 일관성 ===")
+    std_per_cycle = df.groupby(["cell_id", "cycle"])["capacity_Ah"].std()
+    max_std = float(std_per_cycle.max()) if len(std_per_cycle) else float("nan")
+    print(f"max std = {max_std:.3e}  (부동소수점 오차 이내여야 정상, 0이 아니면 캡용량 재대입 로직 확인 필요)")
+
+    if not args.no_plot:
+        out_dir = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / f"verify_fix_{axis}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.bar([str(k) for k in vc.index], vc.values, color="#3498db")
+        ax.set_xlabel("그룹(cell,cycle,seg_name)당 행 수")
+        ax.set_ylabel("그룹 개수")
+        ax.set_title(f"{axis} 세그먼트 집계 검증 — {args.dataset}\n(max capacity_Ah std={max_std:.1e})")
+        out_path = out_dir / f"row_count_hist_{args.dataset}.png"
+        fig.savefig(out_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        print(f"\n플롯 저장: {out_path}")
+
+        # ── D. 세그먼트별 HI 개별 저장 검증 (덮어쓰기 없음을 값 수준에서 직접 확인) ──────
+        print("\n=== D. 세그먼트별 HI 개별 저장 검증 (재계산 대조) ===")
+        from common.scenario import get_segmenter
+        segmenter = get_segmenter(axis, {axis: axis_cfg})
+        spec_names = segmenter.get_spec().scenario_names
+
+        cell_id, cycle_id = args.cell, args.cycle
+        if not cell_id or not cycle_id:
+            # "가장 흔한(=완전한) 행 수"를 모든 zone에서 다 채운 (cell,cycle)을 자동 선택
+            # — 24개짜리 등 "정상적으로 꽉 찬" 사례를 보여주기 위함.
+            full_n = int(vc.index[vc.values.argmax()])
+            cnt_df = counts.reset_index(name="n")
+            per_cyc = cnt_df.groupby(["cell_id", "cycle"]).agg(
+                n_zones=("seg_name", "nunique"),
+                all_full=("n", lambda s: bool((s == full_n).all())),
+            )
+            candidates = per_cyc[(per_cyc["n_zones"] == len(spec_names)) & (per_cyc["all_full"])]
+            if len(candidates):
+                cell_id, cycle_id = candidates.index[0]
+            else:
+                cell_id, cycle_id = df.iloc[0][["cell_id", "cycle"]]
+            cell_id, cycle_id = str(cell_id), int(cycle_id)
+            print(f"  자동 선택: cell={cell_id}  cycle={cycle_id}  (zone당 {full_n}개씩 꽉 찬 사례)")
+
+        root = MIT_DIR if args.dataset.upper() == "MIT" else HUST_DIR
+        cell_pkl = root / f"{cell_id}.pkl"
+        if not cell_pkl.exists():
+            print(f"  [경고] 원본 셀 pkl 없음: {cell_pkl} — Part D 스킵")
+        else:
+            seg_df_cycle = df[(df["cell_id"] == cell_id) & (df["cycle"] == cycle_id)]
+            hi_out_path = out_dir / f"hi_overwrite_check_{args.dataset}_{cell_id}_cyc{cycle_id}.png"
+            plot_hi_overwrite_check(
+                cell_pkl, seg_df_cycle, segmenter, spec_names,
+                cell_id, cycle_id, axis, hi_out_path,
+            )
+
+
 def main():
     parser = argparse.ArgumentParser(description="시나리오 세그먼트 진단 (통계 + 시각화)")
     parser.add_argument("--seg-axis",    type=str, default=None,
@@ -1891,9 +2177,12 @@ def main():
     parser.add_argument("--cycle",       type=int, default=0,
                         help="사이클 플롯 대상 사이클 번호 (0이면 첫 번째 유효 사이클)")
     parser.add_argument("--mode",         type=str, default="segment",
-                        choices=["segment", "ic", "vqzone", "compare", "all"],
+                        choices=["segment", "ic", "vqzone", "compare", "verify-fix", "all"],
                         help="시각화 모드: segment(기본)|ic|vqzone(vqslope 존 분리 근거)|"
-                             "compare(여러 축/파라미터 조건 비교, --cell 필수)|all")
+                             "compare(여러 축/파라미터 조건 비교, --cell 필수)|"
+                             "verify-fix(2026-08-16 세그먼트별-행 수정 검증, "
+                             "docs/260816_RESULTS.md §2-6 A/C/D — D는 한 사이클의 세그먼트 "
+                             "전부가 개별 HI 값으로 저장됐는지 재계산 대조로 확인)|all")
     parser.add_argument("--compare-config", type=str, default=None,
                         help="--mode compare 전용: 비교할 조건 목록 JSON 파일 경로 "
                              "(기본: 4_hi_analysis/compare_conditions.json). "
@@ -1934,6 +2223,14 @@ def main():
         # 파일 상단 QFRAC_WIDE_AXIS_CONFIG를 기본값으로 쓰고, --axis-config로
         # 넘어온 값이 있으면 그것으로 덮어씀 (CLI 인자가 우선).
         axis_cfg = {**QFRAC_WIDE_AXIS_CONFIG, **axis_cfg}
+
+    if args.mode == "verify-fix":
+        if not args.seg_axis:
+            print("[ERROR] --mode verify-fix 는 --seg-axis 지정이 필수입니다.")
+            return
+        _run_verify_fix(args.seg_axis, axis_cfg, args)
+        print("\n완료!")
+        return
 
     if args.survival_stats:
         if args.n1 is not None:

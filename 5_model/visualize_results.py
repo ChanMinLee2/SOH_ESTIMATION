@@ -469,7 +469,9 @@ def _axis_dir_from_spec(spec: ScenarioSpec) -> str:
         ns = int(p.get("n_samples", 4))
         min_pts = int(p.get("min_pts", 10))
         minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
-        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{minpts_sfx}"
+        # assign="none"(no_scen 대조군, docs/260816_RESULTS.md §5)이면 접미사 (hi_correlation._qfw_tag 와 동일 규칙)
+        assign_sfx = "" if p.get("assign", "position_bin") == "position_bin" else "_noscen"
+        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{minpts_sfx}{assign_sfx}"
     if spec.axis == "q_frac_ref":
         # q_frac_wide와 동일한 n1/n2/N % 표기 + lag/noise 태그
         # (hi_correlation._qfref_tag, train_classifier._axis_dir_from_spec 와 동일 규칙)
@@ -483,7 +485,8 @@ def _axis_dir_from_spec(spec: ScenarioSpec) -> str:
         period = int(round(p.get("noise_period_cycles", 200.0)))
         min_pts = int(p.get("min_pts", 10))
         minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
-        return f"q_frac_ref/n1-{n1}%_n2-{n2}%_N-{ns}{minpts_sfx}_lag-{lag}_noise-{noise}%_{nmode}-{period}"
+        assign_sfx = "" if p.get("assign", "position_bin") == "position_bin" else "_noscen"
+        return f"q_frac_ref/n1-{n1}%_n2-{n2}%_N-{ns}{minpts_sfx}{assign_sfx}_lag-{lag}_noise-{noise}%_{nmode}-{period}"
     if spec.axis == "q_abs":
         p = spec.params or {}
         ms = int(round(p.get("mid_start", 0.20) * 100))

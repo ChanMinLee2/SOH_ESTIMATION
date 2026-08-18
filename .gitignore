@@ -11,3 +11,4 @@
 *.pt
 *.yaml
 ./docs/date_results/*
+*_RESULTS.md

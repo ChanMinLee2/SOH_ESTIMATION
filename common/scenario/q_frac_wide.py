@@ -81,6 +81,14 @@ class QFracWideSegmenter(Segmenter):
         random_segment: bool = False,   # True: 구간 내 고정길이 랜덤 창 (설계 A)
         seg_len_pts: int = 20,          # 랜덤 창의 고정 관측 포인트 수 (q_tot 무관)
         random_seed: int = 42,          # 랜덤 재현성 시드
+        assign: str = "position_bin",   # "position_bin"(기본, 존별 6시나리오 라우팅) |
+                                         # "none"(시나리오 라우팅 없음, 방향만 구분해 2개) —
+                                         # rcs.py와 동일 컨벤션. 존 경계(n1)·세그먼트 길이/개수
+                                         # (n2/n_samples)·분모(q_tot, q_frac_ref면 q_ref+노이즈)는
+                                         # 전혀 안 바뀜 — "이 세그먼트가 어느 존인지"를 모델에
+                                         # 알려주는 시나리오 라우팅만 지운다. "시나리오 타이핑
+                                         # 자체의 순수 기여도"를 재는 대조군 축 용도
+                                         # (docs/260816_RESULTS.md §5 no_scen).
     ):
         if not (0.35 <= n1 <= 0.45):
             raise ValueError(
@@ -93,6 +101,9 @@ class QFracWideSegmenter(Segmenter):
         if random_segment and seg_len_pts < min_pts:
             raise ValueError(
                 f"q_frac_wide: random_segment 시 seg_len_pts({seg_len_pts}) >= min_pts({min_pts}) 필요.")
+        if assign not in ("position_bin", "none"):
+            raise ValueError(
+                f"q_frac_wide: assign은 'position_bin'|'none' 중 하나여야 합니다. 현재 assign={assign!r}")
         self.n1 = n1
         self.n2 = n2
         self.n_samples = n_samples
@@ -102,6 +113,7 @@ class QFracWideSegmenter(Segmenter):
         self.random_segment = bool(random_segment)
         self.seg_len_pts = int(seg_len_pts)
         self.random_seed = int(random_seed)
+        self.assign = assign
 
         # 진단용 카운터 (min_pts 생존율 계산) — iter_segments의 공개 동작에는 영향 없음.
         # scenario_name -> count. reset_counters()로 초기화 후 여러 셀에 걸쳐 누적 가능.
@@ -186,8 +198,12 @@ class QFracWideSegmenter(Segmenter):
 
         for zone_name, latent_class in _ZONES:
             zone_start, zone_end = bounds[zone_name]
-            scenario_id = spec.routing[dir_idx][latent_class]
-            sname       = _SCENARIO_NAMES[scenario_id]
+            # assign="none" 이면 latent_class(존)를 라우팅에 반영하지 않고 항상 0으로
+            # 고정 — 모델에 노출되는 scenario_id/이름은 방향만 구분(chg/dis), 존 경계
+            # 자체(zone_start/zone_end)는 그대로 사용해 세그먼트 위치는 안 바뀐다.
+            _latent     = latent_class if self.assign == "position_bin" else 0
+            scenario_id = spec.routing[dir_idx][_latent]
+            sname       = spec.scenario_names[scenario_id]
 
             if self.random_segment:
                 # ── 랜덤 모드: 구간 안에서 고정길이(seg_len_pts) 랜덤 창 (설계 A) ──
@@ -209,7 +225,7 @@ class QFracWideSegmenter(Segmenter):
                     self.n_yielded[sname] = self.n_yielded.get(sname, 0) + 1
                     records.append(SegmentRecord(
                         cell_id=cell_id, cycle=cycle, seg_local_id=seg_local,
-                        scenario_id=scenario_id, latent_class=latent_class,
+                        scenario_id=scenario_id, latent_class=_latent,
                         direction=direction,
                         v=v[w], i=i[w], dt=dt[w], q=q[w],
                         meta={"zone": zone_name, "random": True,
@@ -241,7 +257,7 @@ class QFracWideSegmenter(Segmenter):
                     cycle=cycle,
                     seg_local_id=seg_local,
                     scenario_id=scenario_id,
-                    latent_class=latent_class,
+                    latent_class=_latent,
                     direction=direction,
                     v=v[m], i=i[m], dt=dt[m], q=q[m],
                     meta={
@@ -257,6 +273,22 @@ class QFracWideSegmenter(Segmenter):
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
     def get_spec(self) -> ScenarioSpec:
+        params = {"n1": self.n1, "n2": self.n2, "n_samples": self.n_samples,
+                  "random_segment": self.random_segment, "seg_len_pts": self.seg_len_pts,
+                  "min_pts": self.min_pts, "assign": self.assign}
+        if self.assign == "none":
+            # 시나리오 라우팅을 감춘 대조군: 존 구분 없이 방향만 2개.
+            # (docs/260816_RESULTS.md §5 no_scen) — n1/n2/n_samples/분모는 그대로.
+            return ScenarioSpec(
+                axis="q_frac_wide",
+                n_scenarios=2,
+                scenario_names=["chg", "dis"],
+                n_classes=1,
+                class_names=["all"],
+                routing=[[0], [1]],
+                classifier_default="none",
+                params=params,
+            )
         return ScenarioSpec(
             axis="q_frac_wide",
             n_scenarios=6,
@@ -265,9 +297,7 @@ class QFracWideSegmenter(Segmenter):
             class_names=["lo", "mid", "hi"],
             routing=_ROUTING,
             classifier_default="mlp_probe",
-            params={"n1": self.n1, "n2": self.n2, "n_samples": self.n_samples,
-                    "random_segment": self.random_segment, "seg_len_pts": self.seg_len_pts,
-                    "min_pts": self.min_pts},
+            params=params,
         )
 
     def _rng_for(self, cell_id: str, cycle: int, direction: int) -> "np.random.Generator | None":

@@ -340,6 +340,12 @@ def _build_hi_groups(seg_names: list) -> tuple:
 
 _MORPH_GRID = 50   # 보간 그리드 해상도 (속도-정밀도 균형)
 _DTW_BAND   = 5    # Sakoe-Chiba 밴드 (그리드의 10% = 위상 이동 허용폭)
+# _dtw_batch 청크 크기 — 장수명 셀(사이클 수 많음) × n_samples>1 조합에서 (N,50,50)
+# 배열을 한 번에 만들면 N이 수천~수만까지 커져 메모리 부족이 날 수 있다(2026-08-17
+# 실측: HUST 1782사이클×4샘플=7128로 136MiB 임시 배열 할당 실패, --workers 다중 프로세스
+# 동시 실행 시 압박 가중). N을 이 크기로 잘라 처리해 피크 메모리를 셀 크기와 무관하게
+# 상한선 이하로 유지한다.
+_DTW_CHUNK  = 2000
 
 # ── 원시 세그먼트 곡선 리샘플 (CNN 입력용) ──────────────────────────────────
 # 5_model/utils/hi_schema.py 의 RAW_N 과 동일해야 함 (단일 소스: 값 48).
@@ -415,24 +421,39 @@ def _dtw_batch(queries: np.ndarray, bol: np.ndarray) -> np.ndarray:
     queries: (N, n)  bol: (n,)  → (N,) 정규화 DTW 거리
     _dtw_distance와 동일한 banded DP이지만 N 차원을 numpy 배열 연산으로 처리.
     Python 루프는 n(=50) 행에 대해서만 돌므로 호출 오버헤드가 N배 절감됨.
+
+    입력을 미리 float32로 캐스팅해 뺄셈 단계에서 float64 임시 배열이 안 생기게 하고,
+    N을 _DTW_CHUNK 단위로 나눠 처리해 (N,n,n) 배열의 피크 메모리가 N(=그 셀·시나리오의
+    곡선 인스턴스 총합, 장수명 셀 × n_samples면 수천 단위까지 커질 수 있음)에 비례해
+    무한정 커지지 않게 한다(2026-08-17, 실제 HUST 장수명 셀에서 메모리 부족 실측).
     """
     N, n = queries.shape
     band = _DTW_BAND
-    d = np.abs(queries[:, :, None] - bol[None, None, :]).astype(np.float32)  # (N,n,n)
-    dtw = np.full((N, n, n), np.inf, dtype=np.float32)
-    dtw[:, 0, 0] = d[:, 0, 0]
-    for j in range(1, min(band + 1, n)):
-        dtw[:, 0, j] = dtw[:, 0, j - 1] + d[:, 0, j]
-    for i in range(1, min(band + 1, n)):
-        dtw[:, i, 0] = dtw[:, i - 1, 0] + d[:, i, 0]
-    for i in range(1, n):
-        j_lo = max(1, i - band)
-        j_hi = min(n, i + band + 1)
-        for j in range(j_lo, j_hi):
-            np.minimum(dtw[:, i - 1, j], dtw[:, i, j - 1], out=dtw[:, i, j])
-            np.minimum(dtw[:, i, j], dtw[:, i - 1, j - 1], out=dtw[:, i, j])
-            dtw[:, i, j] += d[:, i, j]
-    return (dtw[:, n - 1, n - 1] / n).astype(np.float64)
+    queries = queries.astype(np.float32, copy=False)
+    bol = bol.astype(np.float32, copy=False)
+
+    out = np.empty(N, dtype=np.float64)
+    chunk = max(1, min(N, _DTW_CHUNK))
+    for start in range(0, N, chunk):
+        end = start + chunk
+        q = queries[start:end]
+        m = q.shape[0]
+        d = np.abs(q[:, :, None] - bol[None, None, :])  # (m,n,n), 이미 float32
+        dtw = np.full((m, n, n), np.inf, dtype=np.float32)
+        dtw[:, 0, 0] = d[:, 0, 0]
+        for j in range(1, min(band + 1, n)):
+            dtw[:, 0, j] = dtw[:, 0, j - 1] + d[:, 0, j]
+        for i in range(1, min(band + 1, n)):
+            dtw[:, i, 0] = dtw[:, i - 1, 0] + d[:, i, 0]
+        for i in range(1, n):
+            j_lo = max(1, i - band)
+            j_hi = min(n, i + band + 1)
+            for j in range(j_lo, j_hi):
+                np.minimum(dtw[:, i - 1, j], dtw[:, i, j - 1], out=dtw[:, i, j])
+                np.minimum(dtw[:, i, j], dtw[:, i - 1, j - 1], out=dtw[:, i, j])
+                dtw[:, i, j] += d[:, i, j]
+        out[start:end] = dtw[:, n - 1, n - 1] / n
+    return out
 
 
 def _frechet_distance(a: np.ndarray, b: np.ndarray) -> float:
@@ -959,11 +980,27 @@ def _add_phase(df: pd.DataFrame) -> pd.DataFrame:
 _PROGRESS_BATCH = 20   # 사이클 N개마다 진행률 큐에 보고 (IPC 오버헤드 절감)
 
 
-def _extract_one_cell(args) -> tuple:
-    """반환: (cycle_rows: list[dict], coverage: dict[scenario, [covered, total]]).
+def _strip_seg_suffix(d: dict, seg: str) -> dict:
+    """{"stat_v_mean_cw_chg_hi": v, ...} -> {"stat_v_mean_cw": v, ...}.
 
-    coverage는 random_segment 세그먼터에서만 채워지고, 그 외에는 빈 dict.
-    (기존 list 반환 → 튜플로 확장; 호출부 load_all이 언팩 처리)
+    호출부가 _seg_stat/_seg_diff/_seg_lfp(..., seg)로 직접 만든 접미사만 제거하므로
+    (seg 문자열 자체에 언더스코어가 있어도) 항상 정확히 그 seg만 떼어낸다.
+    """
+    suf = f"_{seg}"
+    n = len(suf)
+    return {(k[:-n] if k.endswith(suf) else k): v for k, v in d.items()}
+
+
+def _extract_one_cell(args) -> tuple:
+    """반환: (seg_rows, cycle_rows, coverage).
+
+    seg_rows: 세그먼트 인스턴스 1개당 행 1개(native seg 포맷, HI 컬럼 접미사 없음) —
+      모델 학습 입력(5_model)이 실제로 읽는 데이터. 한 (사이클,시나리오)에 n_samples개면
+      n_samples개 행이 그대로 남는다(2026-08-16 이전엔 row.update() 덮어쓰기로 마지막
+      1개만 남았음 — docs/260816_RESULTS.md 참고).
+    cycle_rows: 사이클 1개당 행 1개, 글로벌 HI(G01~G15) + capacity_Ah만 포함 — 세그먼트와
+      무관하게 사이클당 한 번만 계산되므로 그대로 1행/사이클 유지.
+    coverage: random_segment 세그먼터에서만 채워지고, 그 외에는 빈 dict.
     """
     _progress_q = None
     _exclude_cv = False
@@ -981,23 +1018,30 @@ def _extract_one_cell(args) -> tuple:
     _segmenter = _get_seg(_axis, {_axis: _axis_cfg})
     _spec_names = _segmenter.get_spec().scenario_names
 
-    # subprocess는 모듈 레벨 ALL_HI_KEYS(qfrac 고정)를 그대로 읽으므로 재빌드
-    if _axis != "qfrac":
-        _, _cell_hi_keys, _ = _build_hi_groups(_spec_names)
+    # scen 코드 사전 계산 (_SEG_SCEN에 있으면 그대로, 없으면 방향+등장순서 기반 — 기존
+    # _to_seg_df와 동일 규칙). segment_id는 이제 SegmentRecord.scenario_id를 그대로 쓴다
+    # (spec.routing으로 이미 계산된 값이라 재계산 불필요 — qfrac류에서 _SEG_SCEN 순서와도 일치).
+    if all(s in _SEG_SCEN for s in _spec_names):
+        _scen_lookup = {s: _SEG_SCEN[s][0] for s in _spec_names}
     else:
-        _cell_hi_keys = ALL_HI_KEYS
+        _chg_names = [s for s in _spec_names if s.startswith("chg")]
+        _dis_names = [s for s in _spec_names if s not in _chg_names]
+        _scen_lookup = {}
+        for s in _spec_names:
+            _scen_lookup[s] = ((_chg_names.index(s) + 1) if s in _chg_names
+                                else -(_dis_names.index(s) + 1))
 
     path = Path(pkl_path_str)
     try:
         with open(path, "rb") as f:
             raw = pickle.load(f)
     except Exception:
-        return [], {}
+        return [], [], {}
 
     meta   = raw.get("meta", {})
     df_all = raw.get("cycles")
     if df_all is None or not isinstance(df_all, pd.DataFrame):
-        return [], {}
+        return [], [], {}
 
     if "phase" not in df_all.columns:
         df_all = _add_phase(df_all)
@@ -1005,9 +1049,12 @@ def _extract_one_cell(args) -> tuple:
     dataset = meta.get("dataset", "")
     cell_id = meta.get("cell_id", path.stem)
 
-    # {cycle: row_dict} — 배치 morph 결과를 루프 후에 채워 넣기 위해 dict 사용
-    cycle_rows: dict[int, dict] = {}
-    # {seg_name: {curve_type: [(cyc, arr), ...]}} — 배치 DTW용 곡선 버퍼
+    seg_rows: list[dict] = []      # 세그먼트 인스턴스별 행 (native seg 포맷)
+    cycle_rows: list[dict] = []    # 사이클별 글로벌 HI 행 (cycle 포맷)
+    # {seg_name: {curve_type: [(그 세그먼트 행 dict, arr), ...]}} — 배치 DTW용 곡선 버퍼.
+    # 키를 사이클 번호가 아니라 "그 세그먼트 행 자체"로 잡아, 배치 처리 후 바로 그 행에
+    # 대입한다(사이클 단위 딕셔너리를 거치지 않으므로 여러 세그먼트가 같은 사이클번호를
+    # 공유해도 서로 안 덮어씀).
     _curve_buf: dict[str, dict[str, list]] = {}
 
     _progress_local = 0
@@ -1041,56 +1088,69 @@ def _extract_one_cell(args) -> tuple:
         if q_local < cap * 0.30:
             continue
 
-        # ── 전체 HI 키 NaN 초기화 ────────────────────────────────────────
-        row: dict = {k: np.nan for k in _cell_hi_keys}
-        row.update({"dataset": dataset, "cell_id": cell_id,
-                    "cycle": int(cyc), "capacity_Ah": cap})
+        # ── 사이클 글로벌 HI (세그먼트와 무관, 사이클당 한 번만 계산) ────────────
+        grow: dict = {k: np.nan for k in GLOBAL_HI_KEYS}
+        grow.update({"dataset": dataset, "cell_id": cell_id,
+                     "cycle": int(cyc), "capacity_Ah": cap})
 
         # ── G01–G03 방전 기본 ─────────────────────────────────────────────
-        row["q_dis"]          = q_local
-        row["energy_dis"]     = float(np.sum(v * i_mag * dt) / 3600.0)
+        grow["q_dis"]          = q_local
+        grow["energy_dis"]     = float(np.sum(v * i_mag * dt) / 3600.0)
         denom = float(np.sum(i_mag * dt))
         if denom > 1e-9:
-            row["v_mean_cw_dis"] = float(np.sum(v * i_mag * dt)) / denom
+            grow["v_mean_cw_dis"] = float(np.sum(v * i_mag * dt)) / denom
 
         # ── G05 q_plateau_frac ────────────────────────────────────────────
         mask_plt = (v >= 3.10) & (v <= 3.45)
         if q_local > 0:
-            row["q_plateau_frac"] = (
+            grow["q_plateau_frac"] = (
                 float(np.sum(i_mag[mask_plt] * dt[mask_plt]) / 3600.0) / q_local
             )
 
         # ── G06–G08, G15: ICA ─────────────────────────────────────────────
         p1v, p1h, p1ar, p1asy = _global_ica(v, i_mag, dt)
-        row["ica_peak1_v"]    = p1v
-        row["ica_peak1_h"]    = p1h
-        row["ica_peak1_area"] = p1ar
-        row["ica_peak1_asym"] = p1asy
+        grow["ica_peak1_v"]    = p1v
+        grow["ica_peak1_h"]    = p1h
+        grow["ica_peak1_area"] = p1ar
+        grow["ica_peak1_asym"] = p1asy
 
         # ── G09–G10: DVA ──────────────────────────────────────────────────
-        row["dva_valley_q"], row["dva_valley_depth"] = _global_dva(
+        grow["dva_valley_q"], grow["dva_valley_depth"] = _global_dva(
             v, i_mag, dt, q_local
         )
 
-        # ── 방전 세그먼트 HI (segmenter 기반) ───────────────────────────────
+        # ── 방전 세그먼트 HI (segmenter 기반) — 세그먼트 인스턴스마다 독립 행 ──────
         if q_local >= 0.05:
             for _rec in _segmenter.iter_segments(
                 cell_id, int(cyc), v, i_mag, dt, q_cum
             ):
                 seg = _rec.meta.get("seg_name") or _spec_names[_rec.scenario_id]
                 vs_s = _rec.v; ims_s = _rec.i; dts_s = _rec.dt; qcs_s = _rec.q
-                row.update(_seg_stat(vs_s, ims_s, dts_s, qcs_s, seg))
-                row.update(_seg_diff(vs_s, ims_s, dts_s, qcs_s, seg))
-                row.update(_seg_lfp(vs_s, ims_s, dts_s, qcs_s, seg))
+                _srow: dict = {
+                    "dataset": dataset, "cell_id": cell_id, "cycle": int(cyc),
+                    "capacity_Ah": cap,
+                    "segment_id": int(_rec.scenario_id),
+                    "seg_name": seg,
+                    "scen": _scen_lookup.get(seg, 0),
+                    # assign="none"(no_scen 대조군)이라도 사후 존별 재분리가 가능하도록
+                    # 원본 존/위치 정보를 그대로 보존한다(docs/260816_RESULTS.md §5-4).
+                    "zone": _rec.meta.get("zone"),
+                    "q_frac_lo": _rec.meta.get("q_frac_lo"),
+                    "q_frac_hi": _rec.meta.get("q_frac_hi"),
+                }
+                _srow.update(_strip_seg_suffix(_seg_stat(vs_s, ims_s, dts_s, qcs_s, seg), seg))
+                _srow.update(_strip_seg_suffix(_seg_diff(vs_s, ims_s, dts_s, qcs_s, seg), seg))
+                _srow.update(_strip_seg_suffix(_seg_lfp(vs_s, ims_s, dts_s, qcs_s, seg), seg))
                 _rv, _ri, _rt = _resample_segment(vs_s, ims_s, qcs_s, dts_s)   # CNN 원시 곡선
                 _sign = 1.0 if _rec.direction > 0 else -1.0
-                row[f"raw_v_{seg}"] = _rv.tolist()
-                row[f"raw_i_{seg}"] = (_ri * _sign).tolist()   # 부호 있는 전류 (docs/260803_RESULTS.md §10.1)
-                row[f"raw_t_{seg}"] = _rt.tolist()
+                _srow["raw_v"] = _rv.tolist()
+                _srow["raw_i"] = (_ri * _sign).tolist()   # 부호 있는 전류 (docs/260803_RESULTS.md §10.1)
+                _srow["raw_t"] = _rt.tolist()
                 _mc = _seg_morph_curves(vs_s, ims_s, dts_s)
                 for _ct, _arr in zip(("vt", "vq", "ve"), _mc):
                     if _arr is not None:
-                        _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((int(cyc), _arr))
+                        _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((_srow, _arr))
+                seg_rows.append(_srow)
 
         # ── 충전 HI ───────────────────────────────────────────────────────
         chg_grp = grp[grp["phase"] == "charge"].sort_values("time_s")
@@ -1122,10 +1182,10 @@ def _extract_one_cell(args) -> tuple:
 
             if q_tc > 0.05 and not _chg_incomplete:
                 # G04 r_trans_est: CC→CV 전환 시점 ΔV/ΔI [mΩ]
-                row["r_trans_est"] = _r_dc_from_chg(vc, ic, dtc)
+                grow["r_trans_est"] = _r_dc_from_chg(vc, ic, dtc)
 
                 # G11 CE
-                row["ce"] = cap / q_tc
+                grow["ce"] = cap / q_tc
 
                 # G12–G13 CV 거동
                 i_mx = float(np.max(ic))
@@ -1134,12 +1194,12 @@ def _extract_one_cell(args) -> tuple:
                     q_cv  = float(np.sum(ic[cv_mask] * dtc[cv_mask]) / 3600.0)
                     t_cv  = float(np.sum(dtc[cv_mask]))
                     t_tot = float(np.sum(dtc))
-                    row["cv_q_frac"]   = q_cv / q_tc if q_tc > 0 else np.nan
-                    row["cv_time_frac"] = t_cv / t_tot if t_tot > 0 else np.nan
+                    grow["cv_q_frac"]   = q_cv / q_tc if q_tc > 0 else np.nan
+                    grow["cv_time_frac"] = t_cv / t_tot if t_tot > 0 else np.nan
 
                 # G14 chg_ica_peak1_h
                 _, c_pk_h, _, _ = _global_ica(vc, ic, dtc)
-                row["chg_ica_peak1_h"] = c_pk_h
+                grow["chg_ica_peak1_h"] = c_pk_h
 
                 # 충전 세그먼트 HI (segmenter 기반) — CC 전환 갭이 있던 행은 위에서
                 # 이미 dtc를 정상값으로 대체해뒀으므로 더 이상 전체 스킵할 필요 없음.
@@ -1159,39 +1219,52 @@ def _extract_one_cell(args) -> tuple:
                     ):
                         seg = _rec.meta.get("seg_name") or _spec_names[_rec.scenario_id]
                         vs_c = _rec.v; ims_c = _rec.i; dts_c = _rec.dt; qcs_c = _rec.q
-                        row.update(_seg_stat(vs_c, ims_c, dts_c, qcs_c, seg))
-                        row.update(_seg_diff(vs_c, ims_c, dts_c, qcs_c, seg))
-                        row.update(_seg_lfp(vs_c, ims_c, dts_c, qcs_c, seg))
+                        _srow_c: dict = {
+                            "dataset": dataset, "cell_id": cell_id, "cycle": int(cyc),
+                            "capacity_Ah": cap,
+                            "segment_id": int(_rec.scenario_id),
+                            "seg_name": seg,
+                            "scen": _scen_lookup.get(seg, 0),
+                            "zone": _rec.meta.get("zone"),
+                            "q_frac_lo": _rec.meta.get("q_frac_lo"),
+                            "q_frac_hi": _rec.meta.get("q_frac_hi"),
+                        }
+                        _srow_c.update(_strip_seg_suffix(_seg_stat(vs_c, ims_c, dts_c, qcs_c, seg), seg))
+                        _srow_c.update(_strip_seg_suffix(_seg_diff(vs_c, ims_c, dts_c, qcs_c, seg), seg))
+                        _srow_c.update(_strip_seg_suffix(_seg_lfp(vs_c, ims_c, dts_c, qcs_c, seg), seg))
                         _rv_c, _ri_c, _rt_c = _resample_segment(vs_c, ims_c, qcs_c, dts_c)   # CNN 원시 곡선
                         _sign_c = 1.0 if _rec.direction > 0 else -1.0
-                        row[f"raw_v_{seg}"] = _rv_c.tolist()
-                        row[f"raw_i_{seg}"] = (_ri_c * _sign_c).tolist()   # 부호 있는 전류
-                        row[f"raw_t_{seg}"] = _rt_c.tolist()
+                        _srow_c["raw_v"] = _rv_c.tolist()
+                        _srow_c["raw_i"] = (_ri_c * _sign_c).tolist()   # 부호 있는 전류
+                        _srow_c["raw_t"] = _rt_c.tolist()
                         _mc_c = _seg_morph_curves(vs_c, ims_c, dts_c)
                         for _ct, _arr in zip(("vt", "vq", "ve"), _mc_c):
                             if _arr is not None:
-                                _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((int(cyc), _arr))
+                                _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((_srow_c, _arr))
+                        seg_rows.append(_srow_c)
 
-        cycle_rows[int(cyc)] = row
+        cycle_rows.append(grow)
 
     # ── 배치 DTW / Fréchet (곡선 버퍼 → 루프 종료 후 일괄 처리) ──────────────
+    # 각 pair가 "그 세그먼트 행" 자체를 들고 있으므로 결과를 바로 그 행에 대입한다 —
+    # 예전엔 사이클 번호로 cycle_rows[_c]를 다시 찾아 대입해서 같은 사이클의 여러
+    # 세그먼트가 서로 덮어썼다(2026-08-16 이전 버그, docs/260816_RESULTS.md 참고).
     for _seg, _ct_dict in _curve_buf.items():
         for _ct, _pairs in _ct_dict.items():
             if not _pairs:
                 continue
-            _bol_arr = _pairs[0][1]                             # 첫 유효 사이클 = BOL
+            _bol_arr = _pairs[0][1]                             # 그 시나리오의 첫 유효 세그먼트 = BOL
             _queries  = np.array([p[1] for p in _pairs])       # (N, n)
             _dtw_vals = _dtw_batch(_queries, _bol_arr)          # (N,)
             _frec_vals = np.max(np.abs(_queries - _bol_arr), axis=1)  # (N,)
-            for (_c, _), _dv, _fv in zip(_pairs, _dtw_vals, _frec_vals):
-                if _c in cycle_rows:
-                    cycle_rows[_c][f"morph_{_ct}_dtw_{_seg}"]  = float(_dv)
-                    cycle_rows[_c][f"morph_{_ct}_frec_{_seg}"] = float(_fv)
+            for (_srow_ref, _), _dv, _fv in zip(_pairs, _dtw_vals, _frec_vals):
+                _srow_ref[f"morph_{_ct}_dtw"]  = float(_dv)
+                _srow_ref[f"morph_{_ct}_frec"] = float(_fv)
 
     if _progress_q is not None and _progress_local > 0:
         _progress_q.put(_progress_local)
 
-    return list(cycle_rows.values()), dict(getattr(_segmenter, "coverage", {}) or {})
+    return seg_rows, cycle_rows, dict(getattr(_segmenter, "coverage", {}) or {})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1210,7 +1283,10 @@ def load_all(
     axis_cfg: dict | None = None,
     exclude_cv: bool = False,
 ) -> tuple:
-    """반환: (df, coverage). coverage는 random_segment 시에만 채워짐(그 외 빈 dict).
+    """반환: (df_seg, df_cycle, coverage). coverage는 random_segment 시에만 채워짐(그 외 빈 dict).
+
+    df_seg: 세그먼트 인스턴스별 HI(native seg 포맷, 모델 학습 입력). df_cycle: 사이클별
+    글로벌 HI(cycle 포맷). 둘 다 이 디렉터리(MIT 또는 HUST)의 전체 셀을 이어붙인 것.
 
     exclude_cv=True: 충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간을 제외
     (segmenter 자체는 수정 없음 — _extract_one_cell에서 세그먼터에 넘기는
@@ -1219,12 +1295,13 @@ def load_all(
     # 사이클 수가 많은 셀(파일 크기 큰 순) 먼저 배정 → 워커 간 부하 균형 개선
     files = sorted(pkl_dir.glob("*.pkl"), key=lambda f: f.stat().st_size, reverse=True)
     cfg_json = json.dumps(axis_cfg or {})
-    all_rec: list = []
+    all_seg: list = []
+    all_cyc: list = []
     coverage: dict = {}
     if n_workers <= 1:
         for f in tqdm(files, desc=pkl_dir.name):
-            rows, cov = _extract_one_cell((str(f), axis, cfg_json, exclude_cv))
-            all_rec.extend(rows); _merge_coverage(coverage, cov)
+            seg_rows, cyc_rows, cov = _extract_one_cell((str(f), axis, cfg_json, exclude_cv))
+            all_seg.extend(seg_rows); all_cyc.extend(cyc_rows); _merge_coverage(coverage, cov)
     else:
         # 파일 완료 단위 tqdm(pbar)만으로는 큰 파일이 많이 배정된 초반에 진행률이
         # 한참 안 움직이는 것처럼 보임 → Manager 큐로 워커의 사이클 처리량을
@@ -1254,141 +1331,107 @@ def load_all(
                     for f in files}
             with tqdm(total=len(files), desc=pkl_dir.name, position=0) as pbar:
                 for fut in as_completed(futs):
-                    rows, cov = fut.result()
-                    all_rec.extend(rows); _merge_coverage(coverage, cov)
+                    seg_rows, cyc_rows, cov = fut.result()
+                    all_seg.extend(seg_rows); all_cyc.extend(cyc_rows); _merge_coverage(coverage, cov)
                     pbar.update(1)
 
         _stop_evt.set()
         _drain_thread.join(timeout=1.0)
         _cyc_pbar.close()
         _mgr.shutdown()
-    return (pd.DataFrame(all_rec) if all_rec else pd.DataFrame()), coverage
+    return (
+        pd.DataFrame(all_seg) if all_seg else pd.DataFrame(),
+        pd.DataFrame(all_cyc) if all_cyc else pd.DataFrame(),
+        coverage,
+    )
 
 
-def _to_cycle_df(df: pd.DataFrame) -> pd.DataFrame:
-    """평탄 HI DataFrame → 사이클별 글로벌 HI 테이블.
+def _build_flat_correlation_df(df_seg: pd.DataFrame, df_cycle: pd.DataFrame) -> pd.DataFrame:
+    """세그먼트 인스턴스 df + 사이클 글로벌 df → Step4 자체 상관분석/플롯 전용 wide df.
 
-    출력: [cell_id, cycle, capacity_Ah, <글로벌 HI 15개>]
+    2026-08-16: 모델 학습(5_model)은 이제 df_seg를 그대로 읽으므로(세그먼트당 1행,
+    docs/260816_RESULTS.md) 이 함수의 출력은 **학습에 쓰이지 않는다** — compute_correlations/
+    plot_correlation/_plot_sample_hi가 기대하는 "사이클당 1행, 시나리오별 _{seg} 접미사
+    컬럼" 형태를 맞춰주기 위한 순수 시각화·진단용 재구성이다. 같은 (사이클,시나리오)의
+    n_samples개 세그먼트는 여기서 평균만 낸다 — 이 평균이 모델 입력에 영향을 주지 않으므로
+    "세그먼트 단위로 독립 학습"이라는 목표와 충돌하지 않는다.
     """
-    cols = ["cell_id", "cycle", "capacity_Ah"] + GLOBAL_HI_KEYS
-    return df[[c for c in cols if c in df.columns]].reset_index(drop=True)
-
-
-def _to_seg_df(df: pd.DataFrame) -> pd.DataFrame:
-    """평탄 HI DataFrame → 세그먼트별 HI 테이블 (long format).
-
-    출력: [cell_id, cycle, segment_id, capacity_Ah, scen, stat_v_mean_cw, ..., morph_ve_frec]
-    - segment_id: 세그먼트 인덱스 (ScenarioSpec scenario_id 기준)
-    - scen: chg 구간 양수(1-based), dis 구간 음수(1-based); qfrac은 _SEG_SCEN 그대로
-    - capacity_Ah: stat_q_abs_{seg} (구간 누적 용량 Ah)
-    - HI 컬럼: _{seg} 접미사 제거 (66개/구간, 순서 고정)
-    """
-    # HI_GROUPS에서 세그먼트 이름 순서 추출 (main()에서 이미 재빌드됨)
-    _seg_order = list(dict.fromkeys(
-        g.split(" — ")[0] for g in HI_GROUPS if " — " in g
-    ))
-
-    # qfrac 이면 _SEG_SCEN 그대로 사용; 아니면 방향+위치로 scen 계산
-    if all(s in _SEG_SCEN for s in _seg_order):
-        _scen_map = {s: _SEG_SCEN[s] for s in _seg_order}
-    else:
-        _chg = [s for s in _seg_order if s.startswith("chg")]
-        _dis  = [s for s in _seg_order if s not in _chg]
-        _scen_map = {}
-        for idx, seg in enumerate(_seg_order):
-            if seg in _chg:
-                sv = _chg.index(seg) + 1
-            else:
-                sv = -(_dis.index(seg) + 1)
-            _scen_map[seg] = (sv, idx)
-
-    # 원시 곡선 컬럼 (CNN 입력): 스칼라 HI 와 동일하게 _{seg} 접미사로 저장됨
-    _RAW_BASES = ["raw_v", "raw_i", "raw_t"]
-
-    parts = []
-    for seg, (scen_val, seg_id) in _scen_map.items():
-        suffix    = f"_{seg}"
-        # 현재 df에 존재하는 세그먼트 HI 컬럼 → base 이름 매핑
-        col_map   = {f"{b}{suffix}": b for b in _SEG_HI_BASES
-                     if f"{b}{suffix}" in df.columns}
-        if not col_map:
-            continue
-        # 원시 곡선 컬럼도 존재하면 함께 매핑 (raw_v_{seg} → raw_v)
-        col_map.update({f"{b}{suffix}": b for b in _RAW_BASES
-                        if f"{b}{suffix}" in df.columns})
-
-        sub = df[["cell_id", "cycle"] + list(col_map.keys())].copy()
-        sub = sub.rename(columns=col_map)
-
-        # capacity_Ah = 구간 누적 용량 (stat_q_abs_{seg})
-        q_abs_col = f"stat_q_abs{suffix}"
-        sub["capacity_Ah"] = df[q_abs_col].values if q_abs_col in df.columns else np.nan
-
-        sub["segment_id"] = seg_id
-        sub["scen"]       = scen_val
-
-        hi_present  = [b for b in _SEG_HI_BASES if b in sub.columns]
-        raw_present = [b for b in _RAW_BASES    if b in sub.columns]
-        sub = sub[["cell_id", "cycle", "segment_id", "capacity_Ah", "scen"]
-                  + hi_present + raw_present]
-        parts.append(sub)
-
-    if not parts:
+    if df_cycle.empty:
         return pd.DataFrame()
 
-    return (pd.concat(parts, ignore_index=True)
-              .sort_values(["cell_id", "cycle", "segment_id"])
-              .reset_index(drop=True))
+    if df_seg.empty:
+        return df_cycle.reset_index(drop=True)
+
+    _hi_cols = [c for c in df_seg.columns if c in _SEG_HI_BASES]
+    agg = (df_seg.groupby(["cell_id", "cycle", "seg_name"])[_hi_cols]
+                 .mean()
+                 .reset_index())
+
+    wide_parts = []
+    for seg_name, g in agg.groupby("seg_name"):
+        g = g.drop(columns="seg_name").rename(
+            columns={c: f"{c}_{seg_name}" for c in _hi_cols})
+        wide_parts.append(g.set_index(["cell_id", "cycle"]))
+
+    if not wide_parts:
+        return df_cycle.reset_index(drop=True)
+
+    wide = pd.concat(wide_parts, axis=1).reset_index()
+    return df_cycle.merge(wide, on=["cell_id", "cycle"], how="left").reset_index(drop=True)
 
 
-def _save_sample_csvs(df_mit: pd.DataFrame, df_hust: pd.DataFrame) -> None:
-    """데이터셋별 대표 셀 첫 번째 사이클을 cycle/seg 형식으로 CSV 저장."""
+def _save_sample_csvs(
+    seg_mit: pd.DataFrame, cyc_mit: pd.DataFrame,
+    seg_hust: pd.DataFrame, cyc_hust: pd.DataFrame,
+) -> None:
+    """데이터셋별 대표 셀 첫 번째 사이클을 cycle/seg 형식으로 CSV 저장.
+
+    seg CSV엔 이제 그 사이클의 세그먼트 인스턴스가 (n_samples개면) 여러 행으로 그대로
+    남는다 — 예전엔 시나리오당 1행으로 뭉개진 걸 저장했었다.
+    """
     sample_dir = HI_ROOT / "samples"
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    for ds_tag, df_full in [("mit", df_mit), ("hust", df_hust)]:
-        if df_full.empty:
+    for ds_tag, df_cyc, df_seg in [("mit", cyc_mit, seg_mit), ("hust", cyc_hust, seg_hust)]:
+        if df_cyc.empty:
             continue
-        first_cell = df_full["cell_id"].iloc[0]
-        first_cyc  = int(df_full[df_full["cell_id"] == first_cell]["cycle"].min())
-        mask       = (df_full["cell_id"] == first_cell) & (df_full["cycle"] == first_cyc)
-        sample_row = df_full[mask]
+        first_cell = df_cyc["cell_id"].iloc[0]
+        first_cyc  = int(df_cyc[df_cyc["cell_id"] == first_cell]["cycle"].min())
 
-        _to_cycle_df(sample_row).to_csv(
-            sample_dir / f"{ds_tag}_hi_cycle{first_cyc}.csv", index=False)
-        _to_seg_df(sample_row).to_csv(
-            sample_dir / f"{ds_tag}_hi_seg{first_cyc}.csv",   index=False)
+        cyc_row = df_cyc[(df_cyc["cell_id"] == first_cell) & (df_cyc["cycle"] == first_cyc)]
+        seg_row = (df_seg[(df_seg["cell_id"] == first_cell) & (df_seg["cycle"] == first_cyc)]
+                   if not df_seg.empty else df_seg)
+
+        cyc_row.to_csv(sample_dir / f"{ds_tag}_hi_cycle{first_cyc}.csv", index=False)
+        seg_row.to_csv(sample_dir / f"{ds_tag}_hi_seg{first_cyc}.csv",   index=False)
 
     print(f"  샘플 CSV: {sample_dir}")
 
 
 def _save_per_cell_hi(
-    df: pd.DataFrame,
+    df_seg: pd.DataFrame,
+    df_cycle: pd.DataFrame,
     dataset: str,
     axis: str = "qfrac",
 ) -> tuple:
-    """평탄 HI DataFrame → cycle / seg 두 가지 형식으로 셀별 pkl 저장.
+    """이미 cycle/seg 형식으로 나뉜 DataFrame을 셀별 pkl로 저장.
 
     Returns:
         (df_cycle, df_seg)
     """
-    if df.empty:
-        return pd.DataFrame(), pd.DataFrame()
-
-    df_cycle = _to_cycle_df(df)
-    df_seg   = _to_seg_df(df)
-
     cycle_dir = HI_ROOT / axis / "cycle" / dataset
     seg_dir   = HI_ROOT / axis / "seg"   / dataset
     cycle_dir.mkdir(parents=True, exist_ok=True)
     seg_dir.mkdir(parents=True, exist_ok=True)
 
-    for cell_id, grp in df_cycle.groupby("cell_id"):
-        grp.reset_index(drop=True).to_pickle(cycle_dir / f"{cell_id}.pkl")
-    for cell_id, grp in df_seg.groupby("cell_id"):
-        grp.reset_index(drop=True).to_pickle(seg_dir / f"{cell_id}.pkl")
+    if not df_cycle.empty:
+        for cell_id, grp in df_cycle.groupby("cell_id"):
+            grp.reset_index(drop=True).to_pickle(cycle_dir / f"{cell_id}.pkl")
+    if not df_seg.empty:
+        for cell_id, grp in df_seg.groupby("cell_id"):
+            grp.reset_index(drop=True).to_pickle(seg_dir / f"{cell_id}.pkl")
 
-    n = df["cell_id"].nunique()
+    n = df_cycle["cell_id"].nunique() if not df_cycle.empty else 0
     print(f"  사이클 HI 저장: {cycle_dir}  ({n}개 셀)")
     print(f"  세그먼트 HI 저장: {seg_dir}  ({n}개 셀)")
     return df_cycle, df_seg
@@ -1411,7 +1454,10 @@ def _qfw_tag(axis_cfg: dict) -> str:
     # 달라지면 완전히 다른 데이터이므로 반드시 다른 경로에 저장(confound 방지, §4.6).
     min_pts = int(axis_cfg.get("min_pts", 10))
     minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
-    return f"n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix(axis_cfg)}{minpts_sfx}"
+    # assign="none"(시나리오-only 대조군, docs/260816_RESULTS.md §5 no_scen)이면
+    # 반드시 다른 경로에 저장 — position_bin(6시나리오)과 confound 방지(§4.6과 동일 원칙).
+    assign_sfx = "" if axis_cfg.get("assign", "position_bin") == "position_bin" else "_noscen"
+    return f"n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix(axis_cfg)}{minpts_sfx}{assign_sfx}"
 
 
 def _qfref_tag(axis_cfg: dict) -> str:
@@ -1555,14 +1601,14 @@ def load_or_extract(
               "HI는 추출되지만 시나리오 라우팅이 무의미합니다.")
 
     print(f"=== MIT HI 추출 (axis={axis}, exclude_cv={exclude_cv}) ===")
-    df_mit,  cov_mit  = load_all(MIT_DIR,  n_workers=n_workers, axis=axis, axis_cfg=axis_cfg,
-                                  exclude_cv=exclude_cv)
-    dc_mit,  ds_mit  = _save_per_cell_hi(df_mit,  "MIT",  axis=_axis_dir)
+    seg_mit,  cyc_mit,  cov_mit  = load_all(MIT_DIR,  n_workers=n_workers, axis=axis,
+                                             axis_cfg=axis_cfg, exclude_cv=exclude_cv)
+    _save_per_cell_hi(seg_mit, cyc_mit, "MIT", axis=_axis_dir)
     print(f"=== HUST HI 추출 (axis={axis}, exclude_cv={exclude_cv}) ===")
-    df_hust, cov_hust = load_all(HUST_DIR, n_workers=n_workers, axis=axis, axis_cfg=axis_cfg,
-                                  exclude_cv=exclude_cv)
-    dc_hust, ds_hust = _save_per_cell_hi(df_hust, "HUST", axis=_axis_dir)
-    _save_sample_csvs(df_mit, df_hust)
+    seg_hust, cyc_hust, cov_hust = load_all(HUST_DIR, n_workers=n_workers, axis=axis,
+                                             axis_cfg=axis_cfg, exclude_cv=exclude_cv)
+    _save_per_cell_hi(seg_hust, cyc_hust, "HUST", axis=_axis_dir)
+    _save_sample_csvs(seg_mit, cyc_mit, seg_hust, cyc_hust)
 
     # ScenarioSpec 저장
     _spec_dir = HI_ROOT / _axis_dir
@@ -1575,8 +1621,15 @@ def load_or_extract(
         _save_coverage_stats(_spec_dir / "coverage_stats.txt",
                              {"MIT": cov_mit, "HUST": cov_hust}, axis, axis_cfg)
 
-    df = pd.concat([df_mit, df_hust], ignore_index=True)
-    print(f"  총 사이클: MIT {len(df_mit):,}  /  HUST {len(df_hust):,}")
+    seg_all = pd.concat([seg_mit, seg_hust], ignore_index=True)
+    cyc_all = pd.concat([cyc_mit, cyc_hust], ignore_index=True)
+    print(f"  총 사이클: MIT {len(cyc_mit):,}  /  HUST {len(cyc_hust):,}"
+          f"  (세그먼트 인스턴스: MIT {len(seg_mit):,} / HUST {len(seg_hust):,})")
+
+    # Step4 자체 상관분석/플롯 전용 wide df — 모델 학습(5_model)은 seg pkl(native
+    # 포맷, 세그먼트당 1행)을 직접 읽으므로 이 df는 학습에 안 쓰인다(_build_flat_correlation_df
+    # 참고, docs/260816_RESULTS.md).
+    df = _build_flat_correlation_df(seg_all, cyc_all)
     df.to_pickle(_cache)
     print(f"  캐시 저장: {_cache}")
     return df

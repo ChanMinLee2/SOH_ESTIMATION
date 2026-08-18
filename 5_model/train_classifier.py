@@ -85,11 +85,13 @@ def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
     # min_pts 기본값(10)이 아니면 접미사 (hi_correlation._qfw_tag 와 동일 규칙, 2026-08-10)
     min_pts = int(p.get("min_pts", 10))
     minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
+    # assign="none"(no_scen 대조군, docs/260816_RESULTS.md §5)이면 접미사 (hi_correlation._qfw_tag 와 동일 규칙)
+    assign_sfx = "" if p.get("assign", "position_bin") == "position_bin" else "_noscen"
     if spec.axis == "q_frac_wide":
         n1 = int(round(p.get("n1", 0.4) * 100))
         n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
-        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}"
+        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}"
     if spec.axis == "q_frac_ref":
         n1 = int(round(p.get("n1", 0.4) * 100))
         n2 = int(round(p.get("n2", 0.2) * 100))
@@ -98,7 +100,7 @@ def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
         noise = int(round(p.get("noise_amp", 0.03) * 100))
         nmode = str(p.get("noise_mode", "ou"))
         period = int(round(p.get("noise_period_cycles", 200.0)))
-        return f"q_frac_ref/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}_lag-{lag}_noise-{noise}%_{nmode}-{period}"
+        return f"q_frac_ref/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}_lag-{lag}_noise-{noise}%_{nmode}-{period}"
     if spec.axis == "q_abs":
         ms = int(round(p.get("mid_start", 0.20) * 100))
         me = int(round(p.get("mid_end", 0.50) * 100))
