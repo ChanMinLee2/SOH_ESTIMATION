@@ -203,3 +203,45 @@
 - **해석 / 다음 액션**: ⚠ 불안정 — Kendall τ 또는 Jaccard가 0.5 미만인 항목 있음. Stage1(체크포인트 기준)/Stage2(temperature annealing) 적용 후 같은 명령으로 재측정 필요.
 
 ---
+
+### 2026-08-20 15:50 — synergy_groups_k25_full_N2_groups_test
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S_p60.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --tag k25_full_N2_groups_test
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_test.json`
+- **핵심 수치**: 전체 HI 126개 -> 그룹 126개, 평균 그룹 크기 3.14
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-08-20 15:57 — synergy_groups_k25_full_N2_groups_test2
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S_p60.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --tag k25_full_N2_groups_test2
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_test2.json`
+- **핵심 수치**: 전체 HI 126개 -> 그룹 126개, 평균 그룹 크기 3.14
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-08-20 16:23 — synergy_groups_k25_full_N2_groups_noleak
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S_p60.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --tag k25_full_N2_groups_noleak
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_noleak.json`
+- **핵심 수치**: 전체 HI 120개 -> 그룹 120개, 평균 그룹 크기 3.20
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---

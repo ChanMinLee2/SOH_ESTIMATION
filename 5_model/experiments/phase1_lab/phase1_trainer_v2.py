@@ -102,6 +102,10 @@ def _parse_args() -> argparse.Namespace:
                         "(design intent: 게이트 선택이 최종 헤드 아키텍처와 무관해야 함) — "
                         "이 오버라이드는 그 전제가 실제로 맞는지 검증하기 위한 sanity check 전용. "
                         "기본값(mlp)이면 기존 train_scr.py Phase1과 동일하게 동작.")
+    p.add_argument("--synergy-groups-json", default=None, dest="synergy_groups_json",
+                   help="build_synergy_groups.py 산출물(synergy_groups_*.json) 경로. 주어지면 "
+                        "scen_gates가 시나리오별 그룹 계층 게이트(GroupedHardConcreteGate)로 "
+                        "학습됨 — train_scr.py의 --synergy-groups-json과 동일 로더 재사용")
     p.add_argument("--tag", required=True)
     return p.parse_args()
 
@@ -172,9 +176,20 @@ def main() -> None:
     # 오버라이드 안 주면 기존과 100% 동일 동작).
     p1_model_cfg = {**cfg["model"], "regression_model": args.regression_model,
                      "with_raw_cnn": False, "with_raw_flat": False}
+
+    scen_group_ids = None
+    if args.synergy_groups_json:
+        scen_group_ids = _base._load_synergy_group_ids(
+            Path(args.synergy_groups_json), spec.n_scenarios, spec.scenario_names,
+        )
+        n_groups_total = sum(len(set(g)) for g in scen_group_ids.values())
+        print(f"[p1v2] synergy-groups-json 적용: {args.synergy_groups_json} "
+              f"({len(scen_group_ids)}/{spec.n_scenarios}개 시나리오, 총 그룹 {n_groups_total}개)")
+
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
+        scen_group_ids=scen_group_ids,
     ).to(device)
 
     loss_cfg = cfg["loss"]
@@ -318,6 +333,10 @@ def main() -> None:
     hi_cols_by_seg = {s: get_hi_cols_for_seg(spec.scenario_names[s]) for s in range(spec.n_scenarios)}
     _base._save_probe_masks_to_json(model, output_dir / "gates" / "classification_HIs.json", hi_cols_ref)
     _base._save_scen_masks_to_json(model, output_dir / "gates" / "regression_HIs.json", hi_cols_by_seg)
+    _base._plot_gate_probs(
+        model, output_dir / "gates" / "gate_probs.png", hi_cols_ref,
+        charge_m, discharge_m, scen_k,
+    )
 
     cfg.setdefault("data", {})["exclude_stat_leak"] = None  # v2 트레이너 표식용, 필요시 실값으로 교체
     save_config(cfg, output_dir / "config.yaml")
@@ -327,6 +346,9 @@ def main() -> None:
         "selected_epoch": best_epoch, "gate_saturation": best_sat,
         "beta_min": beta_min, "l0_fully_ramped_epoch": l0_fully_ramped_ep,
         "output_dir": str(output_dir),
+        "synergy_groups_json": args.synergy_groups_json,
+        "synergy_n_groups": ({s: max(g) + 1 for s, g in scen_group_ids.items()}
+                              if scen_group_ids else None),
     }
     (output_dir / "p1v2_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[p1v2] 선택된 epoch={best_epoch} (gate_saturation={best_sat:.4f})")

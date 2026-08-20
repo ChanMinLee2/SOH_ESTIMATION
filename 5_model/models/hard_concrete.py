@@ -88,3 +88,51 @@ class HardConcreteGate(nn.Module):
 
     def extra_repr(self) -> str:
         return f"n_features={self.n_features}"
+
+
+class GroupedHardConcreteGate(HardConcreteGate):
+    """
+    그룹 계층을 추가한 Hard-Concrete L0 게이트.
+
+        log_alpha[i] = log_alpha_group[group_of(i)] + log_alpha_member[i]
+
+    독립 스칼라 하나씩이던 log_alpha를 "그룹을 켤지 말지"(log_alpha_group, 그룹 수만큼)와
+    "그룹 안에서 상대적으로 얼마나 더/덜 중요한지"(log_alpha_member, HI 수만큼) 두 단으로
+    쪼갠다. 다중공선성이 있는 HI끼리는 모델 출력에 주는 그래디언트가 거의 같아서 원래
+    log_alpha가 학습 중 어느 쪽을 밀지 랜덤하게 갈리는데(top-10 랭킹 불안정성의 원인),
+    "그룹을 켤지"라는 큰 결정을 그래디언트가 합쳐지는 log_alpha_group 하나로 모으면
+    이 흔들림이 줄어든다. forward/gate_prob/active_indices 등은 log_alpha를 그대로
+    참조하므로 HardConcreteGate 쪽 구현을 재사용하고, log_alpha만 property로 재정의한다.
+
+    group_ids: 길이 n_features, 값은 0..n_groups-1 (build_synergy_groups.py의
+               seg_{s}_groups를 펼친 것). 시너지 그룹 정보가 없는(모든 HI가 자기 혼자인)
+               경우 group_ids=range(n_features)를 주면 일반 HardConcreteGate와 동등하다.
+    """
+
+    def __init__(self, n_features: int, group_ids: list[int]):
+        nn.Module.__init__(self)  # HardConcreteGate.__init__은 건너뜀 — 거기서 만드는 평범한
+                                   # log_alpha Parameter가 아래 log_alpha 프로퍼티와 충돌하기 때문
+        if len(group_ids) != n_features:
+            raise ValueError(
+                f"group_ids 길이({len(group_ids)})가 n_features({n_features})와 다릅니다"
+            )
+        self.n_features = n_features
+        self.n_groups = max(group_ids) + 1
+        self.register_buffer("group_index", torch.tensor(group_ids, dtype=torch.long))
+        self.log_alpha_group  = nn.Parameter(torch.zeros(self.n_groups))
+        self.log_alpha_member = nn.Parameter(torch.zeros(n_features))
+
+    @property
+    def log_alpha(self) -> torch.Tensor:
+        return self.log_alpha_group[self.group_index] + self.log_alpha_member
+
+    @torch.no_grad()
+    def group_gate_prob(self) -> torch.Tensor:
+        """그룹 레벨만의 게이트 확률(멤버 오프셋 제외) — 그룹 자체가 켜졌는지 보고 싶을 때."""
+        offset = self.BETA * torch.log(
+            torch.tensor(-self.GAMMA / self.ZETA, device=self.log_alpha_group.device)
+        )
+        return torch.sigmoid(self.log_alpha_group - offset)
+
+    def extra_repr(self) -> str:
+        return f"n_features={self.n_features}, n_groups={self.n_groups}"

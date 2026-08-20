@@ -83,6 +83,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--gates-from",  default=None,
                    help="Phase 2 시 이전 run 폴더 경로 (gates JSON 자동 탐색). "
                         "미지정 시 yaml의 gates_from 사용")
+    p.add_argument("--synergy-groups-json", default=None, dest="synergy_groups_json",
+                   help="Phase 1 전용: build_synergy_groups.py 산출물(synergy_groups_*.json) 경로. "
+                        "주어지면 scen_gates가 시나리오별로 그룹 단위 계층 게이트"
+                        "(GroupedHardConcreteGate)로 학습됨 — 미지정 시 기존과 동일(개별 게이트)")
     p.add_argument("--device",      default="auto")
     # 시나리오 축
     p.add_argument("--seg-axis",    default=None,
@@ -255,6 +259,39 @@ def _load_scen_masks_from_json(
 # JSON savers — dual probe
 # ---------------------------------------------------------------------------
 
+def _load_synergy_group_ids(
+    json_path: Path,
+    n_scenarios: int,
+    scenario_names: list[str],
+) -> dict[int, list[int]]:
+    """build_synergy_groups.py의 seg_{s}_groups(HI 인덱스 묶음)를 GroupedHardConcreteGate용
+    group_ids({scenario_idx: [group_id per HI]})로 변환. 시너지 그룹 생성 시점과 지금 학습이
+    같은 SOH_EXCLUDE_STAT_LEAK 설정을 썼는지(=HI 개수가 N_HI와 일치하는지)를 검증한다 —
+    안 맞으면 인덱스가 다른 HI를 가리키게 되어 조용히 잘못된 그룹으로 학습될 수 있다."""
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    out: dict[int, list[int]] = {}
+    for s in range(n_scenarios):
+        key = f"seg_{s}_groups"
+        if key not in data:
+            print(f"[train] synergy-groups-json에 시나리오 {s}({scenario_names[s]}) 없음 "
+                  f"— 이 시나리오는 그룹 없이 개별 게이트로 학습")
+            continue
+        groups = data[key]
+        n_hi_json = sum(len(g) for g in groups)
+        if n_hi_json != N_HI:
+            raise ValueError(
+                f"synergy-groups-json 시나리오 {s}({scenario_names[s]})의 HI 개수({n_hi_json})가 "
+                f"현재 N_HI({N_HI})와 다릅니다 — SOH_EXCLUDE_STAT_LEAK 설정이 그룹 생성 시점과 "
+                f"다른 것으로 보입니다. 같은 설정으로 build_synergy_groups.py를 다시 실행하세요."
+            )
+        group_ids = [-1] * N_HI
+        for g_idx, members in enumerate(groups):
+            for m in members:
+                group_ids[m] = g_idx
+        out[s] = group_ids
+    return out
+
+
 def _ranked_indices(gate) -> tuple[list[int], list[float]]:
     prob       = gate.gate_prob().detach().cpu()
     sorted_idx = prob.argsort(descending=True).tolist()
@@ -339,13 +376,30 @@ def _plot_gate_probs(
     fig, axes = plt.subplots(2, 4, figsize=(22, 8))
     axes = axes.flatten()
 
+    is_grouped = any(hasattr(gate, "group_index") for _, gate, _, _ in gates_info)
+
     for ax, (title, gate, threshold, color) in zip(axes, gates_info):
         prob = gate.gate_prob().detach().cpu().numpy()
         idx  = np.arange(len(prob))
         sorted_idx = np.argsort(prob)[::-1]
         sorted_prob = prob[sorted_idx]
 
-        ax.bar(range(len(sorted_prob)), sorted_prob, color=color, alpha=0.7)
+        if hasattr(gate, "group_index"):
+            # 그룹 계층 게이트 — 막대를 그룹별 색으로 칠해서 같은 그룹 멤버가 랭킹에서
+            # 뭉쳐 있는지(=그룹이 실제로 같이 움직인다) 한눈에 보이게 하고, 그룹 자체의
+            # 게이트 확률(멤버 오프셋 제외)을 점선으로 겹쳐 그린다.
+            group_idx = gate.group_index.detach().cpu().numpy()
+            sorted_groups = group_idx[sorted_idx]
+            cmap = plt.cm.tab20(np.linspace(0, 1, max(gate.n_groups, 1)))
+            bar_colors = cmap[sorted_groups % 20]
+            ax.bar(range(len(sorted_prob)), sorted_prob, color=bar_colors, alpha=0.85)
+            group_prob = gate.group_gate_prob().detach().cpu().numpy()
+            ax.plot(range(len(sorted_prob)), group_prob[sorted_groups],
+                    color="black", linestyle=":", linewidth=1.0, alpha=0.7,
+                    label=f"group_gate_prob ({gate.n_groups} groups)")
+        else:
+            ax.bar(range(len(sorted_prob)), sorted_prob, color=color, alpha=0.7)
+
         if threshold <= len(sorted_prob):
             cutoff = float(sorted_prob[threshold - 1]) if threshold > 0 else 1.0
             ax.axvline(x=threshold - 0.5, color="red", linestyle="--", linewidth=1.2,
@@ -363,7 +417,10 @@ def _plot_gate_probs(
             ax.text(rank, sorted_prob[rank] + 0.01, short,
                     rotation=90, fontsize=5, ha="center", va="bottom")
 
-    fig.suptitle("Phase 1 — Gate Probability by HI (sorted desc)", fontsize=13, fontweight="bold")
+    _suptitle = "Phase 1 — Gate Probability by HI (sorted desc)"
+    if is_grouped:
+        _suptitle += "  [scen gates: grouped — bar color=synergy group, dotted=group_gate_prob]"
+    fig.suptitle(_suptitle, fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -678,6 +735,17 @@ def main() -> None:
         # 게이트(HI 서브셋) 선정과 무관한 Phase 2 전용 옵션이라 Phase 1에 흘러들어가면 안 된다.
         _p1_model_cfg = {**cfg["model"], "regression_model": "mlp",
                           "with_raw_cnn": False, "with_raw_flat": False}
+
+        _scen_group_ids = None
+        if args.synergy_groups_json:
+            _scen_group_ids = _load_synergy_group_ids(
+                Path(args.synergy_groups_json), spec.n_scenarios, spec.scenario_names,
+            )
+            _n_grouped = sum(len(set(g)) for g in _scen_group_ids.values())
+            print(f"[train] synergy-groups-json 적용: {args.synergy_groups_json} "
+                  f"({len(_scen_group_ids)}/{spec.n_scenarios}개 시나리오, 총 그룹 {_n_grouped}개 "
+                  f"— scen_gates가 GroupedHardConcreteGate로 학습됨)")
+
         model = SCRModel(
             d_probe=cfg["model"]["d_probe"],
             d_head=cfg["model"]["d_head"],
@@ -685,6 +753,7 @@ def main() -> None:
             spec=spec,
             with_probe_mlp=_with_probe_mlp,
             model_cfg=_p1_model_cfg,
+            scen_group_ids=_scen_group_ids,
             # 마스크 없음 → HardConcreteGate 활성화
         )
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

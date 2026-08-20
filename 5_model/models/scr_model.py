@@ -57,6 +57,9 @@ class SCRModel(nn.Module):
         model_cfg: Optional[dict] = None,  # Phase 2 전용: regression_model 선택
         spec=None,   # ScenarioSpec | None  (None → qfrac default)
         with_probe_mlp: bool = False,  # Phase 1 dual-objective: probe_gate에 CE 그래디언트 추가
+        scen_group_ids: Optional[dict[int, list[int]]] = None,  # Phase 1: build_synergy_groups.py
+            # 산출물 — {scenario_idx: [group_id per HI]}. 주어진 시나리오는 scen_gates가
+            # GroupedHardConcreteGate로, 없는 시나리오는 기존 HardConcreteGate로 만들어진다.
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -69,7 +72,7 @@ class SCRModel(nn.Module):
         self.n_scenarios = spec.n_scenarios
         self.n_classes   = spec.n_classes
 
-        from models.hard_concrete import HardConcreteGate
+        from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate
 
         # ----------------------------------------------------------------
         # Stage A — direction-aware probe gates
@@ -91,9 +94,12 @@ class SCRModel(nn.Module):
         # Stage B — per-scenario gates (n_scenarios × N_HI)
         # ----------------------------------------------------------------
         if scen_masks is None:
-            self.scen_gates = nn.ModuleList(
-                [HardConcreteGate(N_HI) for _ in range(self.n_scenarios)]
-            )
+            scen_group_ids = scen_group_ids or {}
+            self.scen_gates = nn.ModuleList([
+                GroupedHardConcreteGate(N_HI, scen_group_ids[s]) if s in scen_group_ids
+                else HardConcreteGate(N_HI)
+                for s in range(self.n_scenarios)
+            ])
             self._fixed_scen = False
         else:
             self.register_buffer("_scen_masks_buf", scen_masks.float())
