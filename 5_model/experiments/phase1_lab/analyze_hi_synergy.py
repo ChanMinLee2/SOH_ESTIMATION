@@ -47,12 +47,33 @@ sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.io_utils import load_config  # noqa: E402
-from utils.tqdm_utils import tqdm, write as tqdm_write  # noqa: E402
-from datasets.segment_dataset import build_datasets  # noqa: E402
-from common.scenario import get_segmenter  # noqa: E402
-
 from log_utils import append_log_entry, current_command_str  # noqa: E402
+
+# utils.tqdm_utils를 쓰지 않고 tqdm 패키지를 여기서 직접 import한다 —
+# utils/__init__.py가 무조건 io_utils(=torch)를 import하기 때문에, "utils.*"에서
+# 뭘 가져오든(설령 tqdm_utils처럼 그 자체는 torch와 무관해도) torch가 딸려온다.
+# load_config/build_datasets/get_segmenter도 같은 이유로 여기서(모듈 최상단)
+# import하지 않는다 — Windows는 ProcessPoolExecutor(spawn)로 워커를 띄울 때마다
+# 이 파일을 처음부터 다시 import하므로, 모듈 최상단에 torch를 끌고 오는 import가
+# 하나라도 있으면 --workers 수만큼 torch+CUDA DLL을 동시에 로드하려다
+# "페이징 파일이 너무 작습니다"(WinError 1455) 에러가 난다. 워커가 실제로 쓰는 함수
+# (_mi_pair_task/_eval_candidate_task)는 numpy/sklearn만 쓰고 torch가 전혀 필요
+# 없으므로, torch를 건드리는 import는 전부 _load_train_val() 안(=메인 프로세스에서
+# main() 호출 시에만 실행됨, 워커는 이 함수를 절대 호출하지 않음)으로 옮긴다.
+try:
+    from tqdm import tqdm as _tqdm
+
+    def tqdm(iterable=None, **kwargs):
+        return _tqdm(iterable, **kwargs)
+
+    def tqdm_write(msg: str) -> None:
+        _tqdm.write(msg)
+except ImportError:  # pragma: no cover
+    def tqdm(iterable=None, **kwargs):
+        return iterable if iterable is not None else iter([])
+
+    def tqdm_write(msg: str) -> None:
+        print(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -85,14 +106,23 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n-mi-candidates", type=int, default=20, help="pairwise MI 스크리닝 후보 수(상관계수 상위 N개)")
     p.add_argument("--n-ablation-pairs", type=int, default=8, help="초가법성 검증할 상위 시너지 쌍 개수")
     p.add_argument("--split-seed", type=int, default=42)
-    p.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1),
-                   help="Stage B/C 병렬 워커 수 (기본: CPU 코어수-1)")
+    p.add_argument("--workers", type=int, default=min(8, max(1, (os.cpu_count() or 4) - 1)),
+                   help="Stage B/C 병렬 워커 수 (기본: min(8, CPU 코어수-1) — 워커마다 "
+                        "프로세스를 새로 띄우는 비용과 페이징 파일 부담을 고려해 8로 상한을 둠. "
+                        "CPU가 아무리 많아도 지나치게 키우지 말 것)")
     p.add_argument("--tag", required=True)
     args = p.parse_args()
     return args
 
 
 def _load_train_val(args) -> tuple:
+    # 지연 import(모듈 최상단이 아니라 여기) — 이유는 파일 상단 주석 참고.
+    # 이 함수는 메인 프로세스(main())에서만 호출되고 워커 프로세스는 절대 호출하지
+    # 않으므로, 여기 있는 한 torch가 워커에서 로드될 일이 없다.
+    from utils.io_utils import load_config
+    from datasets.segment_dataset import build_datasets
+    from common.scenario import get_segmenter
+
     cfg = load_config(args.model_config)
     cfg.setdefault("data", {})
     cfg["data"]["data_dir"] = args.data_dir
@@ -139,7 +169,10 @@ def marginal_correlation_ranking(x: np.ndarray, y: np.ndarray) -> list[int]:
             continue
         c = np.corrcoef(col, y)[0, 1]
         corrs.append(0.0 if np.isnan(c) else abs(c))
-    return list(np.argsort(corrs)[::-1])
+    # int()로 캐스팅 — np.argsort()가 주는 np.int64는 이후 pairwise_interaction_info의
+    # itertools.combinations를 거쳐 report dict까지 그대로 흘러들어가고, json.dumps가
+    # np.int64를 직렬화하지 못해 결과 저장 직전(성공적으로 A~E 전부 끝낸 뒤)에 죽는다.
+    return [int(i) for i in np.argsort(corrs)[::-1]]
 
 
 # ---------------------------------------------------------------------------

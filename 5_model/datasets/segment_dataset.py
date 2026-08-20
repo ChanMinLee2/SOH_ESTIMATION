@@ -69,109 +69,6 @@ def split_cells(
 # Internal loaders
 # ---------------------------------------------------------------------------
 
-def _load_wide_pkl(pkl_path: Path) -> pd.DataFrame:
-    """Load one wide-format cell pkl (one row = one cycle)."""
-    try:
-        from utils.compat import install_numpy2_shim
-        install_numpy2_shim()
-    except ImportError:
-        pass
-    import pickle
-    with open(pkl_path, "rb") as f:
-        data = pickle.load(f)
-    if isinstance(data, pd.DataFrame):
-        return data
-    if isinstance(data, dict):
-        return pd.DataFrame(data)
-    raise ValueError(f"Unexpected pkl type: {type(data)}")
-
-
-def _wide_to_segments(
-    df: pd.DataFrame,
-    cell_id: str,
-    spec: ScenarioSpec | None = None,
-) -> pd.DataFrame:
-    """
-    Reshape one cell's wide DataFrame (one row = one cycle) into
-    segment-level DataFrame (one row = one segment).
-
-    Output columns:
-      cell_id, cycle, seg_name, seg_idx, scen, direction, level,
-      capacity_Ah, hi_00 .. hi_64
-    """
-    _spec = spec or _DEFAULT_SPEC
-    rows = []
-    for _, cycle_row in df.iterrows():
-        cycle_num = int(cycle_row.get("cycle", cycle_row.name))
-        cap_ah = float(cycle_row["capacity_Ah"])
-
-        for seg_idx, seg in enumerate(_spec.scenario_names):
-            hi_cols = get_hi_cols_for_seg(seg)
-            if not all(c in cycle_row.index for c in hi_cols):
-                continue
-
-            hi_vals = cycle_row[hi_cols].values.astype(np.float32)
-            dir_idx, latent_class = _spec.scenario_to_dir_class(seg_idx)
-            direction_val = 1 if dir_idx == 0 else -1
-            level = latent_class
-
-            rows.append({
-                "cell_id":     cell_id,
-                "cycle":       cycle_num,
-                "seg_name":    seg,
-                "seg_idx":     seg_idx,
-                "scen":        seg_idx,   # legacy field; == scenario_id
-                "direction":   direction_val,
-                "level":       level,
-                "capacity_Ah": cap_ah,
-                **{f"hi_{i:02d}": v for i, v in enumerate(hi_vals)},
-            })
-
-    return pd.DataFrame(rows)
-
-
-def load_dataset_wide(
-    data_dir: Path,
-    datasets: Sequence[str],
-    min_cycles: int = 10,
-    spec: ScenarioSpec | None = None,
-) -> pd.DataFrame:
-    """
-    Load wide pkl files for all datasets and return a combined segment-level DataFrame.
-
-    data_dir: e.g. Path("_4_data_hi")
-    datasets: e.g. ["MIT", "HUST"]
-    spec: ScenarioSpec to use for segment routing (default: qfrac)
-    """
-    all_segs: list[pd.DataFrame] = []
-    for ds in datasets:
-        ds_dir = data_dir / ds
-        if not ds_dir.exists():
-            print(f"[dataset] WARNING: {ds_dir} not found, skipping")
-            continue
-        for pkl_path in sorted(ds_dir.glob("*.pkl")):
-            cell_id = pkl_path.stem
-            try:
-                df = _load_wide_pkl(pkl_path)
-            except Exception as e:
-                print(f"[dataset] ERROR loading {pkl_path}: {e}")
-                continue
-            if len(df) < min_cycles:
-                continue
-            seg_df = _wide_to_segments(df, cell_id, spec=spec)
-            if len(seg_df) == 0:
-                continue
-            seg_df["dataset"] = ds
-            all_segs.append(seg_df)
-
-    if not all_segs:
-        raise RuntimeError("No data loaded — check data_dir and datasets config.")
-    combined = pd.concat(all_segs, ignore_index=True)
-    _hi_cols = [f"hi_{i:02d}" for i in range(N_HI)]
-    combined = combined.dropna(subset=_hi_cols, how="all")  # 정보량0 세그먼트 제외 (native seg 경로와 동일 정책)
-    return combined
-
-
 def _get_native_hi_cols() -> list[str]:
     """66 HI column names in native seg format (no seg suffix).
 
@@ -210,7 +107,7 @@ def load_dataset_native_seg(
     NOT the total cycle capacity. The correct SOH target is loaded from the
     corresponding wide pkl in wide_data_dir if provided.
 
-    HI columns are mapped to hi_00..hi_64 in the same order as _wide_to_segments.
+    HI columns are mapped to hi_00..hi_64 via _get_native_hi_cols().
     """
     try:
         from utils.compat import install_numpy2_shim
@@ -614,19 +511,31 @@ def build_datasets(
     is_cross      = data_cfg.get("is_cross_dataset_evaluate", False)
 
     # ------------------------------------------------------------------
-    # Data loading (공통)
+    # Data loading (공통) — native seg pkl 전용.
+    #
+    # 2026-08-18(af9be9c) 시나리오 마지막 세그먼트만 살아남던 덮어쓰기 버그를 고치면서
+    # 세그먼트별 HI(diff_dqdv_area_chg_lo 등)가 wide(사이클 단위) pkl에는 더 이상 저장되지
+    # 않고 native seg pkl에만 저장되도록 바뀌었다. 예전엔 native seg pkl이 없으면 wide
+    # pkl에서 세그먼트별 컬럼을 읽어 재구성하는 폴백(load_dataset_wide/_wide_to_segments)이
+    # 있었지만, 그 컬럼 자체가 더 이상 wide pkl에 없으므로 그 폴백은 항상 빈 데이터만
+    # 반환하다 아래와 무관한 "No data loaded" 에러로 죽었다 — 실제 원인(Step4 미실행)을
+    # 전혀 알려주지 못해서 폴백 자체를 제거하고 아래처럼 조기에 명확한 에러를 낸다.
     # ------------------------------------------------------------------
-    native_df = pd.DataFrame()
-    if seg_dir.exists():
-        native_df = load_dataset_native_seg(seg_dir, datasets_list, wide_dir, spec=spec)
-
-    if len(native_df) > 0:
-        df = native_df
-    else:
-        df = load_dataset_wide(
-            wide_dir, datasets_list,
-            min_cycles=data_cfg.get("min_cycles_per_cell", 10),
-            spec=spec,
+    if not seg_dir.exists():
+        raise RuntimeError(
+            f"[dataset] native seg pkl 디렉터리가 없습니다: {seg_dir}\n"
+            f"  이 axis/config 조합은 아직 Step4(네이티브 세그먼트 추출, 4_hi_analysis/"
+            f"hi_correlation.py 또는 run_pipeline.py 4)를 실행하지 않은 것으로 보입니다.\n"
+            f"  wide(사이클 단위) pkl에는 세그먼트별 HI가 더 이상 저장되지 않으므로 "
+            f"(2026-08-18 이후) wide pkl로부터 재구성해 계속 진행할 수 없습니다 — "
+            f"data_dir/datasets 설정 문제가 아니라 Step4 추출 여부를 먼저 확인하세요."
+        )
+    df = load_dataset_native_seg(seg_dir, datasets_list, wide_dir, spec=spec)
+    if len(df) == 0:
+        raise RuntimeError(
+            f"[dataset] {seg_dir} 에 pkl 파일은 있지만 유효한 세그먼트 데이터가 0건입니다 — "
+            f"datasets={datasets_list} 설정이 실제 저장된 데이터셋 폴더명(대소문자 포함)과 "
+            f"일치하는지 확인하세요."
         )
 
     # 방향 필터 ("charge"|"discharge"|None) — direction: +1.0=충전, -1.0=방전

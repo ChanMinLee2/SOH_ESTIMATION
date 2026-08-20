@@ -248,6 +248,11 @@ def main():
                         help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (yaml training.seed 오버라이드, Step 6/8 전달)")
     parser.add_argument("--split-seed",  type=int, default=None,
                         help="train/val/test 셀 분할 시드 (yaml data.split_seed 오버라이드, Step 6/8 전달)")
+    parser.add_argument("--gates-from", default=None, dest="gates_from_override",
+                        help="Step 8(Phase 2)이 쓸 gates 디렉터리를 수동 지정 (예: 다중시드 앙상블, "
+                             "특정 seed의 Phase1 run, 수정 전 baseline run 등 '가장 최근 Phase1 run' "
+                             "자동탐지로는 못 집는 디렉터리와 비교 실험할 때). 미지정 시 기존 동작(같은 "
+                             "실행의 Phase1 결과 → 없으면 가장 최근 Phase1 run 자동탐지) 그대로.")
     parser.add_argument("--with-raw-cnn", action="store_true", dest="with_raw_cnn",
                         help="Phase 2(Step 8)에 회귀 헤드 raw CNN 융합 적용 (REGRESSION_UPGRADE.md "
                              "§5/§8/§10). Step 7에서 학습된 분류기의 RawCNN을 자동으로 얼려서 "
@@ -382,13 +387,18 @@ def main():
         # ── Phase 2 전: 스냅샷 + gates-from 주입 (+ --with-raw-cnn 자동 연결) ──────
         if num == 8:
             snapshot = _snapshot_run_dirs()
-            gates_src = str(p1_run_dir) if p1_run_dir else None
-            if gates_src is None:
-                latest = _find_new_run_dir(set(), phase=1)  # Phase 1 run 중 최신
-                gates_src = str(latest) if latest else None
+            if args.gates_from_override:
+                gates_src = args.gates_from_override
+                print(f"\n  → gates-from (수동 지정): {gates_src}")
+            else:
+                gates_src = str(p1_run_dir) if p1_run_dir else None
+                if gates_src is None:
+                    latest = _find_new_run_dir(set(), phase=1)  # Phase 1 run 중 최신
+                    gates_src = str(latest) if latest else None
+                if gates_src:
+                    print(f"\n  → gates-from (자동탐지): {gates_src}")
             if gates_src:
                 step_extra += ["--gates-from", gates_src]
-                print(f"\n  → gates-from: {gates_src}")
             else:
                 print("\n  [경고] Phase 1 run 디렉터리를 찾을 수 없습니다.")
 
