@@ -437,6 +437,11 @@ class FastTensorLoader:
             keys.insert(1, "x_raw")
         if include_aux:
             keys += ["aux_scen_target", "aux_intensity_target"]
+        if hasattr(ds, "x_kernel"):
+            # build_kernel_group_features.py 커널 융합 HI 블록(phase1_trainer_v2.py가
+            # 학습 직전 ds.x_kernel로 붙여둠) — 있으면 자동으로 배치에 포함, 없으면
+            # 기존과 완전히 동일 동작.
+            keys.append("x_kernel")
         self.keys = keys
         self.tensors = {k: getattr(ds, k) for k in keys}
         self.n = len(ds)

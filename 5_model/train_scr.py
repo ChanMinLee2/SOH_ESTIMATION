@@ -324,19 +324,26 @@ def _save_scen_masks_to_json(
     model: SCRModel,
     json_path: Path,
     hi_cols_by_seg: dict[int, list[str]],
+    gates=None,
 ) -> None:
-    """Phase 1: 시나리오별 gate_prob 전체 랭킹을 저장."""
+    """Phase 1: 시나리오별 gate_prob 전체 랭킹을 저장.
+
+    gates: 기본 None이면 model.scen_gates(raw HI) 사용 — 기존과 100% 동일 동작.
+    model.scen_kernel_gates를 넘기면 커널 융합 HI 블록(build_kernel_group_features.py)의
+    랭킹을 같은 형식으로 저장할 수 있다(phase1_trainer_v2.py에서 재사용)."""
+    gates = gates if gates is not None else model.scen_gates
     out = {}
     seg_names = model.spec.scenario_names
     for s in range(model.n_scenarios):
-        ranked, probs = _ranked_indices(model.scen_gates[s])
+        ranked, probs = _ranked_indices(gates[s])
         out[f"seg_{s}_ranked"]   = ranked
         out[f"seg_{s}_names"]    = [hi_cols_by_seg[s][i] for i in ranked]
         out[f"seg_{s}_probs"]    = probs
         out[f"seg_{s}_seg_name"] = seg_names[s]
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
-    print(f"[train] Saved scen HI ranking → {json_path}  (시나리오별 {N_HI}개 랭킹)")
+    n_hi_out = len(next(iter(hi_cols_by_seg.values())))
+    print(f"[train] Saved scen HI ranking → {json_path}  (시나리오별 {n_hi_out}개 랭킹)")
 
 
 # ---------------------------------------------------------------------------

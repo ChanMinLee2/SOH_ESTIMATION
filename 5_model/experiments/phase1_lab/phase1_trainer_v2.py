@@ -105,9 +105,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--synergy-groups-json", default=None, dest="synergy_groups_json",
                    help="build_synergy_groups.py 산출물(synergy_groups_*.json) 경로. 주어지면 "
                         "scen_gates가 시나리오별 그룹 계층 게이트(GroupedHardConcreteGate)로 "
-                        "학습됨 — train_scr.py의 --synergy-groups-json과 동일 로더 재사용")
+                        "학습됨 — train_scr.py의 --synergy-groups-json과 동일 로더 재사용. "
+                        "--kernel-features-pkl과 동시 사용 불가(그룹이 이미 피처 레벨에서 "
+                        "융합되면 게이트 레벨 그룹핑은 의미가 겹침)")
+    p.add_argument("--kernel-features-pkl", default=None, dest="kernel_features_pkl",
+                   help="build_kernel_group_features.py 산출물(kernel_group_features_*.pkl) 경로. "
+                        "주어지면 raw HI(x_hi)는 그대로 두고, 그룹당 1개 RBF 커널 융합값을 "
+                        "별도 게이트(scen_kernel_gates)로 추가해서 학습(대체 아님, 추가) — "
+                        "--synergy-groups-json과 동시 사용 불가")
     p.add_argument("--tag", required=True)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.synergy_groups_json and args.kernel_features_pkl:
+        p.error("--synergy-groups-json과 --kernel-features-pkl은 동시에 줄 수 없습니다 "
+                "(커널 융합을 쓰면 그룹 정보가 이미 피처에 반영되어 게이트 레벨 그룹핑이 불필요함)")
+    return args
 
 
 def _resolve_device(s: str) -> torch.device:
@@ -116,11 +127,44 @@ def _resolve_device(s: str) -> torch.device:
     return torch.device(s)
 
 
+def _apply_kernel_features(datasets: list, pkl_path: Path) -> list[str]:
+    """build_kernel_group_features.py 산출물을 로드해 각 dataset에 x_kernel(정규화된
+    RBF 커널 융합값)을 새로 붙인다 — x_hi(raw HI)는 건드리지 않는다(v2: 대체가 아니라
+    추가). FastTensorLoader가 ds.x_kernel 존재 여부를 보고 자동으로 배치에 포함시킨다
+    (datasets/segment_dataset.py 참고).
+
+    train으로만 fit된 모델을 val/test에도 그대로 적용(predict만)하고, 정규화도 train
+    mean/std를 val/test에 그대로 적용(fit 안 함)하므로 누수는 없다.
+    반환값은 길이 K(=n_features)인 이름 목록 — gates JSON/플랏에서 사용."""
+    import pickle
+    with open(pkl_path, "rb") as fh:
+        artifact = pickle.load(fh)
+
+    features = artifact["features"]
+    names = [f["name"] for f in features]
+    means = np.array([f["mean"] for f in features], dtype=np.float32)
+    stds = np.array([f["std"] for f in features], dtype=np.float32)
+
+    for ds in datasets:
+        x = (ds.x_hi * ds.nan_mask).numpy()  # NaN 위치 0으로 (fit 시점과 동일 처리)
+        x_kernel = np.zeros((x.shape[0], len(features)), dtype=np.float32)
+        for j, f in enumerate(features):
+            x_kernel[:, j] = f["model"].predict(x[:, f["members"]])
+        x_kernel = (x_kernel - means) / stds  # train 통계로 z-score (val/test는 적용만)
+        ds.x_kernel = torch.from_numpy(x_kernel.astype(np.float32))
+
+    avg_r2 = float(np.mean([f["train_r2"] for f in features])) if features else 0.0
+    print(f"[p1v2] kernel-features-pkl 적용: {pkl_path} "
+          f"(커널 HI {len(features)}개를 x_hi({N_HI}개)와 별도로 추가, 평균 train R^2={avg_r2:.4f})")
+    return names
+
+
 def _gate_saturation_fraction(model: SCRModel) -> float:
     """게이트 확률이 애매한 [0.1,0.9] 구간에 있는 비율 — 낮을수록 더 확실하게 이산화됨."""
-    probs = []
-    for gate in [model.charge_probe_gate, model.discharge_probe_gate, *model.scen_gates]:
-        probs.append(gate.gate_prob().detach().cpu())
+    gates = [model.charge_probe_gate, model.discharge_probe_gate, *model.scen_gates]
+    if model.scen_kernel_gates is not None:
+        gates += list(model.scen_kernel_gates)
+    probs = [gate.gate_prob().detach().cpu() for gate in gates]
     p = torch.cat(probs)
     return float(((p > 0.1) & (p < 0.9)).float().mean().item())
 
@@ -162,6 +206,13 @@ def main() -> None:
         )
 
     train_ds, val_ds, _test_ds, norm = build_datasets(cfg, spec=spec)
+
+    kernel_hi_names = None
+    if args.kernel_features_pkl:
+        kernel_hi_names = _apply_kernel_features(
+            [train_ds, val_ds, _test_ds], Path(args.kernel_features_pkl),
+        )
+
     tr_cfg = cfg["training"]
     if args.batch_size is not None:
         print(f"[p1v2] batch_size 오버라이드: {tr_cfg['batch_size']} -> {args.batch_size}")
@@ -190,6 +241,7 @@ def main() -> None:
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
         scen_group_ids=scen_group_ids,
+        n_kernel_hi=len(kernel_hi_names) if kernel_hi_names else 0,
     ).to(device)
 
     loss_cfg = cfg["loss"]
@@ -329,10 +381,22 @@ def main() -> None:
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
+    # raw HI(x_hi) 랭킹은 커널 피처 사용 여부와 무관하게 항상 같은 방식으로 저장(v2:
+    # 커널은 raw를 대체하지 않고 추가하므로).
     hi_cols_ref = get_hi_cols_for_seg("dis_hi")
     hi_cols_by_seg = {s: get_hi_cols_for_seg(spec.scenario_names[s]) for s in range(spec.n_scenarios)}
     _base._save_probe_masks_to_json(model, output_dir / "gates" / "classification_HIs.json", hi_cols_ref)
     _base._save_scen_masks_to_json(model, output_dir / "gates" / "regression_HIs.json", hi_cols_by_seg)
+
+    if kernel_hi_names is not None:
+        # 커널 피처는 시나리오 무관 공유 스키마(모든 세그먼트에 같은 커널 모델을 적용) —
+        # raw HI 랭킹과는 별도 파일로 저장.
+        kernel_cols_by_seg = {s: kernel_hi_names for s in range(spec.n_scenarios)}
+        _base._save_scen_masks_to_json(
+            model, output_dir / "gates" / "regression_kernel_HIs.json", kernel_cols_by_seg,
+            gates=model.scen_kernel_gates,
+        )
+
     _base._plot_gate_probs(
         model, output_dir / "gates" / "gate_probs.png", hi_cols_ref,
         charge_m, discharge_m, scen_k,
@@ -349,6 +413,7 @@ def main() -> None:
         "synergy_groups_json": args.synergy_groups_json,
         "synergy_n_groups": ({s: max(g) + 1 for s, g in scen_group_ids.items()}
                               if scen_group_ids else None),
+        "kernel_features_pkl": args.kernel_features_pkl,
     }
     (output_dir / "p1v2_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[p1v2] 선택된 epoch={best_epoch} (gate_saturation={best_sat:.4f})")

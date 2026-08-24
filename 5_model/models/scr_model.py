@@ -60,6 +60,10 @@ class SCRModel(nn.Module):
         scen_group_ids: Optional[dict[int, list[int]]] = None,  # Phase 1: build_synergy_groups.py
             # 산출물 — {scenario_idx: [group_id per HI]}. 주어진 시나리오는 scen_gates가
             # GroupedHardConcreteGate로, 없는 시나리오는 기존 HardConcreteGate로 만들어진다.
+        n_kernel_hi: int = 0,  # Phase 1: build_kernel_group_features.py 산출물 — 그룹당 RBF
+            # 커널 융합 HI를 raw HI(x_hi)를 대체하지 않고 "추가"로 넣을 때의 폭. 0이면 기존과
+            # 완전히 동일(커널 블록 없음). >0이면 시나리오별 scen_kernel_gates(N_HI와 별개
+            # 폭 n_kernel_hi)가 추가로 생기고, cap_head 입력에 그 블록이 덧붙는다.
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -107,14 +111,31 @@ class SCRModel(nn.Module):
             self._fixed_scen = True
 
         # ----------------------------------------------------------------
+        # Stage B' — 커널 융합 HI 블록(선택) — raw HI(scen_gates)를 대체하지 않고
+        # 별도 폭(n_kernel_hi)의 독립 게이트로 "추가"한다. build_kernel_group_features.py가
+        # 그룹당 1개씩 만든 RBF 커널 특징을 소비하는 용도(다중공선성/시너지 그룹 정보를
+        # raw HI와 나란히 쓰고 싶을 때). n_kernel_hi=0이면 완전히 비활성(기존과 동일 동작).
+        # ----------------------------------------------------------------
+        self.n_kernel_hi = n_kernel_hi
+        if n_kernel_hi > 0:
+            self.scen_kernel_gates = nn.ModuleList(
+                [HardConcreteGate(n_kernel_hi) for _ in range(self.n_scenarios)]
+            )
+        else:
+            self.scen_kernel_gates = None
+
+        # ----------------------------------------------------------------
         # Capacity head
-        # input: probe_x (N_HI) || scen_x (N_HI) [|| cnn_emb (3)] || direction (1) || cap_init (1)
-        # = m active probe HIs + k active scen HIs [+ raw V/I/t CNN 임베딩 3D] + 2 스칼라
+        # input: probe_x (N_HI) || scen_x (N_HI) [|| kernel_x (n_kernel_hi)] [|| cnn_emb (3)]
+        #        || direction (1) || cap_init (1)
+        # = m active probe HIs + k active scen HIs [+ 커널 융합 HI] [+ raw V/I/t CNN 임베딩 3D]
+        #   + 2 스칼라
         # Phase 1: 항상 MLP (model_cfg=None)
         # Phase 2: model_cfg["regression_model"] 에 따라
         #   mlp / transformer / i_transformer / resnet_tab / ft_transformer
         # ----------------------------------------------------------------
-        self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout)
+        self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout,
+                                        n_kernel_hi=n_kernel_hi)
 
         # ----------------------------------------------------------------
         # raw_cnn — 회귀 헤드용 원시 V/|I| 곡선 CNN 임베딩 (REGRESSION_UPGRADE.md §5/§8)
@@ -247,19 +268,32 @@ class SCRModel(nn.Module):
 
         return probe_x, probe_z
 
+    @staticmethod
+    def _apply_gate_list(
+        gates: nn.ModuleList, x: torch.Tensor, seg_idx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """시나리오별 독립 게이트 리스트(scen_gates 또는 scen_kernel_gates) 공통 라우팅 로직.
+        각 세그먼트를 자기 시나리오(seg_idx)에 해당하는 gates[s]로만 통과시킨다.
+        x: (B, width) — width는 게이트 종류에 따라 다름(raw HI면 N_HI, 커널 HI면 n_kernel_hi).
+        Returns (masked_x, z): 둘 다 x와 같은 shape."""
+        masked = torch.zeros_like(x)
+        z_out  = torch.zeros_like(x)
+        for s, gate in enumerate(gates):
+            sel = (seg_idx == s)
+            if sel.any():
+                mx, zz = gate(x[sel])
+                masked[sel] = mx
+                z_out[sel]  = zz
+        return masked, z_out
+
     def _apply_scen_gate(
         self, x: torch.Tensor, seg_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        For each sample, apply its scenario-specific gate.
-        x: (B, N_HI), seg_idx: (B,) int in [0, N_SEGS)
-        Returns (masked_x, z): both (B, N_HI)
-        """
-        B = x.size(0)
-        masked = torch.zeros_like(x)
-        z_out  = torch.zeros_like(x)
-
+        """raw HI(scen_gates, 폭 N_HI) 전용. Phase2는 고정 마스크(scen_masks)를 쓸 수 있어
+        그 경우만 별도 분기 — 학습 가능한 게이트일 때는 _apply_gate_list로 위임."""
         if self._fixed_scen:
+            masked = torch.zeros_like(x)
+            z_out  = torch.zeros_like(x)
             for s in range(self.n_scenarios):
                 sel = (seg_idx == s)
                 if sel.any():
@@ -267,15 +301,15 @@ class SCRModel(nn.Module):
                     n_sel = int(sel.sum().item())
                     masked[sel] = x[sel] * m
                     z_out[sel]  = m.unsqueeze(0).expand(n_sel, -1)
-        else:
-            for s, gate in enumerate(self.scen_gates):
-                sel = (seg_idx == s)
-                if sel.any():
-                    mx, zz = gate(x[sel])
-                    masked[sel] = mx
-                    z_out[sel]  = zz
+            return masked, z_out
+        return self._apply_gate_list(self.scen_gates, x, seg_idx)
 
-        return masked, z_out
+    def _apply_scen_kernel_gate(
+        self, x: torch.Tensor, seg_idx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """커널 융합 HI(scen_kernel_gates, 폭 n_kernel_hi) 전용 — 고정 마스크 개념이 아직
+        없으므로(Phase1 전용) 항상 _apply_gate_list로 위임."""
+        return self._apply_gate_list(self.scen_kernel_gates, x, seg_idx)
 
     # ------------------------------------------------------------------
     # Forward
@@ -307,8 +341,15 @@ class SCRModel(nn.Module):
         # Stage B: scenario-conditioned gate (MSE gradient only)
         scen_x, scen_z = self._apply_scen_gate(x, seg_idx) # (B, N_HI)
 
-        # Capacity head: probe_x + scen_x [+ raw CNN 임베딩 | raw flat] + direction + cap_init
+        # Capacity head: probe_x + scen_x [+ 커널 융합 HI] [+ raw CNN 임베딩 | raw flat]
+        #                + direction + cap_init
         feat_parts = [probe_x, scen_x]
+        if self.scen_kernel_gates is not None:
+            x_kernel = batch["x_kernel"]                     # (B, n_kernel_hi), 이미 정규화됨
+            kernel_x, kernel_z = self._apply_scen_kernel_gate(x_kernel, seg_idx)
+            feat_parts.append(kernel_x)
+        else:
+            kernel_z = None
         if self.raw_cnn is not None:
             if self._raw_cnn_frozen:
                 with torch.no_grad():
@@ -333,13 +374,16 @@ class SCRModel(nn.Module):
                 x.size(0), self.n_classes, dtype=x.dtype, device=x.device
             )
 
-        return {
+        out = {
             "cap_pred":     cap_pred,
             "level_logits": level_logits,
             "probe_x":      probe_x,
             "probe_z":      probe_z,
             "scen_z":       scen_z,
         }
+        if kernel_z is not None:
+            out["kernel_z"] = kernel_z
+        return out
 
     # ------------------------------------------------------------------
     # Inference helpers

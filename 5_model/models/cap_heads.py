@@ -359,15 +359,19 @@ class FTTransformerHead(nn.Module):
 # 팩토리
 # ---------------------------------------------------------------------------
 
-def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> nn.Module:
+def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
+                    n_kernel_hi: int = 0) -> nn.Module:
     """
     model_cfg 의 regression_model 값에 따라 적절한 헤드를 반환한다.
     model_cfg 가 비어 있거나 키가 없으면 MLPHead (Phase 1 기본 동작).
 
     Args:
-        model_cfg : cfg["model"] 딕셔너리 (scr.yaml의 model: 섹션)
-        d_head    : MLP hidden dim 또는 Transformer d_model / ResNet block width
-        dropout   : dropout rate (yaml model.dropout)
+        model_cfg   : cfg["model"] 딕셔너리 (scr.yaml의 model: 섹션)
+        d_head      : MLP hidden dim 또는 Transformer d_model / ResNet block width
+        dropout     : dropout rate (yaml model.dropout)
+        n_kernel_hi : build_kernel_group_features.py의 커널 융합 HI 블록 폭(0=없음).
+                      Phase 1은 항상 mlp를 강제하므로 mlp만 지원 — 다른 rtype에 이 값을
+                      주면 에러(아직 토큰화 설계가 안 됨).
     """
     rtype = model_cfg.get("regression_model", "mlp").lower().replace("-", "_")
 
@@ -385,11 +389,16 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1) -> 
             "i_transformer/ft_transformer는 96개 raw 스칼라의 개별 토큰화 설계가 필요합니다 "
             "(REGRESSION_UPGRADE.md §3.2)."
         )
+    if n_kernel_hi > 0 and rtype != "mlp":
+        raise NotImplementedError(
+            f"n_kernel_hi(커널 융합 HI 블록)는 아직 mlp만 지원합니다 (rtype={rtype}). "
+            "transformer 계열은 커널 블록을 별도 토큰으로 넣을지 설계가 필요합니다."
+        )
     head_in = (
         _HEAD_IN_WITH_CNN if with_raw_cnn else
         _HEAD_IN_WITH_RAW_FLAT if with_raw_flat else
         _HEAD_IN
-    )
+    ) + n_kernel_hi
 
     if rtype == "mlp":
         return MLPHead(d_head=d_head, dropout=dropout,
