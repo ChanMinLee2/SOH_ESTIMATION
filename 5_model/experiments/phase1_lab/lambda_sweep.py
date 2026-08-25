@@ -59,6 +59,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.tqdm_utils import tqdm, write as tqdm_write  # noqa: E402
 
@@ -82,7 +84,15 @@ FIXED_AXIS_PARAMS = {
 # 포매팅 로직을 여기 재구현하지 않는 이유는 train_scr.py의 _axis_dir 규칙과 몰래
 # 어긋날 위험 때문(중복 구현 금지 원칙). --n1/--n2/--n-samples를 표준값(0.35/0.20/2)에서
 # 바꾸면 이 기본값도 더는 맞지 않으니 --data-dir/--seg-data-dir을 직접 넘겨야 한다.
-_DATA_ROOT = "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200"
+#
+# 루트는 data_directories.py의 DATA_4_HI_ROOT_STR(=_D_ROOT/_4_data_hi)에서 가져온다 —
+# PC마다 _D_ROOT가 다르므로(이 PC는 D:\chanminLee\..., 다른 PC는 프로젝트 상대경로
+# "./"일 수 있음) 절대경로를 하드코딩하면 다른 PC에서 그대로 깨진다(실제로 한 번
+# 이 문제로 다른 PC에서 "seg pkl 디렉터리가 없습니다" 에러가 났었음) — 항상 그 PC의
+# 실제 _D_ROOT를 따라가도록 동적으로 계산한다.
+from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
+
+_DATA_ROOT = f"{DATA_4_HI_ROOT_STR}/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200"
 DEFAULT_DATA_DIR = f"{_DATA_ROOT}/cycle"
 DEFAULT_SEG_DATA_DIR = f"{_DATA_ROOT}/seg"
 
