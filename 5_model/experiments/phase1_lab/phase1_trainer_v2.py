@@ -118,6 +118,12 @@ def _parse_args() -> argparse.Namespace:
                    help="loss.lambda_l0을 이 값으로 강제 고정(lambda_l0_auto/yaml 값 무시, 최우선순위). "
                         "lambda_l0 정규화 경로 스윕 실험(lambda_sweep.py) 전용 — 평소 실행에서는 "
                         "주지 않으면 기존 동작(auto 또는 yaml 값)과 100% 동일.")
+    p.add_argument("--l0-warmup-epochs-override", type=int, default=None,
+                   dest="l0_warmup_epochs_override",
+                   help="loss.lambda_l0_warmup_epochs을 이 값으로 강제 고정(yaml 값 무시). "
+                        "warmup epoch 스위핑 실험(docs/260825_RESULTS.md) 전용 — 평소 실행에서는 "
+                        "주지 않으면 기존 동작(yaml 값, 기본 50)과 100% 동일. training.warmup_epochs"
+                        "(learning rate warmup, 별개 값)에는 영향 없음.")
     args = p.parse_args()
     if args.synergy_groups_json and args.kernel_features_pkl:
         p.error("--synergy-groups-json과 --kernel-features-pkl은 동시에 줄 수 없습니다 "
@@ -266,6 +272,9 @@ def main() -> None:
     if args.max_epochs is not None:
         print(f"[p1v2] epochs 상한 오버라이드: {tr_cfg['epochs']} -> {epochs}")
     warmup_ep = tr_cfg.get("warmup_epochs", 10)
+    if args.l0_warmup_epochs_override is not None:
+        loss_cfg["lambda_l0_warmup_epochs"] = args.l0_warmup_epochs_override
+        print(f"[p1v2] l0_warmup_epochs_override: {args.l0_warmup_epochs_override} (yaml 값 무시)")
     l0_scheduler = L0LambdaScheduler(target=loss_cfg["lambda_l0"], loss_cfg=loss_cfg, total_epochs=epochs)
     l0_warmup_ep = loss_cfg.get("lambda_l0_warmup_epochs", 50)
     l0_ramp_ep = loss_cfg.get("lambda_l0_ramp_epochs", 50)
@@ -415,6 +424,7 @@ def main() -> None:
     summary = {
         "tag": args.tag, "seed": args.seed, "split_seed": args.split_seed,
         "lambda_l0_used": loss_cfg["lambda_l0"],
+        "lambda_l0_warmup_epochs_used": l0_warmup_ep,
         "selected_epoch": best_epoch, "gate_saturation": best_sat,
         "beta_min": beta_min, "l0_fully_ramped_epoch": l0_fully_ramped_ep,
         "output_dir": str(output_dir),

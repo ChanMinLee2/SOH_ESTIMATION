@@ -113,6 +113,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-epochs", type=int, default=None)
     p.add_argument("--patience", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--l0-warmup-epochs", type=int, default=None, dest="l0_warmup_epochs",
+                   help="loss.lambda_l0_warmup_epochs 오버라이드(기본 None=yaml 기본값 50 그대로). "
+                        "warmup epoch 스위핑 실험(docs/260825_RESULTS.md) 전용 — warmup을 늘릴 때는 "
+                        "full-ramp 이후 탐색 여유를 맞추려면 --max-epochs도 같이 늘려야 함"
+                        "(예: warmup=150 -> max-epochs>=350).")
 
     p.add_argument("--lambdas", default=None,
                    help="쉼표구분 명시적 lambda 리스트(예: '0.0001,0.001,0.01'). "
@@ -170,6 +175,8 @@ def _build_cmd(args: argparse.Namespace, lam: float, tag: str) -> list[str]:
         cmd += ["--max-epochs", str(args.max_epochs)]
     if args.batch_size is not None:
         cmd += ["--batch-size", str(args.batch_size)]
+    if args.l0_warmup_epochs is not None:
+        cmd += ["--l0-warmup-epochs-override", str(args.l0_warmup_epochs)]
     return cmd
 
 
