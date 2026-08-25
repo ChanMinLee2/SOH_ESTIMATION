@@ -114,6 +114,10 @@ def _parse_args() -> argparse.Namespace:
                         "별도 게이트(scen_kernel_gates)로 추가해서 학습(대체 아님, 추가) — "
                         "--synergy-groups-json과 동시 사용 불가")
     p.add_argument("--tag", required=True)
+    p.add_argument("--lambda-l0-override", type=float, default=None, dest="lambda_l0_override",
+                   help="loss.lambda_l0을 이 값으로 강제 고정(lambda_l0_auto/yaml 값 무시, 최우선순위). "
+                        "lambda_l0 정규화 경로 스윕 실험(lambda_sweep.py) 전용 — 평소 실행에서는 "
+                        "주지 않으면 기존 동작(auto 또는 yaml 값)과 100% 동일.")
     args = p.parse_args()
     if args.synergy_groups_json and args.kernel_features_pkl:
         p.error("--synergy-groups-json과 --kernel-features-pkl은 동시에 줄 수 없습니다 "
@@ -247,7 +251,10 @@ def main() -> None:
     loss_cfg = cfg["loss"]
     loss_fn = SCRLoss(lambda_scen=lambda_scen, lambda_l0=loss_cfg["lambda_l0"]).to(device)
 
-    if loss_cfg.get("lambda_l0_auto", False):
+    if args.lambda_l0_override is not None:
+        loss_cfg["lambda_l0"] = args.lambda_l0_override
+        print(f"[p1v2] lambda_l0_override: {args.lambda_l0_override} (lambda_l0_auto/yaml 값 무시)")
+    elif loss_cfg.get("lambda_l0_auto", False):
         avg_m = (charge_m + discharge_m) / 2
         probe_scale = 10 / max(avg_m, 1)
         scen_scale = 10 / max(scen_k, 1)
@@ -407,6 +414,7 @@ def main() -> None:
 
     summary = {
         "tag": args.tag, "seed": args.seed, "split_seed": args.split_seed,
+        "lambda_l0_used": loss_cfg["lambda_l0"],
         "selected_epoch": best_epoch, "gate_saturation": best_sat,
         "beta_min": beta_min, "l0_fully_ramped_epoch": l0_fully_ramped_ep,
         "output_dir": str(output_dir),

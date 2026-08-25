@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_D_ROOT = Path(r"./")
+_D_ROOT = Path(r"D:\chanminLee\LFP_SOH_prediction_v2")
 
 # 외부 드라이브 루트 자체(원본 대용량 데이터 폴백용, 예: _1_data_unified가 로컬에 없을 때
 # 2_preprocess/preprocess.py가 여기서 찾는다). _D_ROOT의 공개 별칭 — 하위 상수
