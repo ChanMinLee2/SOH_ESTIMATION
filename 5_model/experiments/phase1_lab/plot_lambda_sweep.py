@@ -47,6 +47,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--input", required=True, help="lambda_sweep.py가 만든 summary.csv 경로")
     p.add_argument("--out-dir", default=None, help="PNG 저장 위치 (기본: summary.csv와 같은 폴더)")
     p.add_argument("--scen-k", type=int, default=None, help="목표 활성 개수(점선 참고선)")
+    p.add_argument("--cost-json", default=None,
+                   help="4_hi_analysis/profile_hi_timing.py가 만든 hi_timing_cost.json 경로. "
+                        "주면 성능-개수 곡선(그림2) 왼쪽 패널에 오른쪽 y축으로 계산 비용(µs, "
+                        "주황색)을 겹쳐 그린다.")
     return p.parse_args()
 
 
@@ -90,6 +94,58 @@ def _per_scenario_counts(run_dir: Path) -> tuple[dict[str, int], dict[str, int]]
         if probs_key in cls_d:
             cls_counts[probe] = sum(1 for x in cls_d[probs_key] if x > 0.5)
     return reg_counts, cls_counts
+
+
+def _segment_active_concepts(reg_d: dict, seg_key: str) -> list[str]:
+    """seg_key(예: 'seg_0')의 활성 HI(gate_prob>0.5) 이름에서 시나리오 접미사를 떼고
+    concept 이름만 반환(예: 'stat_v_mean_cw_chg_lo' -> 'stat_v_mean_cw')."""
+    ranked = reg_d[f"{seg_key}_ranked"]
+    probs = reg_d[f"{seg_key}_probs"]
+    names = reg_d[f"{seg_key}_names"]
+    seg_name = reg_d.get(f"{seg_key}_seg_name", "")
+    by_idx_prob = {idx: p for idx, p in zip(ranked, probs)}
+    by_idx_name = {idx: n for idx, n in zip(ranked, names)}
+    suf = f"_{seg_name}"
+    active = []
+    for idx, prob in by_idx_prob.items():
+        if prob > 0.5:
+            name = by_idx_name[idx]
+            concept = name[: -len(suf)] if suf and name.endswith(suf) else name
+            active.append(concept)
+    return active
+
+
+def _segment_cost_us(active_concepts: list[str], cost: dict) -> float:
+    """활성 concept 리스트의 계산 비용(µs) 합 — 전처리(vq_curve/ica_seg/morph_curves)는
+    프로레이션 안 하고, 해당 카테고리(Diff/LFP 또는 Morph) 피처가 세그먼트 안에
+    하나라도 활성이면 고정비용으로 1회만 더한다(hi_timing_cost.json의 note 참고)."""
+    concept_mean = cost["concept_mean_us"]
+    concept_cat = cost["concept_category"]
+    preproc = cost["preproc_mean_us"]
+    total = 0.0
+    cats_present = set()
+    for name in active_concepts:
+        total += concept_mean.get(name, 0.0)
+        cats_present.add(concept_cat.get(name))
+    if "Diff" in cats_present or "LFP" in cats_present:
+        total += preproc["vq_curve"] + preproc["ica_seg"]
+    if "Morph" in cats_present:
+        total += preproc["morph_curves"]
+    return total
+
+
+def _run_avg_cost_us(run_dir: Path, cost: dict) -> float | None:
+    """run_dir의 gates/regression_HIs.json으로 6개 시나리오 각각의 비용을 구해 평균낸다
+    (summary.csv의 active_reg_avg와 동일한 평균화 방식 — 회귀만, 분류는 안 봄)."""
+    reg_path = run_dir / "gates" / "regression_HIs.json"
+    if not reg_path.exists():
+        return None
+    reg_d = json.loads(reg_path.read_text(encoding="utf-8"))
+    seg_keys = sorted(set(k[: -len("_probs")] for k in reg_d if k.endswith("_probs")))
+    if not seg_keys:
+        return None
+    costs = [_segment_cost_us(_segment_active_concepts(reg_d, sk), cost) for sk in seg_keys]
+    return sum(costs) / len(costs)
 
 
 def _elbow_index(xs: list[float], ys: list[float]) -> int:
@@ -140,6 +196,21 @@ def main() -> None:
     val_r2 = [r["val_r2"] for r in rows]
     val_rmse = [r["val_rmse"] for r in rows]
 
+    cost_data = None
+    if args.cost_json:
+        cost_data = json.loads(Path(args.cost_json).read_text(encoding="utf-8"))
+    costs_us = None
+    if cost_data is not None:
+        costs_us = []
+        for r in rows:
+            run_dir_str = r.get("run_dir", "")
+            c = _run_avg_cost_us(Path(run_dir_str), cost_data) if run_dir_str else None
+            costs_us.append(c)
+        if all(c is None for c in costs_us):
+            print("[plot] --cost-json은 줬지만 어떤 run_dir에서도 비용을 계산 못 했습니다 - "
+                  "gates/regression_HIs.json 경로 확인 필요. cost 오버레이 생략.")
+            costs_us = None
+
     # ---- 그림 1: 정규화 경로 (lambda -> 활성 개수) ----
     fig1, ax1 = plt.subplots(figsize=(8, 5))
     ax1.plot(lambdas, active_reg, "o-", color="#2166ac", label="회귀 활성 HI(gate_prob>0.5)")
@@ -167,17 +238,32 @@ def main() -> None:
     elbow_i = _elbow_index(xs, ys_r2) if len(xs) >= 3 else None
 
     fig2, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5))
-    axL.plot(xs, ys_r2, "o-", color="#2166ac")
+    axL.plot(xs, ys_r2, "o-", color="#2166ac", label="val R2")
     for x, y, lam in zip(xs, ys_r2, lam_sorted):
         axL.annotate(f"{lam:g}", (x, y), fontsize=7, textcoords="offset points", xytext=(4, 4))
     if elbow_i is not None:
         axL.scatter([xs[elbow_i]], [ys_r2[elbow_i]], color="red", zorder=5, s=80,
                      label=f"elbow 후보(lambda={lam_sorted[elbow_i]:g})")
-        axL.legend()
     axL.set_xlabel("활성 회귀 HI 개수")
-    axL.set_ylabel("val R2")
-    axL.set_title("성능-개수 곡선 (val R2)")
+    axL.set_ylabel("val R2", color="#2166ac")
+    axL.tick_params(axis="y", labelcolor="#2166ac")
+    axL.set_title("성능-개수 곡선 (val R2 + 계산 비용)" if costs_us else "성능-개수 곡선 (val R2)")
     axL.grid(True, alpha=0.3)
+
+    if costs_us:
+        ys_cost = [costs_us[i] for i in order]
+        axL2 = axL.twinx()
+        valid = [(x, c) for x, c in zip(xs, ys_cost) if c is not None]
+        if valid:
+            axL2.plot([x for x, _ in valid], [c for _, c in valid], "o--",
+                      color="#e67e22", label="계산 비용(µs, 회귀 6시나리오 평균)", alpha=0.85)
+        axL2.set_ylabel("계산 비용 (µs)", color="#e67e22")
+        axL2.tick_params(axis="y", labelcolor="#e67e22")
+        h1, l1 = axL.get_legend_handles_labels()
+        h2, l2 = axL2.get_legend_handles_labels()
+        axL.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower right")
+    else:
+        axL.legend()
 
     axR.plot(xs, ys_rmse, "o-", color="#b2182b")
     for x, y, lam in zip(xs, ys_rmse, lam_sorted):

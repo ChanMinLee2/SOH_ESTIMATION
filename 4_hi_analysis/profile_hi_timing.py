@@ -30,6 +30,7 @@ from hi_correlation import (
     ALL_SEGS, CHG_SEGS, DIS_SEGS,
     DIFF_KEYS, LFP_KEYS, MORPH_KEYS, STAT_KEYS,
     HI_LABELS,
+    _add_phase,
     _build_ica_seg, _build_vq_curve,
     _dtw_distance, _frechet_distance,
     _global_dva, _global_ica,
@@ -614,6 +615,8 @@ def _profile_one_cell(args: tuple) -> list:
     df_all = raw.get("cycles")
     if df_all is None:
         return []
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)  # _4_data_hi/clean 스키마엔 phase 컬럼이 없음(hi_correlation.py와 동일 처리)
 
     cycs = sorted(df_all["cycle"].unique())
     cycs = [c for c in cycs if c > 0]
@@ -937,6 +940,55 @@ def plot_feature(df: pd.DataFrame, out_path: Path):
     plt.close()
 
 
+def save_cost_json(df: pd.DataFrame, out_path: Path):
+    """HI 개념(concept)별 계산 비용을 JSON으로 저장 — 전처리(Preproc)는 카테고리에
+    프로레이션(균등 배분)하지 않고 별도 항목으로 그대로 둔다(plot_category()가 하는
+    "피처 수로 균등 배분"은 시각화용 근사치일 뿐, 실제로는 세그먼트 안에 Diff/LFP
+    피처가 하나라도 켜지면 vq_curve+ica_seg 전처리가 통째로 한 번 발생하는 구조라
+    "고정비용(한 번만) + 개별 피처 한계비용" 모델이 실제 비용에 더 가깝다 — 이 JSON은
+    그 두 성분을 분리해서 저장하고, 실제로 어떻게 합산할지는 사용하는 쪽(예:
+    lambda_sweep_knee.png의 cost 오버레이)이 결정한다.
+
+    구조:
+      concept_mean_us: {concept: 세그먼트당 평균 마진 비용(µs)}
+      concept_category: {concept: "Stat"|"Diff"|"LFP"|"Morph"|"Global"}
+      preproc_mean_us: {"vq_curve":.., "ica_seg":.., "morph_curves":..} — 세그먼트당
+        1회 고정비용(해당 카테고리 피처가 하나라도 활성일 때만 발생, Diff/LFP는
+        vq_curve+ica_seg 공유, Morph는 morph_curves 별도)
+      category_mean_us: {category: 피처 1개당 평균 마진 비용(µs), 참고용 — 전처리 미포함}
+    """
+    non_prep = df[df["category"] != "Preproc"]
+    concept_mean = (non_prep.groupby(["concept", "category"])["time_us"].mean())
+    concept_mean_us = {c: float(v) for (c, _cat), v in concept_mean.items()}
+    concept_category = {c: cat for (c, cat) in concept_mean.index}
+
+    prep_mean = df[df["category"] == "Preproc"].groupby("concept")["time_us"].mean()
+    preproc_mean_us = {
+        "vq_curve": float(prep_mean.get("preproc_vq_curve", 0.0)),
+        "ica_seg": float(prep_mean.get("preproc_ica_seg", 0.0)),
+        "morph_curves": float(prep_mean.get("preproc_morph_curves", 0.0)),
+    }
+
+    category_mean_us = (concept_mean.reset_index()
+                         .groupby("category")["time_us"].mean()
+                         .apply(float).to_dict())
+
+    payload = {
+        "concept_mean_us": concept_mean_us,
+        "concept_category": concept_category,
+        "preproc_mean_us": preproc_mean_us,
+        "category_mean_us": category_mean_us,
+        "note": "시간 단위는 전부 µs(마이크로초), 세그먼트 1개 처리 기준 평균. "
+                "preproc_mean_us는 카테고리 균등배분 안 된 원본 고정비용 — "
+                "Diff/LFP 피처가 세그먼트 내 하나라도 활성이면 vq_curve+ica_seg가 "
+                "1회 발생하고, Morph 피처가 하나라도 활성이면 morph_curves가 1회 "
+                "발생한다고 보고 합산할 것.",
+    }
+    import json
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"  저장: {out_path}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -983,6 +1035,10 @@ def main():
     # 저장 경로
     out_dir = _HERE / "hi_profile"
     out_dir.mkdir(exist_ok=True)
+
+    # 비용 JSON (concept별 + PRE 별도 기록)
+    print("\n=== 비용 JSON 저장 ===")
+    save_cost_json(df, out_dir / "hi_timing_cost.json")
 
     # 플롯
     print("\n=== 카테고리별 소요시간 플롯 ===")
