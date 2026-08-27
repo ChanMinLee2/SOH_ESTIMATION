@@ -29,13 +29,10 @@ docs/260820_RESULTS.md 참고).
     ],
   }
 
-사용 예:
+사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir은 표준 조합이면 생략 가능 —
+기본값 자동 적용, 다른 조합이면 넷 다 같이 오버라이드):
   python 5_model/experiments/phase1_lab/build_kernel_group_features.py \
       --model-config 5_model/config/main_qfref_S_p60.yaml \
-      --seg-axis q_frac_ref \
-      --axis-config '{"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2}' \
-      --data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle" \
-      --seg-data-dir "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg" \
       --synergy-groups-json 5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_noleak.json \
       --split-seed 42 --tag k25_full_N2_kernel
 """
@@ -59,6 +56,23 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from log_utils import append_log_entry, current_command_str  # noqa: E402
 
+# 루트는 data_directories.py의 DATA_4_HI_ROOT_STR에서 가져온다(build_synergy_groups.py/
+# lambda_sweep.py와 동일 이유 — PC마다 실제 드라이브가 다름).
+from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
+
+_DATA_ROOT = f"{DATA_4_HI_ROOT_STR}/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200"
+DEFAULT_DATA_DIR = f"{_DATA_ROOT}/cycle"
+DEFAULT_SEG_DATA_DIR = f"{_DATA_ROOT}/seg"
+
+# seg-axis/axis-config도 이 세션 전체에서 한 번도 안 바뀐 고정값 — 위 데이터 경로와 세트로
+# 묶인 값이라(다른 조합이면 데이터 경로도 같이 바뀌어야 함) 다른 조합을 쓰려면 셋 다
+# 함께 오버라이드해야 한다.
+DEFAULT_SEG_AXIS = "q_frac_ref"
+DEFAULT_AXIS_CONFIG = json.dumps({
+    "n1": 0.35, "n2": 0.20, "ref_lag": 0, "noise_amp": 0.03,
+    "noise_mode": "ou", "noise_period_cycles": 200, "n_samples": 2,
+})
+
 try:
     from tqdm import tqdm as _tqdm
 
@@ -81,10 +95,10 @@ def _parse_args() -> argparse.Namespace:
                      "추가로 넣음) + 2차 다중공선성 배제 + 정규화 통계 저장"
     )
     p.add_argument("--model-config", required=True)
-    p.add_argument("--seg-axis", required=True)
-    p.add_argument("--axis-config", required=True)
-    p.add_argument("--data-dir", required=True, help="cycle pkl 경로")
-    p.add_argument("--seg-data-dir", required=True, help="seg pkl 경로")
+    p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
+    p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
+    p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로")
+    p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로")
     p.add_argument("--datasets", nargs="+", default=["MIT", "HUST"])
     p.add_argument("--split-seed", type=int, default=42)
     p.add_argument("--synergy-groups-json", required=True,
@@ -104,6 +118,14 @@ def _parse_args() -> argparse.Namespace:
                     help="최종 커널 HI 개수 상한(기본 None=무제한, 다중공선성 배제 통과한 "
                          "건 전부 유지). 주면 시나리오별 쿼터 라운드로빈으로 그 개수까지만 "
                          "남김(특정 시나리오가 전역 랭킹에서 전부 밀려나는 것 방지)")
+    p.add_argument("--min-raw-partial-corr", type=float, default=None,
+                    dest="min_raw_partial_corr",
+                    help="v3 전용: 커널 예측값을 자기 그룹의 raw 멤버로 조건화한 편상관계수가 "
+                         "이 값 미만이면 그 커널 후보를 버린다(raw로 이미 설명되는 걸 "
+                         "커널로 한 번 더 만든 것에 불과하다는 뜻이라 raw-커널 간 중복으로 "
+                         "간주). 기본 None=필터 비활성(기존 v1/v2 동작과 100% 동일). "
+                         "build_synergy_groups.py의 그룹 성장 문턱(0.02)을 그대로 재사용해도 "
+                         "되고 별도 값을 줘도 됨 — 이 값 자체가 별도로 튜닝된 적은 없음.")
     p.add_argument("--tag", required=True)
     return p.parse_args()
 
@@ -156,6 +178,28 @@ def _fit_group_kernel(
     return model, float(r2_score(y, pred))
 
 
+def _residualize(y: np.ndarray, conditioning: np.ndarray) -> np.ndarray:
+    """build_synergy_groups.py의 동명 함수와 동일 로직(중복 재구현이지만 두 스크립트가
+    서로 import하는 관계가 아니라 독립 유지 — 로직이 5줄짜리라 모듈 결합보다 낫다고 판단)."""
+    if conditioning.shape[1] == 0:
+        return y
+    A = np.column_stack([conditioning, np.ones(len(y))])
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    return y - A @ coef
+
+
+def _raw_conditioned_partial_corr(y: np.ndarray, kernel_pred: np.ndarray, x_group: np.ndarray) -> float:
+    """v3 전용: 커널 예측값이 '자기 그룹의 raw 멤버로 이미 설명되는 부분'을 빼고도
+    SOH와 관계가 남는지 검사. 낮으면(raw로 이미 설명됨) 커널이 raw 대비 새 정보를
+    거의 안 준다는 뜻 — raw-커널 간 중복으로 간주해 후보에서 제외한다."""
+    ry = _residualize(y, x_group)
+    rk = _residualize(kernel_pred, x_group)
+    if np.std(ry) < 1e-8 or np.std(rk) < 1e-8:
+        return 0.0
+    c = np.corrcoef(ry, rk)[0, 1]
+    return 0.0 if np.isnan(c) else float(c)
+
+
 def _round_robin_select(
     kept: list[int], candidates: list[dict], cap: int,
 ) -> list[int]:
@@ -202,7 +246,17 @@ def main() -> None:
 
         groups = groups_data[key]
         n_fit = 0
+        n_skipped_raw_dup = 0
         for gi, members in enumerate(groups):
+            # v3.1(global_dedup) 산출물의 "attached"(사전 가지치기로 탈락해 이 그룹에
+            # 사후 편입된 HI)는 여기서 일부러 안 쓴다 — attached는 대표와 항상 |raw
+            # corr|>=0.9인 거의 동일 신호라 커널 입력에 추가해도 새 정보가 거의 없는 반면,
+            # 그룹마다 커널 입력 폭이 2~29개로 들쭉날쭉해져 (a) RBF 커널이 서로 거의
+            # 동일한 컬럼 수십 개로 학습되는 통계적으로 불안정한 상황을 만들고 (b) Level2
+            # gap 비교 시 그룹 크기 자체가 교란변수가 된다(실측: 재비교에서 확인됨). attached는
+            # groups json에 "이 그룹 소속"이라는 라벨로만 남아 다중공선성 배제 보장(0건)엔
+            # 그대로 기여한다 — raw HI 커버리지도 x_hi가 이미 64개 전부 독립적으로 갖고
+            # 있어 손실이 없다(커널 융합은 대체가 아니라 추가이므로).
             if len(members) < 2:
                 # 크기 1 그룹 = raw HI가 이미 x_hi에 그대로 있으므로 커널 융합 대상에서
                 # 제외(안 그러면 자기 자신의 단조 변환에 가까운 슬롯만 하나 더 늘어남).
@@ -212,6 +266,12 @@ def main() -> None:
             model, r2 = _fit_group_kernel(
                 x_group, y_scen, args.alpha, args.gamma, args.n_components, args.split_seed,
             )
+            if args.min_raw_partial_corr is not None:
+                kernel_pred = model.predict(x_group)
+                pc = _raw_conditioned_partial_corr(y_scen, kernel_pred, x_group)
+                if abs(pc) < args.min_raw_partial_corr:
+                    n_skipped_raw_dup += 1
+                    continue
             candidates.append({
                 "name": f"kernel_{seg_name}_g{gi}",
                 "scenario": seg_name,
@@ -222,7 +282,8 @@ def main() -> None:
                 "train_r2": r2,
             })
             n_fit += 1
-        tqdm_write(f"[kernel] {seg_name}: 그룹 {len(groups)}개(크기1 {len(groups) - n_fit}개 스킵) "
+        extra = f", raw-중복 {n_skipped_raw_dup}개 탈락" if args.min_raw_partial_corr is not None else ""
+        tqdm_write(f"[kernel] {seg_name}: 그룹 {len(groups)}개(크기1 {len(groups) - n_fit - n_skipped_raw_dup}개 스킵{extra}) "
                     f"-> 커널 HI {n_fit}개 피팅 완료")
 
     if not candidates:
@@ -285,6 +346,7 @@ def main() -> None:
         "n_components": args.n_components,
         "redundancy_threshold": args.redundancy_threshold,
         "max_features": args.max_features,
+        "min_raw_partial_corr": args.min_raw_partial_corr,
         "features": [
             {k: v for k, v in f.items() if k != "scenario_idx"} for f in final
         ],

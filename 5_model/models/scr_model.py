@@ -64,6 +64,11 @@ class SCRModel(nn.Module):
             # 커널 융합 HI를 raw HI(x_hi)를 대체하지 않고 "추가"로 넣을 때의 폭. 0이면 기존과
             # 완전히 동일(커널 블록 없음). >0이면 시나리오별 scen_kernel_gates(N_HI와 별개
             # 폭 n_kernel_hi)가 추가로 생기고, cap_head 입력에 그 블록이 덧붙는다.
+        shared_hi_mask: Optional[torch.Tensor] = None,  # Phase 1(v4): bool (N_HI,) —
+            # test_hi_scenario_interaction.py 산출물 기반. True인 HI는 시나리오 무관 단일
+            # shared_gate로, False인 HI는 기존처럼 시나리오별 scen_gates로 라우팅한다.
+            # None(기본)이면 완전히 비활성 — 기존과 100% 동일 동작(전부 scen_gates).
+            # scen_group_ids와 동시 사용 불가(그룹 게이팅+공유 게이팅 조합은 미지원 스코프).
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -95,13 +100,31 @@ class SCRModel(nn.Module):
             self.register_buffer("_discharge_probe_mask_buf", discharge_probe_mask.float())
 
         # ----------------------------------------------------------------
-        # Stage B — per-scenario gates (n_scenarios × N_HI)
+        # Stage B — per-scenario gates (n_scenarios × N_HI), 단 shared_hi_mask가 있으면
+        # 그 HI들은 이 폭에서 빠지고 아래 shared_gate가 대신 담당한다(v4).
         # ----------------------------------------------------------------
+        if shared_hi_mask is not None and scen_group_ids:
+            raise ValueError("shared_hi_mask와 scen_group_ids는 동시 사용을 지원하지 않습니다 "
+                              "(그룹 게이팅 + 공유/시나리오별 분리 조합은 스코프 밖).")
+
+        self.shared_gate = None
+        if shared_hi_mask is not None:
+            shared_hi_mask = shared_hi_mask.bool()
+            shared_idx = torch.nonzero(shared_hi_mask, as_tuple=False).flatten()
+            specific_idx = torch.nonzero(~shared_hi_mask, as_tuple=False).flatten()
+            self.register_buffer("_shared_idx", shared_idx)
+            self.register_buffer("_specific_idx", specific_idx)
+            if len(shared_idx) > 0:
+                self.shared_gate = HardConcreteGate(len(shared_idx))
+            scen_gate_width = len(specific_idx)
+        else:
+            scen_gate_width = N_HI
+
         if scen_masks is None:
             scen_group_ids = scen_group_ids or {}
             self.scen_gates = nn.ModuleList([
-                GroupedHardConcreteGate(N_HI, scen_group_ids[s]) if s in scen_group_ids
-                else HardConcreteGate(N_HI)
+                GroupedHardConcreteGate(scen_gate_width, scen_group_ids[s]) if s in scen_group_ids
+                else HardConcreteGate(scen_gate_width)
                 for s in range(self.n_scenarios)
             ])
             self._fixed_scen = False
@@ -290,7 +313,26 @@ class SCRModel(nn.Module):
         self, x: torch.Tensor, seg_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """raw HI(scen_gates, 폭 N_HI) 전용. Phase2는 고정 마스크(scen_masks)를 쓸 수 있어
-        그 경우만 별도 분기 — 학습 가능한 게이트일 때는 _apply_gate_list로 위임."""
+        그 경우만 별도 분기 — 학습 가능한 게이트일 때는 _apply_gate_list로 위임.
+
+        shared_gate가 있으면(v4) N_HI 폭을 shared_idx/specific_idx로 쪼개서, shared 부분은
+        시나리오 무관 단일 shared_gate로(seg_idx 라우팅 없음 — 전체 배치에 동일 적용),
+        specific 부분만 기존처럼 scen_gates[s]로 라우팅한 뒤 원래 컬럼 위치로 재조립한다.
+        재조립하므로 반환 shape/컬럼 순서는 shared_gate 유무와 무관하게 항상 (B,N_HI) 그대로라
+        cap_head 등 하위 코드는 변경이 필요 없다."""
+        if self.shared_gate is not None:
+            masked = torch.zeros_like(x)
+            z_out = torch.zeros_like(x)
+            x_shared = x[:, self._shared_idx]
+            m_shared, z_shared = self.shared_gate(x_shared)
+            masked[:, self._shared_idx] = m_shared
+            z_out[:, self._shared_idx] = z_shared
+            if len(self._specific_idx) > 0:
+                x_specific = x[:, self._specific_idx]
+                m_specific, z_specific = self._apply_gate_list(self.scen_gates, x_specific, seg_idx)
+                masked[:, self._specific_idx] = m_specific
+                z_out[:, self._specific_idx] = z_specific
+            return masked, z_out
         if self._fixed_scen:
             masked = torch.zeros_like(x)
             z_out  = torch.zeros_like(x)

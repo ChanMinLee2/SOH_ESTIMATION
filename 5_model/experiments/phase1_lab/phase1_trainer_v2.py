@@ -25,11 +25,10 @@ IMPORT해서 재사용(SCRModel/SCRLoss/build_datasets/L0LambdaScheduler/게이�
 gates/regression_HIs.json, scenario_spec.json, logs/train_log_v2.csv) — 그래야
 analyze_convergence.py / materialize_ensemble_gates.py를 무수정으로 재사용할 수 있다.
 
-사용 예:
+사용 예(--seg-axis/--axis-config는 표준 조합(q_frac_ref, n1=0.35/n2=0.20/n_samples=2)이면
+생략 가능 — 다른 조합이면 직접 지정, 이때 --data-dir/--seg-data-dir도 같이 줘야 함):
   python 5_model/experiments/phase1_lab/phase1_trainer_v2.py \
       --model-config 5_model/config/main_qfref_S.yaml \
-      --seg-axis q_frac_ref \
-      --axis-config '{"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":4}' \
       --scen-k 25 --seed 42 --split-seed 42 --beta-min 0.1 --tag stage12_k25
 """
 
@@ -48,6 +47,16 @@ sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Windows 콘솔이 cp949일 때 em-dash 등 특수문자 print가 UnicodeEncodeError로 죽는 문제
+# 방지(lambda_sweep.py/plot_lambda_sweep.py와 동일 패턴) — 짧은 스모크런처럼 체크포인트가
+# 한 번도 안 뽑히는 예외 경로의 경고 메시지에서 실제로 이 문제로 죽는 걸 확인해서 추가.
+for _stream in (sys.stdout, sys.stderr):
+    if getattr(_stream, "encoding", "").lower() not in ("utf-8", "utf8"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 import numpy as np
 import torch
 
@@ -65,21 +74,38 @@ from common.scenario import get_segmenter  # noqa: E402
 # 함수만 재사용(중복 구현 금지 원칙, docs/PHASE1_REDESIGN.md 참고).
 import train_scr as _base  # noqa: E402
 
+# seg-axis/axis-config/data-dir/seg-data-dir 전부 이번 v3/v4/v-ctrl 검증 전체에서 한 번도
+# 안 바뀐 고정 조합(q_frac_ref, n1=0.35/n2=0.20/n_samples=2) — build_synergy_groups.py 등
+# 나머지 phase1_lab 스크립트와 동일한 기본값을 준다. 이 스크립트는 train_scr.py의 자동
+# 경로계산(_axis_dir)을 재사용하지 않아서 --data-dir/--seg-data-dir을 안 주면(yaml도
+# null) 즉시 RuntimeError였다 — lambda_sweep.py가 이미 겪은 문제와 동일(그쪽 주석 참고).
+# 네 값은 항상 세트로 움직이므로, 표준 조합이 아니면 넷 다 함께 오버라이드해야 한다.
+from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
+
+DEFAULT_SEG_AXIS = "q_frac_ref"
+DEFAULT_AXIS_CONFIG = json.dumps({
+    "n1": 0.35, "n2": 0.20, "ref_lag": 0, "noise_amp": 0.03,
+    "noise_mode": "ou", "noise_period_cycles": 200, "n_samples": 2,
+})
+_DATA_ROOT = f"{DATA_4_HI_ROOT_STR}/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200"
+DEFAULT_DATA_DIR = f"{_DATA_ROOT}/cycle"
+DEFAULT_SEG_DATA_DIR = f"{_DATA_ROOT}/seg"
+
 RESULTS_DIR = Path(__file__).resolve().parent / "results" / "p1v2_runs"
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Phase1 v2 — 체크포인트 기준 변경 + temperature annealing")
     p.add_argument("--model-config", required=True)
-    p.add_argument("--seg-axis", required=True)
-    p.add_argument("--axis-config", required=True)
+    p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
+    p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
     p.add_argument("--charge-m", type=int, default=None)
     p.add_argument("--discharge-m", type=int, default=None)
     p.add_argument("--scen-k", type=int, default=None)
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--split-seed", type=int, required=True)
-    p.add_argument("--data-dir", default=None, help="cycle pkl 경로 (cfg['data']['data_dir'] 오버라이드)")
-    p.add_argument("--seg-data-dir", default=None, help="seg pkl 경로 (cfg['data']['seg_data_dir'] 오버라이드)")
+    p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로 (cfg['data']['data_dir'] 오버라이드)")
+    p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로 (cfg['data']['seg_data_dir'] 오버라이드)")
     p.add_argument("--beta-min", type=float, default=0.1, help="annealing 종착 BETA(기본 0.1, 원래값 2/3)")
     p.add_argument("--device", default="auto")
     p.add_argument("--max-epochs", type=int, default=None,
@@ -118,6 +144,11 @@ def _parse_args() -> argparse.Namespace:
                    help="loss.lambda_l0을 이 값으로 강제 고정(lambda_l0_auto/yaml 값 무시, 최우선순위). "
                         "lambda_l0 정규화 경로 스윕 실험(lambda_sweep.py) 전용 — 평소 실행에서는 "
                         "주지 않으면 기존 동작(auto 또는 yaml 값)과 100% 동일.")
+    p.add_argument("--interaction-json", default=None, dest="interaction_json",
+                   help="test_hi_scenario_interaction.py 산출물 경로(v4). significant=True인 "
+                        "HI만 기존 scen_gates(시나리오별)로 남기고, 나머지는 새 shared_gate "
+                        "1개로 통합한다. --synergy-groups-json과 동시 사용 불가(스코프 밖 — "
+                        "SCRModel도 shared_hi_mask+scen_group_ids 동시 사용을 막아둠).")
     p.add_argument("--l0-warmup-epochs-override", type=int, default=None,
                    dest="l0_warmup_epochs_override",
                    help="loss.lambda_l0_warmup_epochs을 이 값으로 강제 고정(yaml 값 무시). "
@@ -128,6 +159,9 @@ def _parse_args() -> argparse.Namespace:
     if args.synergy_groups_json and args.kernel_features_pkl:
         p.error("--synergy-groups-json과 --kernel-features-pkl은 동시에 줄 수 없습니다 "
                 "(커널 융합을 쓰면 그룹 정보가 이미 피처에 반영되어 게이트 레벨 그룹핑이 불필요함)")
+    if args.interaction_json and args.synergy_groups_json:
+        p.error("--interaction-json과 --synergy-groups-json은 동시에 줄 수 없습니다 "
+                "(SCRModel이 shared_hi_mask+scen_group_ids 동시 사용을 지원하지 않음)")
     return args
 
 
@@ -174,9 +208,45 @@ def _gate_saturation_fraction(model: SCRModel) -> float:
     gates = [model.charge_probe_gate, model.discharge_probe_gate, *model.scen_gates]
     if model.scen_kernel_gates is not None:
         gates += list(model.scen_kernel_gates)
+    if model.shared_gate is not None:
+        gates.append(model.shared_gate)  # v4: scen_gates가 shared 몫만큼 좁아진 대신
+            # shared_gate가 그 몫을 담당하므로, 얘를 빼면 포화도가 실제보다 낮게(더 좋게)
+            # 잘못 나온다 — 전체 게이트 파라미터 집합에 반드시 포함해야 함.
     probs = [gate.gate_prob().detach().cpu() for gate in gates]
     p = torch.cat(probs)
     return float(((p > 0.1) & (p < 0.9)).float().mean().item())
+
+
+def _save_scen_masks_with_shared(model: SCRModel, json_path, hi_cols_by_seg: dict[int, list[str]]) -> None:
+    """v4 전용: model.shared_gate가 있으면 scen_gates[s](specific 폭)와 shared_gate를
+    원래 컬럼 순서로 재조립해서, 기존과 동일한 seg_{s}_ranked/names/probs/seg_name
+    스키마로 저장한다(하위 분석 스크립트가 무수정으로 읽을 수 있게). shared_gate가
+    없으면(shared_hi_mask 미지정) train_scr.py의 원본 함수로 그대로 위임."""
+    if model.shared_gate is None:
+        _base._save_scen_masks_to_json(model, json_path, hi_cols_by_seg)
+        return
+
+    n_hi = len(next(iter(hi_cols_by_seg.values())))
+    shared_idx = model._shared_idx.detach().cpu()
+    specific_idx = model._specific_idx.detach().cpu()
+    shared_prob = model.shared_gate.gate_prob().detach().cpu()
+
+    out = {}
+    seg_names = model.spec.scenario_names
+    for s in range(model.n_scenarios):
+        full_prob = torch.zeros(n_hi)
+        full_prob[shared_idx] = shared_prob
+        if len(specific_idx) > 0:
+            full_prob[specific_idx] = model.scen_gates[s].gate_prob().detach().cpu()
+        ranked = full_prob.argsort(descending=True).tolist()
+        probs = [round(float(full_prob[i]), 6) for i in ranked]
+        out[f"seg_{s}_ranked"] = ranked
+        out[f"seg_{s}_names"] = [hi_cols_by_seg[s][i] for i in ranked]
+        out[f"seg_{s}_probs"] = probs
+        out[f"seg_{s}_seg_name"] = seg_names[s]
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    print(f"[p1v2] Saved scen HI ranking(shared_gate 반영) -> {json_path} (시나리오별 {n_hi}개 랭킹)")
 
 
 def main() -> None:
@@ -247,10 +317,28 @@ def main() -> None:
         print(f"[p1v2] synergy-groups-json 적용: {args.synergy_groups_json} "
               f"({len(scen_group_ids)}/{spec.n_scenarios}개 시나리오, 총 그룹 {n_groups_total}개)")
 
+    shared_hi_mask = None
+    if args.interaction_json:
+        interaction_data = json.loads(Path(args.interaction_json).read_text(encoding="utf-8"))
+        ref_seg_name = spec.scenario_names[0]
+        ref_cols = get_hi_cols_for_seg(ref_seg_name)
+        suffix = f"_{ref_seg_name}"
+        concepts_in_order = [c[: -len(suffix)] if c.endswith(suffix) else c for c in ref_cols]
+        per_hi = interaction_data["per_hi"]
+        shared_hi_mask = torch.tensor(
+            [not per_hi.get(c, {"significant": False})["significant"] for c in concepts_in_order],
+            dtype=torch.bool,
+        )
+        n_shared = int(shared_hi_mask.sum().item())
+        print(f"[p1v2] interaction-json 적용: {args.interaction_json} "
+              f"({n_shared}/{len(shared_hi_mask)}개 HI -> shared_gate, "
+              f"{len(shared_hi_mask) - n_shared}개 -> 기존 scen_gates)")
+
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
         scen_group_ids=scen_group_ids,
+        shared_hi_mask=shared_hi_mask,
         n_kernel_hi=len(kernel_hi_names) if kernel_hi_names else 0,
     ).to(device)
 
@@ -402,7 +490,7 @@ def main() -> None:
     hi_cols_ref = get_hi_cols_for_seg("dis_hi")
     hi_cols_by_seg = {s: get_hi_cols_for_seg(spec.scenario_names[s]) for s in range(spec.n_scenarios)}
     _base._save_probe_masks_to_json(model, output_dir / "gates" / "classification_HIs.json", hi_cols_ref)
-    _base._save_scen_masks_to_json(model, output_dir / "gates" / "regression_HIs.json", hi_cols_by_seg)
+    _save_scen_masks_with_shared(model, output_dir / "gates" / "regression_HIs.json", hi_cols_by_seg)
 
     if kernel_hi_names is not None:
         # 커널 피처는 시나리오 무관 공유 스키마(모든 세그먼트에 같은 커널 모델을 적용) —

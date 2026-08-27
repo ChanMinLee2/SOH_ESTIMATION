@@ -273,3 +273,101 @@
 - **해석 / 다음 액션**: 이 pkl은 phase1_trainer_v2.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호.
 
 ---
+
+### 2026-08-26 15:58 — synergy_groups_k25_full_N2_groups_v3
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --global-dedup --tag k25_full_N2_groups_v3
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_v3.json`
+- **핵심 수치**: 전체 HI 150개 -> 그룹 150개, 평균 그룹 크기 2.56
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-08-26 16:00 — synergy_groups_k25_full_N2_groups_vctrl
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --shuffle-from 5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_noleak.json --shuffle-seed 42 --tag k25_full_N2_groups_vctrl
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_vctrl.json`
+- **핵심 수치**: 전체 HI 120개 -> 그룹 120개, 평균 그룹 크기 3.20
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-08-26 16:10 — synergy_groups_k25_full_N2_groups_v3
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --global-dedup --tag k25_full_N2_groups_v3
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_v3.json`
+- **핵심 수치**: 전체 HI 82개 -> 그룹 82개, 평균 그룹 크기 4.68
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-08-26 22:37 — synergy_groups_k25_full_N2_groups_v3
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --global-dedup --tag k25_full_N2_groups_v3
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_v3.json`
+- **핵심 수치**: 전체 HI 87개 -> 그룹 87개, 평균 그룹 크기 3.11
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-08-26 22:47 — synergy_groups_k25_full_N2_groups_v3
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_synergy_groups.py --model-config 5_model/config/main_qfref_S.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --global-dedup --tag k25_full_N2_groups_v3
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\synergy_groups_k25_full_N2_groups_v3.json`
+- **핵심 수치**: 전체 HI 82개 -> 그룹 82개, 평균 그룹 크기 3.05
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-08-27 02:09 — kernel_group_features_k25_full_N2_kernel_v3
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 2차 다중공선성 배제 + 정규화 통계 저장
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_kernel_group_features.py --model-config 5_model/config/main_qfref_S.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --synergy-groups-json 5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_v3.json --min-raw-partial-corr 0.02 --tag k25_full_N2_kernel_v3
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\kernel_group_features_k25_full_N2_kernel_v3.pkl`
+- **핵심 수치**: 후보 61개 -> 최종 61개, 평균 train R^2=0.3631, 시나리오별 개수={'chg_lo': 8, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 8, 'dis_mid': 11, 'dis_lo': 11}
+- **해석 / 다음 액션**: 이 pkl은 phase1_trainer_v2.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호.
+
+---
+
+### 2026-08-27 14:29 — kernel_group_features_k25_full_N2_kernel_v3
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 2차 다중공선성 배제 + 정규화 통계 저장
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 5_model/experiments/phase1_lab/build_kernel_group_features.py --model-config 5_model/config/main_qfref_S.yaml --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":0,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2} --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200/seg --split-seed 42 --synergy-groups-json 5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_v3.json --min-raw-partial-corr 0.02 --tag k25_full_N2_kernel_v3
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\kernel_group_features_k25_full_N2_kernel_v3.pkl`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3444, 시나리오별 개수={'chg_lo': 8, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 11}
+- **해석 / 다음 액션**: 이 pkl은 phase1_trainer_v2.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호.
+
+---

@@ -83,9 +83,20 @@ class SCRLoss(nn.Module):
         if not model._fixed_scen:
             _charge_ids = frozenset(model.spec.charge_scenario_ids)
             _n_scen     = model.n_scenarios
+            shared_gate = getattr(model, "shared_gate", None)  # v4: HI 일부가 scen_gates
+                # 대신 시나리오 무관 shared_gate로 라우팅됨 — 있으면 scen_gates[s]는
+                # N_HI보다 좁은 폭(specific 몫만)이라, cost_vec(N_HI)과 맞추려면 원래
+                # 컬럼 순서로 재조립해야 함. None이면(shared_hi_mask 미지정) 기존과
+                # 100% 동일 동작.
             for s, gate in enumerate(model.scen_gates):
                 p_probe  = p_probe_ch if s in _charge_ids else p_probe_dis
-                p_scen   = gate.gate_prob()
+                if shared_gate is not None:
+                    p_scen = torch.zeros_like(self.cost_vec)
+                    p_scen[model._shared_idx] = shared_gate.gate_prob()
+                    if len(model._specific_idx) > 0:
+                        p_scen[model._specific_idx] = gate.gate_prob()
+                else:
+                    p_scen = gate.gate_prob()
                 p_active = 1.0 - (1.0 - p_probe) * (1.0 - p_scen)
                 penalty  = penalty + (self.cost_vec * p_active).sum()
             penalty = penalty / _n_scen
