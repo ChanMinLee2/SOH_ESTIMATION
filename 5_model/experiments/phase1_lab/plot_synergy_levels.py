@@ -13,9 +13,9 @@ Level3: --results로 준 {버전 라벨: val_r2} 목록을 막대로 비교(v-ct
 사용 예(Level2를 쓰려면 --model-config는 반드시 지정 — 이게 Level2 활성화 스위치.
 --seg-axis/--axis-config/--data-dir/--seg-data-dir은 표준 조합이면 생략 가능):
   python 5_model/experiments/phase1_lab/plot_synergy_levels.py \
-      --synergy-groups 5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_noleak.json \
+      --synergy-groups 5_model/experiments/phase1_lab/results/outputs/synergy_groups_k25_full_N2_groups_noleak.json \
       --model-config 5_model/config/main_qfref_S.yaml --split-seed 42 \
-      --kernel-pkl 5_model/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v2.pkl \
+      --kernel-pkl 5_model/experiments/phase1_lab/results/outputs/kernel_group_features_k25_full_N2_kernel_v2.pkl \
       --results "v2=0.9478" --results "v-ctrl=0.91" --results "v3=(미실시)"
 """
 

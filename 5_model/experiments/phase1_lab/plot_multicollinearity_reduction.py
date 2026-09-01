@@ -17,7 +17,7 @@ phase1_trainer_v2.py와 분리된 독립 스크립트 — 두 synergy_groups jso
   python 5_model/experiments/phase1_lab/plot_multicollinearity_reduction.py \
       --model-config 5_model/config/main_qfref_S.yaml \
       --split-seed 42 \
-      --before 5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_noleak.json \
+      --before 5_model/experiments/phase1_lab/results/outputs/synergy_groups_k25_full_N2_groups_noleak.json \
       --after  5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_v3.json
 """
 

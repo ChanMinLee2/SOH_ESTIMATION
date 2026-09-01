@@ -19,7 +19,7 @@ PROVENANCE.json에 어떤 seed/run들로 만들었는지 반드시 같이 남긴
 
 사용 예:
   python 5_model/experiments/phase1_lab/materialize_ensemble_gates.py \
-      --manifest 5_model/experiments/phase1_lab/results/convergence_manifest_k25_baseline.json \
+      --manifest 5_model/experiments/phase1_lab/results/outputs/convergence_manifest_k25_full_N2_stage12.json \
       --out-tag k25_ensemble
 """
 

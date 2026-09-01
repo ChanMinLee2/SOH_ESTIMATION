@@ -33,7 +33,7 @@ docs/260820_RESULTS.md 참고).
 기본값 자동 적용, 다른 조합이면 넷 다 같이 오버라이드):
   python 5_model/experiments/phase1_lab/build_kernel_group_features.py \
       --model-config 5_model/config/main_qfref_S_p60.yaml \
-      --synergy-groups-json 5_model/experiments/phase1_lab/results/synergy_groups_k25_full_N2_groups_noleak.json \
+      --synergy-groups-json 5_model/experiments/phase1_lab/results/outputs/synergy_groups_k25_full_N2_groups_noleak.json \
       --split-seed 42 --tag k25_full_N2_kernel
 """
 
@@ -233,6 +233,7 @@ def main() -> None:
     groups_data = json.loads(Path(args.synergy_groups_json).read_text(encoding="utf-8"))
 
     candidates: list[dict] = []
+    rejected: list[dict] = []  # 어떤 HI 조합이 어느 단계에서 왜 탈락했는지(plot_kernel_rejected.py용)
     n_skipped_size1 = 0
     for s, seg_name in enumerate(tqdm(spec.scenario_names, desc="그룹 -> 커널 HI 피팅", unit="scenario")):
         key = f"seg_{s}_groups"
@@ -271,6 +272,13 @@ def main() -> None:
                 pc = _raw_conditioned_partial_corr(y_scen, kernel_pred, x_group)
                 if abs(pc) < args.min_raw_partial_corr:
                     n_skipped_raw_dup += 1
+                    rejected.append({
+                        "name": f"kernel_{seg_name}_g{gi}", "scenario": seg_name,
+                        "member_names": [names_by_seg[s][i] for i in members],
+                        "train_r2": r2, "reason": "raw_conditioned_filter",
+                        "detail": f"raw-conditioned partial corr {pc:.4f} < 문턱 {args.min_raw_partial_corr}"
+                                  "(자기 그룹 raw 멤버로 이미 설명됨, 커널이 새 정보를 거의 안 줌)",
+                    })
                     continue
             candidates.append({
                 "name": f"kernel_{seg_name}_g{gi}",
@@ -304,8 +312,18 @@ def main() -> None:
     order = sorted(range(len(candidates)), key=lambda i: -candidates[i]["train_r2"])
     kept: list[int] = []
     for i in order:
-        if all(abs(corr[i, k]) < args.redundancy_threshold for k in kept):
+        conflict = [k for k in kept if abs(corr[i, k]) >= args.redundancy_threshold]
+        if not conflict:
             kept.append(i)
+        else:
+            worst = max(conflict, key=lambda k: abs(corr[i, k]))
+            c = candidates[i]
+            rejected.append({
+                "name": c["name"], "scenario": c["scenario"], "member_names": c["member_names"],
+                "train_r2": c["train_r2"], "reason": "kernel_kernel_dedup",
+                "detail": f"커널끼리 |corr|={abs(corr[i, worst]):.4f}>={args.redundancy_threshold} "
+                          f"vs 이미 채택된 {candidates[worst]['name']}({candidates[worst]['member_names']})",
+            })
     n_dropped_corr = len(candidates) - len(kept)
 
     # --max-features가 주어졌을 때만 시나리오별 쿼터 라운드로빈으로 캡을 건다(안 주면
@@ -314,6 +332,14 @@ def main() -> None:
     final_idx = _round_robin_select(kept, candidates, cap)
     n_dropped_cap = max(0, len(kept) - len(final_idx))
     final = [candidates[i] for i in final_idx]
+    for i in kept:
+        if i not in final_idx:
+            c = candidates[i]
+            rejected.append({
+                "name": c["name"], "scenario": c["scenario"], "member_names": c["member_names"],
+                "train_r2": c["train_r2"], "reason": "max_features_quota",
+                "detail": f"--max-features {args.max_features} 쿼터 초과(다중공선성 배제는 통과)",
+            })
 
     # ------------------------------------------------------------------
     # 정규화 통계 — 커널 예측값은 SOH를 직접 예측하도록 fit돼 스케일이 SOH 자체
@@ -354,6 +380,15 @@ def main() -> None:
     with open(out_path, "wb") as fh:
         pickle.dump(artifact, fh)
 
+    # plot_kernel_rejected.py용 — 어떤 HI 조합(그룹)이 왜 최종 커널에서 빠졌는지 별도 저장
+    # (raw_conditioned_filter/kernel_kernel_dedup/max_features_quota 3가지 사유).
+    rejected_out_path = RESULTS_DIR / f"kernel_group_features_{args.tag}_rejected.json"
+    rejected_out_path.write_text(
+        json.dumps({"tag": args.tag, "n_rejected": len(rejected), "rejected": rejected},
+                   indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
     avg_r2 = float(np.mean([f["train_r2"] for f in final]))
     print(f"\n[kernel] 후보 {len(candidates)}개(크기1 그룹 {n_skipped_size1}개 스킵) "
           f"-> 2차 다중공선성 배제로 {n_dropped_corr}개 제거 "
@@ -362,13 +397,14 @@ def main() -> None:
     print("[kernel] 시나리오별 최종 커널 HI 개수: " +
           ", ".join(f"{k}={v}" for k, v in n_final_by_scenario.items()))
     print(f"[kernel] 저장: {out_path}")
+    print(f"[kernel] 탈락 목록 저장({len(rejected)}개, plot_kernel_rejected.py용): {rejected_out_path}")
 
     append_log_entry(
         tag=f"kernel_group_features_{args.tag}",
         purpose="시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) "
                 "+ 2차 다중공선성 배제 + 정규화 통계 저장",
         command=current_command_str(),
-        result_files=[str(out_path)],
+        result_files=[str(out_path), str(rejected_out_path)],
         key_metrics=(f"후보 {len(candidates)}개 -> 최종 {len(final)}개, "
                      f"평균 train R^2={avg_r2:.4f}, 시나리오별 개수={n_final_by_scenario}"),
         interpretation=(

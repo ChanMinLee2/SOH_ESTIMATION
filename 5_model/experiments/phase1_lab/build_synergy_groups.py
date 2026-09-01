@@ -422,8 +422,11 @@ def main() -> None:
         report[f"seg_{s}_group_names"] = [[names_by_seg[s][i] for i in g["members"]] for g in groups]
         report[f"seg_{s}_group_scores"] = [g["scores"] for g in groups]
         # v3.1 전용(global_dedup): 사전 가지치기로 탈락해 이 그룹에 사후 편입된 HI —
-        # 시너지 성장(Level1)에는 안 쓰이지만 커널 피처 구성 시 raw 커버리지를 위해
-        # members와 합쳐 써야 한다(build_kernel_group_features.py 참고). global_dedup=False면
+        # 시너지 성장(Level1)과 커널 피처 구성(build_kernel_group_features.py) 둘 다에
+        # 안 쓰인다. 다중공선성 장부(이 HI가 어느 그룹 소속인지)와 x_hi 자체의 독립 게이트
+        # 커버리지 용도로만 남겨둔다 — members와 합치면 그룹 크기가 2~29개로 들쭉날쭉해져
+        # Level2 gap 비교의 교란변수가 된다는 게 실측으로 확인돼(docs/260827_RESULTS.md
+        # "v3 커널 피처 재생성" 절) 합치지 않는 쪽으로 확정됐다. global_dedup=False면
         # 항상 빈 리스트.
         report[f"seg_{s}_group_attached"] = [g.get("attached", []) for g in groups]
         report[f"seg_{s}_group_attached_names"] = [

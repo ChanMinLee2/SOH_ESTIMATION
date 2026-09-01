@@ -94,8 +94,38 @@ def _parse_args() -> argparse.Namespace:
                         "생긴다. 15개 쌍 중 최댓값이 아니라 표준편차를 쓰는 이유: 최댓값은 "
                         "비교 15개 중 극값을 고르는 것이라 진짜 차이가 없어도 순전히 표본 "
                         "변동만으로 부풀려진다(order-statistics 효과).")
+    p.add_argument("--shuffle-from", default=None, dest="shuffle_from",
+                   help="v4-ctrl 전용(build_synergy_groups.py --shuffle-from과 동일 취지): "
+                        "이 경로의 hi_scenario_interaction_*.json이 가진 공유/특이 HI *개수*는 "
+                        "그대로 두고, 어떤 HI가 공유인지만 무작위로 재배정한다. 통계 검정 자체는"
+                        "안 돌리고 건너뛴다 — 각 HI의 r_by_scenario/std_r 등 실제 계산값은 "
+                        "참조 파일 값을 그대로 복사해 진단용으로 남기되(--shuffle-from 없을 때와 "
+                        "동일 스키마 유지, 다운스트림 스크립트 무수정 호환), shared_gate 라우팅을 "
+                        "결정하는 'significant' 필드만 무작위로 덮어쓴다.")
+    p.add_argument("--shuffle-seed", type=int, default=42, dest="shuffle_seed",
+                   help="--shuffle-from 전용 무작위 배정 시드")
     p.add_argument("--tag", required=True)
     return p.parse_args()
+
+
+def _shuffle_significant(ref_path: str, seed: int) -> dict:
+    """참조 interaction json의 공유/특이 *개수*는 유지하고 배정만 무작위로 섞는다
+    (build_synergy_groups.py의 build_groups_shuffled와 동일 원칙 — 대조군은 실제 산출물과
+    피처/구조 규모가 같아야 순수 효과 비교가 성립한다)."""
+    ref = json.loads(Path(ref_path).read_text(encoding="utf-8"))
+    per_hi = ref["per_hi"]
+    concepts = list(per_hi.keys())
+    n_sig = sum(1 for v in per_hi.values() if v["significant"])
+
+    rng = np.random.RandomState(seed)
+    shuffled_sig = set(rng.choice(len(concepts), size=n_sig, replace=False).tolist())
+
+    result = {}
+    for i, c in enumerate(concepts):
+        v = dict(per_hi[c])  # 실제 계산값(r_by_scenario 등)은 그대로 복사, 진단용으로 남김
+        v["significant"] = i in shuffled_sig
+        result[c] = v
+    return result, ref
 
 
 def _fisher_z_test(r_a: float, n_a: int, r_b: float, n_b: int) -> float:
@@ -129,6 +159,30 @@ def _bh_adjust(pvals: list[float]) -> list[float]:
 
 def main() -> None:
     args = _parse_args()
+
+    if args.shuffle_from:
+        print(f"[interaction] v4-ctrl 모드: {args.shuffle_from}의 공유/특이 개수는 그대로 두고 "
+              f"배정만 무작위 재배정(shuffle-seed={args.shuffle_seed}) — 통계 검정 생략")
+        result, ref = _shuffle_significant(args.shuffle_from, args.shuffle_seed)
+        n_sig = sum(1 for v in result.values() if v["significant"])
+        n_p_sig = ref.get("n_p_significant_raw", 0)
+        payload = {
+            "tag": args.tag, "alpha": ref.get("alpha"), "min_effect_size": ref.get("min_effect_size"),
+            "n_scenarios": ref.get("n_scenarios"), "scenario_names": ref.get("scenario_names"),
+            "n_hi": ref.get("n_hi"), "n_significant": n_sig, "n_p_significant_raw": n_p_sig,
+            "per_hi": result,
+            "shuffle_from": args.shuffle_from, "shuffle_seed": args.shuffle_seed,
+            "note": "v4-ctrl: significant 배정이 실제 통계검정이 아니라 무작위(개수만 참조 파일과 "
+                    "동일하게 유지)다 — r_by_scenario 등 나머지 필드는 참조 파일의 실제 계산값을 "
+                    "그대로 복사한 진단용 정보이며 이 배정 결정에는 안 쓰였다.",
+        }
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = RESULTS_DIR / f"hi_scenario_interaction_{args.tag}.json"
+        out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[interaction] 저장: {out_path} (공유 {payload['n_hi'] - n_sig}개 / "
+              f"특이 {n_sig}개, 무작위 배정)")
+        return
+
     x_all, y_all, seg_idx_all, spec, names_by_seg = _load_all_scenarios(args)
     n_hi = x_all.shape[1]
     n_scen = spec.n_scenarios

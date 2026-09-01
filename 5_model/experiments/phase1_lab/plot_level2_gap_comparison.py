@@ -26,8 +26,8 @@ phase1_trainer_v2.py와 분리된 독립 스크립트 — kernel pkl들과 raw �
 기본값 자동 적용):
   python 5_model/experiments/phase1_lab/plot_level2_gap_comparison.py \
       --model-config 5_model/config/main_qfref_S.yaml --split-seed 42 \
-      --kernel-pkl v1=5_model/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel.pkl \
-      --kernel-pkl v2=5_model/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v2.pkl \
+      --kernel-pkl v1=5_model/experiments/phase1_lab/results/outputs/kernel_group_features_k25_full_N2_kernel.pkl \
+      --kernel-pkl v2=5_model/experiments/phase1_lab/results/outputs/kernel_group_features_k25_full_N2_kernel_v2.pkl \
       --kernel-pkl v3=5_model/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v3.pkl
 """
 
