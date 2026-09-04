@@ -280,6 +280,11 @@ def main():
     parser.add_argument("--calibration-jitter", type=int, default=None, dest="calibration_jitter",
                         help="재보정 주기를 ±jitter 사이클 흔듦(기본 0=정확히 주기대로). "
                              "calibration_jitter < calibration_period 필요 (--axis-config 대체)")
+    parser.add_argument("--offset-amp", type=float, default=None, dest="offset_amp",
+                        help="q_frac_ref 센서 offset 오차 최대진폭, A 단위(기본 0=비활성). "
+                             "전류 크기와 무관하게 사이클 소요시간에 비례하는 절대오차를 추가한다 "
+                             "(common/scenario/q_frac_ref.py 모듈 docstring '센서 offset 오차' 절, "
+                             "--axis-config 대체)")
     parser.add_argument("--data-dir", default=None, dest="p1_data_dir",
                         help="Step 6(phase1_trainer_v2.py) 전용 cycle pkl 경로 오버라이드. "
                              "phase1_trainer_v2.py는 --axis-config만으로 데이터 경로를 자동 계산하지 "
@@ -321,7 +326,7 @@ def main():
             or args.min_pts is not None or args.n2_start is not None
             or args.n2_end is not None or args.n2_step is not None
             or args.calibration_period is not None or args.calibration_mode is not None
-            or args.calibration_jitter is not None):
+            or args.calibration_jitter is not None or args.offset_amp is not None):
         import json as _json
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
@@ -338,6 +343,7 @@ def main():
         if args.calibration_period is not None: _quick["calibration_period"] = args.calibration_period
         if args.calibration_mode   is not None: _quick["calibration_mode"]   = args.calibration_mode
         if args.calibration_jitter is not None: _quick["calibration_jitter"] = args.calibration_jitter
+        if args.offset_amp is not None: _quick["offset_amp"] = args.offset_amp
         args.axis_config = _json.dumps(_quick)
 
     to_step = args.to_step if args.to_step is not None else len(STEPS)

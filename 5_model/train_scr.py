@@ -562,7 +562,11 @@ def main() -> None:
     _assign_sfx = "" if _axis_cfg.get("assign", "position_bin") == "position_bin" else "_noscen"
     # n2 조각: 고정 n2면 "n2-20%", q_frac_ref n2 범위 모드면 "n2-10~30%s10"
     # (hi_correlation._qfw_tag / train_classifier / visualize_results 와 공통 규칙)
-    from common.scenario.q_frac_ref import n2_path_tag as _n2_path_tag, calib_path_tag as _calib_path_tag
+    from common.scenario.q_frac_ref import (
+        n2_path_tag as _n2_path_tag,
+        calib_path_tag as _calib_path_tag,
+        offset_path_tag as _offset_path_tag,
+    )
     _n2_frag = _n2_path_tag(_axis_cfg)
     # q_frac_wide: n1/n2/n_samples 별 하위 디렉터리 결정
     if _axis_name == "q_frac_wide":
@@ -579,7 +583,8 @@ def main() -> None:
         _nmode = str(_axis_cfg.get("noise_mode", "ou"))
         _period = int(round(_axis_cfg.get("noise_period_cycles", 200.0)))
         _axis_dir = (f"q_frac_ref/n1-{_n1}%_{_n2_frag}_N-{_ns}{_rand_sfx}{_minpts_sfx}{_assign_sfx}"
-                     f"_lag-{_lag}_noise-{_noise}%_{_nmode}-{_period}{_calib_path_tag(_axis_cfg)}")
+                     f"_lag-{_lag}_noise-{_noise}%_{_nmode}-{_period}"
+                     f"{_calib_path_tag(_axis_cfg)}{_offset_path_tag(_axis_cfg)}")
     elif _axis_name == "q_abs":
         # q_abs: mid_start/mid_end/seg_len/n_samples 별 하위 디렉터리 (hi_correlation._qabs_tag 와 동일)
         _ms = int(round(_axis_cfg.get("mid_start", 0.20) * 100))

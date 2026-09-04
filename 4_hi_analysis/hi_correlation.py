@@ -1470,14 +1470,17 @@ def _qfref_tag(axis_cfg: dict) -> str:
     noise_period를 덧붙여 lag·노이즈 파라미터가 다르면 반드시 다른 경로에 저장되게 한다
     (docs/SOC.md §6 Phase 3 "데이터 경로 분리 확인" — §4.6 confound 방지). calibration_*
     (docs/260903_RESULTS.md §1)이 있으면 calib_path_tag로 추가 접미사를 붙인다 —
-    미설정(기본)이면 빈 문자열이라 기존 경로와 100% 동일하게 유지된다."""
-    from common.scenario.q_frac_ref import calib_path_tag
+    미설정(기본)이면 빈 문자열이라 기존 경로와 100% 동일하게 유지된다. offset_amp
+    (센서 offset 오차, common/scenario/q_frac_ref.py 모듈 docstring 참고)도 같은
+    원칙으로 offset_path_tag를 붙인다."""
+    from common.scenario.q_frac_ref import calib_path_tag, offset_path_tag
     base = _qfw_tag(axis_cfg)
     lag = int(axis_cfg.get("ref_lag", 0))
     noise_pct = int(round(axis_cfg.get("noise_amp", 0.03) * 100))
     mode = str(axis_cfg.get("noise_mode", "ou"))
     period = int(round(axis_cfg.get("noise_period_cycles", 200.0)))
-    return f"{base}_lag-{lag}_noise-{noise_pct}%_{mode}-{period}{calib_path_tag(axis_cfg)}"
+    return (f"{base}_lag-{lag}_noise-{noise_pct}%_{mode}-{period}"
+            f"{calib_path_tag(axis_cfg)}{offset_path_tag(axis_cfg)}")
 
 
 def _qabs_tag(axis_cfg: dict) -> str:
@@ -1989,6 +1992,11 @@ def main():
     parser.add_argument("--calibration-jitter", type=int, default=None, dest="calibration_jitter",
                         help="q_frac_ref: 재보정 주기를 ±jitter 사이클 흔듦(기본 0). "
                              "--axis-config 대체")
+    parser.add_argument("--offset-amp", type=float, default=None, dest="offset_amp",
+                        help="q_frac_ref: 센서 offset 오차 최대진폭, A 단위(기본 0=비활성). "
+                             "전류 크기와 무관하게 사이클 소요시간에 비례하는 절대오차를 추가한다 "
+                             "(common/scenario/q_frac_ref.py 모듈 docstring '센서 offset 오차' 절). "
+                             "--axis-config 대체")
     parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
                         help="충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간 제외 "
                              "(segmenter는 무수정, 세그먼터에 넘기는 충전 배열만 CV 시작 지점에서 절단; "
@@ -2013,7 +2021,8 @@ def main():
             or args.min_pts is not None or args.n2_start is not None
             or args.n2_end is not None or args.n2_step is not None
             or args.n2_seed is not None or args.calibration_period is not None
-            or args.calibration_mode is not None or args.calibration_jitter is not None):
+            or args.calibration_mode is not None or args.calibration_jitter is not None
+            or args.offset_amp is not None):
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
         if args.n2        is not None: _quick["n2"]        = args.n2
@@ -2030,6 +2039,7 @@ def main():
         if args.calibration_period is not None: _quick["calibration_period"] = args.calibration_period
         if args.calibration_mode   is not None: _quick["calibration_mode"]   = args.calibration_mode
         if args.calibration_jitter is not None: _quick["calibration_jitter"] = args.calibration_jitter
+        if args.offset_amp is not None: _quick["offset_amp"] = args.offset_amp
         args.axis_config = json.dumps(_quick)
 
     _axis = args.seg_axis

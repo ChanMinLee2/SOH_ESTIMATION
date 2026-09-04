@@ -464,7 +464,7 @@ def _benchmark_inference(b: RunBundle, device: torch.device,
 def _axis_dir_from_spec(spec: ScenarioSpec) -> str:
     # n2 조각: 고정 n2면 "n2-20%", q_frac_ref n2 범위 모드면 "n2-10~30%s10"
     # (hi_correlation._qfw_tag / train_scr / train_classifier 와 공통 규칙)
-    from common.scenario.q_frac_ref import n2_path_tag, calib_path_tag
+    from common.scenario.q_frac_ref import n2_path_tag, calib_path_tag, offset_path_tag
     if spec.axis == "q_frac_wide":
         p = spec.params or {}
         n1 = int(round(p.get("n1", 0.4) * 100))
@@ -490,7 +490,8 @@ def _axis_dir_from_spec(spec: ScenarioSpec) -> str:
         minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
         assign_sfx = "" if p.get("assign", "position_bin") == "position_bin" else "_noscen"
         return (f"q_frac_ref/n1-{n1}%_{n2_frag}_N-{ns}{minpts_sfx}{assign_sfx}"
-                f"_lag-{lag}_noise-{noise}%_{nmode}-{period}{calib_path_tag(p)}")
+                f"_lag-{lag}_noise-{noise}%_{nmode}-{period}"
+                f"{calib_path_tag(p)}{offset_path_tag(p)}")
     if spec.axis == "q_abs":
         p = spec.params or {}
         ms = int(round(p.get("mid_start", 0.20) * 100))

@@ -89,7 +89,7 @@ def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
     assign_sfx = "" if p.get("assign", "position_bin") == "position_bin" else "_noscen"
     # n2 조각: 고정 n2면 "n2-20%", q_frac_ref n2 범위 모드면 "n2-10~30%s10"
     # (hi_correlation._qfw_tag / train_scr / visualize_results 와 공통 규칙)
-    from common.scenario.q_frac_ref import n2_path_tag, calib_path_tag
+    from common.scenario.q_frac_ref import n2_path_tag, calib_path_tag, offset_path_tag
     n2_frag = n2_path_tag(p)
     if spec.axis == "q_frac_wide":
         n1 = int(round(p.get("n1", 0.4) * 100))
@@ -103,7 +103,8 @@ def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
         nmode = str(p.get("noise_mode", "ou"))
         period = int(round(p.get("noise_period_cycles", 200.0)))
         return (f"q_frac_ref/n1-{n1}%_{n2_frag}_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}"
-                f"_lag-{lag}_noise-{noise}%_{nmode}-{period}{calib_path_tag(p)}")
+                f"_lag-{lag}_noise-{noise}%_{nmode}-{period}"
+                f"{calib_path_tag(p)}{offset_path_tag(p)}")
     if spec.axis == "q_abs":
         ms = int(round(p.get("mid_start", 0.20) * 100))
         me = int(round(p.get("mid_end", 0.50) * 100))

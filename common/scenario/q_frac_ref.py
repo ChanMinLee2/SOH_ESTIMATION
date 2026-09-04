@@ -111,6 +111,40 @@ noise_period_cycles와 같아 "재보정이 자연 회귀와 거의 같은 속�
 성능이 크게 안 움직일 수 있다는 뜻이다. 다만 calibration이 바꾸는 건 진폭이 아니라
 **시간축 상관구조**(오래 표류한 값 vs 방금 재보정된 값)이므로, 이 논리가 그대로
 적용되지는 않는다 — 실험으로 확인해야 하는 이유가 이것이다(V1-d).
+
+──────────────────────────────────────────────────────────────────────────────
+센서 offset 오차 (2026-09-04 추가)
+──────────────────────────────────────────────────────────────────────────────
+기존 `noise_amp`(bias+drift)는 전류 크기와 무관하게 **참값에 곱해지는** 오차만
+표현한다 — 실제 전류센서의 두 오차원(Movassagh et al. 2021, Energies 14, 4074,
+"A Critical Look at Coulomb Counting Approach for State of Charge Estimation in
+Batteries") 중 gain 오차(비례오차)에만 대응한다. 상수 gain 오차는 어떤 길이로
+적분해도 결과에 같은 %가 곱해질 뿐이라 이 곱셈 모델과 수학적으로 동치이고,
+따로 모델링할 이유가 없다.
+
+두 번째 오차원인 **offset 오차**(전류 크기와 무관하게 항상 더해지는 고정 오차,
+센서의 영점 오차)는 성격이 다르다 — 이걸 원본 전류에 얹어 적분하면
+`q_sim = q_true + offset_err × T_cycle`이 되어, **사이클 처리시간(T_cycle)에
+비례하는 절대오차**가 생긴다. 곱셈형 노이즈로는 표현 불가능한 항이라
+`offset_amp`(A 단위, 기본 0.0=비활성·하위호환)로 별도 추가했다:
+
+  `offset_frac = offset_err_A × T_cycle_s / 3600 / q_ref_raw`
+
+`offset_err_A`는 (cell, direction)별로 `uniform(-offset_amp, +offset_amp)`에서
+한 번 뽑혀 고정된다(bias와 동일 관례). `T_cycle_s`는 그 세션(그 방향 전체)의
+`dt.sum()` — 원본 전류 배열 `i` 전체를 다시 적분할 필요 없이 소요시간 스칼라
+하나만 있으면 계산된다. `offset_frac`은 기존 `noise_amp` 클리핑과 별개로
+`±noise_amp`로 한 번 더 클리핑한 뒤 `bias+drift` 클리핑 결과에 더해진다 —
+두 오차원의 물리적 상한을 섞지 않기 위함이며, 짧은/저처리량 사이클에서
+`offset_frac`이 `noise_amp`를 넘어서는 것 자체가 "짧은 세션일수록 offset이
+상대적으로 커진다"는 원하는 효과다.
+
+`calibration_mode="full"`은 bias와 함께 `offset_err_A`도 0으로 리셋한다(둘 다
+"센서 계통오차 상태"로 취급 — drift_only는 둘 다 유지).
+
+Movassagh et al.(Table II)은 예시로 1.5Ah 셀에 10mA offset을 가정했다 — 이
+데이터셋 셀 용량(대략 1Ah 안팎)에 맞춰 실험 시 5~10mA대에서 시작하는 것을
+권장하나, 기본값은 0(비활성)이므로 명시적으로 켜야 한다.
 """
 
 from __future__ import annotations
@@ -165,6 +199,19 @@ def n2_path_tag(params: dict) -> str:
             f"s{step}")
 
 
+def offset_path_tag(params: dict) -> str:
+    """offset_amp(mA 단위로 반올림 표기) → 경로 태그 조각 (예: "" | "_offA-10mA").
+
+    calib_path_tag/n2_path_tag와 같은 이유(§4.6 confound 방지)로 존재 — offset_amp가
+    다르면 다른 노이즈 시퀀스이므로 반드시 다른 경로에 저장돼야 한다. 0(기본, 비활성)
+    이면 빈 문자열을 돌려줘 기존 경로와 100% 동일하게 유지한다(하위 호환).
+    """
+    amp = float(params.get("offset_amp", 0.0) or 0.0)
+    if amp <= 0:
+        return ""
+    return f"_offA-{amp * 1000:g}mA"
+
+
 class QFracRefSegmenter(QFracWideSegmenter):
     """q_frac_wide + 과거 레퍼런스 기반 분모(q_tot) — 존/라우팅/spec은 부모와 동일."""
 
@@ -186,6 +233,8 @@ class QFracRefSegmenter(QFracWideSegmenter):
         calibration_period: int | None = None,  # N사이클마다 재보정. None=재보정 없음(기존 동작)
         calibration_mode: str = "drift_only",   # "drift_only"(OU만 리셋) | "full"(bias까지 리셋)
         calibration_jitter: int = 0,            # 재보정 주기를 ±jitter 사이클 흔듦 (0=정확히 주기대로)
+        # ── 센서 offset 오차 (2026-09-04, 모듈 docstring 참고) ──────────────
+        offset_amp: float = 0.0,          # 센서 영점오차 최대진폭 (A 단위). 0=비활성(하위호환)
         **kwargs,
     ):
         # 범위 모드면 부모의 `0 < n2 < n1` 검증을 통과시키기 위해 n2를 격자 하한으로
@@ -243,6 +292,12 @@ class QFracRefSegmenter(QFracWideSegmenter):
         self.calibration_period = int(calibration_period) if calibration_period is not None else None
         self.calibration_mode = str(calibration_mode)
         self.calibration_jitter = int(calibration_jitter)
+
+        if offset_amp < 0:
+            raise ValueError(f"q_frac_ref: offset_amp은 0 이상이어야 합니다. 현재 offset_amp={offset_amp}")
+        self.offset_amp = float(offset_amp)
+        # (셀,방향) -> 고정 offset 오차(A). bias와 동일 관례로 첫 호출 시 확정.
+        self._offset_err: dict[tuple[str, int], float] = {}
         # (셀,방향) -> 마지막 재보정(또는 첫 관측) 사이클. 재보정 트리거 판정용.
         self._last_calib: dict[tuple[str, int], int] = {}
         # (셀,방향) -> 실제 적용 주기(jitter 반영, 한 번 뽑으면 그 키에서 고정).
@@ -316,6 +371,17 @@ class QFracRefSegmenter(QFracWideSegmenter):
             params = (bias, phase)
             self._noise_params[key] = params
         return params
+
+    def _offset_err_for(self, cell_id: str, direction: int) -> float:
+        """고정 offset 오차(A). bias와 동일 관례 — (cell,direction)마다 첫 호출 시 확정."""
+        key = (str(cell_id), int(direction))
+        val = self._offset_err.get(key)
+        if val is None:
+            seed = zlib.crc32(f"{self.ref_seed}:offset:{cell_id}:{direction}".encode())
+            rng = np.random.default_rng(seed)
+            val = float(rng.uniform(-1.0, 1.0)) * self.offset_amp
+            self._offset_err[key] = val
+        return val
 
     def _noise_frac_sine(self, cell_id: str, direction: int, cycle: int, bias: float) -> float:
         """결정론적 사인파(구버전 기본값) — 진폭 noise_amp/2, 물리적 근거는 약하나 재현·해석 단순."""
@@ -397,14 +463,29 @@ class QFracRefSegmenter(QFracWideSegmenter):
             if self.calibration_mode == "full":
                 _, phase = self._noise_params_for(cell_id, direction)
                 self._noise_params[key] = (0.0, phase)
+                if self.offset_amp > 0:
+                    self._offset_err[key] = 0.0
 
-    def _noise_frac(self, cell_id: str, direction: int, cycle: int) -> float:
-        """완만한(사이클축에 매끄러운) 노이즈 — [-noise_amp, +noise_amp]로 클리핑.
+    def _noise_frac(
+        self,
+        cell_id: str,
+        direction: int,
+        cycle: int,
+        q_ref_raw: float,
+        t_cycle_s: float,
+    ) -> float:
+        """완만한(사이클축에 매끄러운) 노이즈.
 
-        구성: 셀·방향별 고정 바이어스(최대 ±noise_amp/2) + 느린 드리프트(ou 또는 sine).
-        화이트노이즈(사이클마다 급변)가 아니라 §6 Phase 4 요구사항 5의 "완만한 fade" 형태.
-        calibration_period가 설정돼 있으면 드리프트 상태를 주기적으로 리셋한다(모듈
-        docstring 참고) — 이 리셋 판정은 드리프트를 실제로 계산하기 전에 먼저 한다.
+        구성: 셀·방향별 고정 바이어스(최대 ±noise_amp/2) + 느린 드리프트(ou 또는 sine) —
+        둘의 합은 [-noise_amp, +noise_amp]로 클리핑. 화이트노이즈(사이클마다 급변)가
+        아니라 §6 Phase 4 요구사항 5의 "완만한 fade" 형태. calibration_period가 설정돼
+        있으면 드리프트 상태를 주기적으로 리셋한다(모듈 docstring 참고) — 이 리셋 판정은
+        드리프트를 실제로 계산하기 전에 먼저 한다.
+        offset_amp > 0이면 여기에 센서 offset 오차 항(모듈 docstring "센서 offset 오차"
+        절 참고)을 더한다 — `offset_err_A * t_cycle_s / 3600 / q_ref_raw`, 별도로
+        ±noise_amp 클리핑 후 더해진다(두 오차원의 물리적 상한을 섞지 않기 위함이라,
+        총합이 noise_amp를 넘을 수 있다 — 짧은 세션에서 offset이 상대적으로 커지는
+        의도된 효과).
         **부작용 있음(상태 전진)**: ou 모드는 호출마다 내부 상태가 한 스텝씩 진행되므로,
         같은 (cell_id, direction, cycle)이라도 두 번 호출하면 다른 값이 나온다 — 진단
         목적으로 노이즈 값만 다시 보고 싶으면 self._last_noise[(cell_id, direction)]를
@@ -418,6 +499,10 @@ class QFracRefSegmenter(QFracWideSegmenter):
         else:
             drift = self._noise_frac_sine(cell_id, direction, cycle, bias)
         total = float(np.clip(bias + drift, -self.noise_amp, self.noise_amp))
+        if self.offset_amp > 0 and q_ref_raw > 1e-9:
+            offset_A = self._offset_err_for(cell_id, direction)
+            offset_frac = offset_A * t_cycle_s / 3600.0 / q_ref_raw
+            total += float(np.clip(offset_frac, -self.noise_amp, self.noise_amp))
         self._last_noise[key] = total
         return total
 
@@ -429,6 +514,7 @@ class QFracRefSegmenter(QFracWideSegmenter):
         cell_id: str,
         cycle: int,
         q: np.ndarray,
+        dt: np.ndarray | None = None,
     ) -> float:
         q_this = float(q[-1]) if len(q) > 0 else 0.0
 
@@ -443,7 +529,8 @@ class QFracRefSegmenter(QFracWideSegmenter):
         else:
             q_ref_raw = hist[-(self.ref_lag + 1)][1]
 
-        noise_frac = self._noise_frac(cell_id, direction, cycle)
+        t_cycle_s = float(np.sum(dt)) if dt is not None and len(dt) > 0 else 0.0
+        noise_frac = self._noise_frac(cell_id, direction, cycle, q_ref_raw, t_cycle_s)
         return q_ref_raw * (1.0 + noise_frac)
 
     # ── n2 범위 모드: 랜덤 길이 타일링 ───────────────────────────────────────
@@ -600,4 +687,8 @@ class QFracRefSegmenter(QFracWideSegmenter):
                 "calibration_mode": self.calibration_mode,
                 "calibration_jitter": self.calibration_jitter,
             })
+        if self.offset_amp > 0:
+            # offset_amp=0(기본) 런의 경로/spec은 예전과 100% 동일하게 유지(하위 호환,
+            # offset_path_tag와 동일 원칙).
+            spec.params["offset_amp"] = self.offset_amp
         return spec

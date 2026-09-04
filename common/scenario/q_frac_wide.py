@@ -205,6 +205,7 @@ class QFracWideSegmenter(Segmenter):
         cell_id: str,
         cycle: int,
         q: np.ndarray,
+        dt: np.ndarray | None = None,
     ) -> float:
         return float(q[-1]) if len(q) > 0 else 0.0
 
@@ -222,7 +223,7 @@ class QFracWideSegmenter(Segmenter):
         seg_local_start: int,
         rand_rng: "np.random.Generator | None" = None,
     ) -> tuple[list[SegmentRecord], int]:
-        q_tot = self._normalizer(direction, cell_id, cycle, q)
+        q_tot = self._normalizer(direction, cell_id, cycle, q, dt)
         if q_tot < 0.05:
             return [], seg_local_start
 
