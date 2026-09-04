@@ -1672,6 +1672,23 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
             f"_sl-{int(round(seg.seg_len*100))}%_N-{seg.n_samples}"
             f"{_adaptive_suffix_tag(adaptive_cfg)}"
         )
+    elif axis == "q_frac_ref":
+        # 이전엔 dir_name="q_frac_ref" 고정이라 n2/lag/noise/calib/offset 설정이 달라도
+        # 같은 폴더·같은 파일명에 덮어썼다(§4.6 confound 방지 원칙 위반) — hi_correlation.py
+        # _qfref_tag와 같은 헬퍼(n2_path_tag/calib_path_tag/offset_path_tag)로 통일해 분리한다.
+        from common.scenario.q_frac_ref import n2_path_tag, calib_path_tag, offset_path_tag
+        _params = {
+            "n2": seg.n2, "n2_start": seg.n2_start, "n2_end": seg.n2_end, "n2_step": seg.n2_step,
+            "calibration_period": seg.calibration_period, "calibration_mode": seg.calibration_mode,
+            "calibration_jitter": seg.calibration_jitter, "offset_amp": seg.offset_amp,
+        }
+        minpts_sfx = f"_minpts{seg.min_pts}" if seg.min_pts != 10 else ""
+        dir_name = (
+            f"q_frac_ref_n1-{int(round(seg.n1*100))}%_{n2_path_tag(_params)}_N-{seg.n_samples}"
+            f"{minpts_sfx}_lag-{seg.ref_lag}_noise-{int(round(seg.noise_amp*100))}%_"
+            f"{seg.noise_mode}-{int(round(seg.noise_period_cycles))}"
+            f"{calib_path_tag(_params)}{offset_path_tag(_params)}"
+        )
     else:
         dir_name = axis
     out_dir = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / dir_name

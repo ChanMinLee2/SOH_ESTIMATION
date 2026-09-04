@@ -97,15 +97,26 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results" / "p1v2_runs"
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Phase1 v2 — 체크포인트 기준 변경 + temperature annealing")
     p.add_argument("--model-config", required=True)
-    p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
-    p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
+    p.add_argument("--seg-axis", default=None,
+                   help="미지정 시 --model-config yaml의 scenario.axis를 쓰고, "
+                        "그마저 없으면 DEFAULT_SEG_AXIS(q_frac_ref)로 폴백")
+    p.add_argument("--axis-config", default=None,
+                   help="미지정 시 --model-config yaml의 scenario.axis_config를 쓰고, "
+                        "그마저 없으면 DEFAULT_AXIS_CONFIG로 폴백 — 예전엔 CLI 기본값이 "
+                        "항상 DEFAULT_AXIS_CONFIG라 yaml에 뭘 적어놔도 조용히 무시됐다 "
+                        "(2026-09-04 수정 — yaml만으로 축 설정을 완결시킬 수 있게 함).")
     p.add_argument("--charge-m", type=int, default=None)
     p.add_argument("--discharge-m", type=int, default=None)
     p.add_argument("--scen-k", type=int, default=None)
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--split-seed", type=int, required=True)
-    p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로 (cfg['data']['data_dir'] 오버라이드)")
-    p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로 (cfg['data']['seg_data_dir'] 오버라이드)")
+    p.add_argument("--data-dir", default=None,
+                   help="cycle pkl 경로. 미지정 시 yaml의 data.data_dir, 그마저 없으면 "
+                        "DEFAULT_DATA_DIR(캐논 경로)로 폴백 — 예전엔 CLI 기본값이 항상 "
+                        "DEFAULT_DATA_DIR라 yaml 값이 있어도 조용히 무시됐다(2026-09-04 수정).")
+    p.add_argument("--seg-data-dir", default=None,
+                   help="seg pkl 경로. 미지정 시 yaml의 data.seg_data_dir, 그마저 없으면 "
+                        "DEFAULT_SEG_DATA_DIR로 폴백(위와 동일 수정).")
     p.add_argument("--beta-min", type=float, default=0.1, help="annealing 종착 BETA(기본 0.1, 원래값 2/3)")
     p.add_argument("--device", default="auto")
     p.add_argument("--max-epochs", type=int, default=None,
@@ -270,14 +281,28 @@ def main() -> None:
     np.random.seed(args.seed)
 
     cfg = load_config(str(PROJECT_ROOT / args.model_config))
-    axis_cfg = json.loads(args.axis_config)
-    cfg.setdefault("scenario", {})["axis"] = args.seg_axis
+
+    # 우선순위: CLI 명시 > yaml 값 > 이 파일의 DEFAULT_* 상수. 예전엔 --seg-axis/
+    # --axis-config/--data-dir/--seg-data-dir 전부 CLI 기본값이 DEFAULT_*로 고정돼
+    # 있어서(None이 아님) yaml에 뭘 적어놔도 매번 조용히 덮어썼다 — 이 4개를 한 번에
+    # 고쳐 yaml만으로 축 설정을 완결시킬 수 있게 한다(2026-09-04).
+    scenario_cfg = cfg.get("scenario", {}) or {}
+    seg_axis = args.seg_axis if args.seg_axis is not None else scenario_cfg.get("axis", DEFAULT_SEG_AXIS)
+    if args.axis_config is not None:
+        axis_cfg = json.loads(args.axis_config)
+    else:
+        axis_cfg = scenario_cfg.get("axis_config") or json.loads(DEFAULT_AXIS_CONFIG)
+    cfg.setdefault("scenario", {})["axis"] = seg_axis
     cfg["scenario"]["axis_config"] = axis_cfg
     cfg.setdefault("data", {})["split_seed"] = args.split_seed
     if args.data_dir is not None:
         cfg["data"]["data_dir"] = args.data_dir
+    elif not cfg["data"].get("data_dir"):
+        cfg["data"]["data_dir"] = DEFAULT_DATA_DIR
     if args.seg_data_dir is not None:
         cfg["data"]["seg_data_dir"] = args.seg_data_dir
+    elif not cfg["data"].get("seg_data_dir"):
+        cfg["data"]["seg_data_dir"] = DEFAULT_SEG_DATA_DIR
 
     cls_cfg = cfg.setdefault("classifier", {})
     reg_cfg = cfg.setdefault("regression", {})
@@ -288,7 +313,7 @@ def main() -> None:
     discharge_m = cls_cfg.get("discharge_probe_m", 10)
     scen_k = reg_cfg.get("scen_k_count", 5)
 
-    spec = get_segmenter(args.seg_axis, {args.seg_axis: axis_cfg}).get_spec()
+    spec = get_segmenter(seg_axis, {seg_axis: axis_cfg}).get_spec()
 
     # 데이터 경로: train_scr.py의 자동 경로계산(_axis_dir) 로직을 재사용하지 않으므로,
     # yaml에 없으면 --data-dir/--seg-data-dir로 직접 줘야 한다.
