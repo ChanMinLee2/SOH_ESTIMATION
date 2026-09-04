@@ -153,10 +153,10 @@ def load_dataset_native_seg(
                            for i in range(_spec.n_scenarios)}
             _id_to_lvl  = {i: _spec.scenario_to_dir_class(i)[1]
                            for i in range(_spec.n_scenarios)}
-            df["seg_idx"]   = df["segment_id"].astype(np.int64)
-            df["seg_name"]  = df["seg_idx"].map(_id_to_name)
-            df["direction"] = df["seg_idx"].map(_id_to_dir).astype(np.float32)
-            df["level"]     = df["seg_idx"].map(_id_to_lvl).astype(np.int64)
+            df["scen_idx"]   = df["segment_id"].astype(np.int64)
+            df["seg_name"]  = df["scen_idx"].map(_id_to_name)
+            df["direction"] = df["scen_idx"].map(_id_to_dir).astype(np.float32)
+            df["level"]     = df["scen_idx"].map(_id_to_lvl).astype(np.int64)
 
             # h_scen/h_intensity 보조손실 타깃 (docs/260803_RESULTS.md §10.8) — 이미
             # x_hi(hi_XX)에 포함되는 기존 HI를 그대로 재사용하므로 rename 전에 원본
@@ -174,7 +174,7 @@ def load_dataset_native_seg(
                 df[f"hi_{i:02d}"] = np.nan
 
             _hi_cols = [f"hi_{i:02d}" for i in range(N_HI)]
-            keep = (["cell_id", "cycle", "seg_name", "seg_idx", "scen",
+            keep = (["cell_id", "cycle", "seg_name", "scen_idx", "scen",
                      "direction", "level", "capacity_Ah"]
                     + _hi_cols)
             # 원시 곡선 컬럼(raw_v/raw_i/raw_t)이 있으면 함께 보존 (CNN 입력용)
@@ -296,7 +296,7 @@ class SegmentDataset(Dataset):
       nan_mask   : (N_HI,)   1.0 = valid, 0.0 = was NaN [float32]
       direction  : scalar     +1.0 or -1.0 [float32]
       level      : scalar     0/1/2 int64  (ground truth for classifier loss)
-      seg_idx    : scalar     0-5 int64
+      scen_idx    : scalar     0-5 int64
       target     : scalar     SOH ratio = capacity_Ah / cap_init_Ah ∈ (0, 1] [float32]
       dataset_id : scalar     데이터셋 인덱스 (datasets 리스트 순서, 0-based) [float32]
       cap_init   : scalar     z-scored 초기/정격 용량 Ah (모델 conditioning용) [float32]
@@ -324,7 +324,7 @@ class SegmentDataset(Dataset):
         self.x_raw = _build_raw_tensor(df)   # (N, RAW_CH, RAW_N) — CNN 입력 (구 pkl → zeros)
         self.direction = torch.tensor(df["direction"].values, dtype=torch.float32)
         self.level = torch.tensor(df["level"].values, dtype=torch.long)
-        self.seg_idx = torch.tensor(df["seg_idx"].values, dtype=torch.long)
+        self.scen_idx = torch.tensor(df["scen_idx"].values, dtype=torch.long)
 
         # ----------------------------------------------------------------
         # 메타 스칼라: dataset_id + cap_init
@@ -390,7 +390,7 @@ class SegmentDataset(Dataset):
             "nan_mask":  self.nan_mask[idx],
             "direction": self.direction[idx],
             "level":     self.level[idx],
-            "seg_idx":   self.seg_idx[idx],
+            "scen_idx":   self.scen_idx[idx],
             "target":    self.target[idx],
             "cap_init":  self.cap_init[idx],
             "aux_scen_target":      self.aux_scen_target[idx],
@@ -421,7 +421,7 @@ class FastTensorLoader:
     """
 
     _MODEL_KEYS = ["x_hi", "nan_mask", "direction", "level",
-                   "seg_idx", "target", "cap_init"]
+                   "scen_idx", "target", "cap_init"]
 
     def __init__(
         self,
@@ -477,7 +477,7 @@ def _subset_dataset(ds: "SegmentDataset", indices: list[int]) -> "SegmentDataset
     new_ds.nan_mask     = ds.nan_mask[indices]
     new_ds.direction    = ds.direction[indices]
     new_ds.level        = ds.level[indices]
-    new_ds.seg_idx      = ds.seg_idx[indices]
+    new_ds.scen_idx      = ds.scen_idx[indices]
     new_ds.target       = ds.target[indices]
     new_ds.cap_init     = ds.cap_init[indices]
     new_ds.aux_scen_target      = ds.aux_scen_target[indices]

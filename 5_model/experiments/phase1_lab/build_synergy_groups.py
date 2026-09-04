@@ -149,12 +149,12 @@ def _load_all_scenarios(args) -> tuple:
 
     x_all = train_ds.x_hi.numpy()
     y_all = train_ds.target.numpy()
-    seg_idx_all = train_ds.seg_idx.numpy()
+    scen_idx_all = train_ds.scen_idx.numpy()
     # 시나리오별 실제 HI 공식 이름 (get_hi_cols_for_seg는 seg 접미사만 다르고 순서는
     # 항상 동일 — hi_schema.py 참고) — hi_00 같은 자리표시자 대신 diff_dqdv_area_chg_lo처럼
     # 바로 읽을 수 있는 이름을 쓰기 위해 시나리오별로 하나씩 만들어둔다.
     names_by_seg = {s: get_hi_cols_for_seg(name) for s, name in enumerate(spec.scenario_names)}
-    return x_all, y_all, seg_idx_all, spec, names_by_seg
+    return x_all, y_all, scen_idx_all, spec, names_by_seg
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +375,7 @@ def build_groups_shuffled(
 
 def main() -> None:
     args = _parse_args()
-    x_all, y_all, seg_idx_all, spec, names_by_seg = _load_all_scenarios(args)
+    x_all, y_all, scen_idx_all, spec, names_by_seg = _load_all_scenarios(args)
 
     ref_report = None
     if args.shuffle_from:
@@ -392,7 +392,7 @@ def main() -> None:
 
     all_group_sizes: list[int] = []
     for s, seg_name in enumerate(tqdm(spec.scenario_names, desc="시나리오별 그룹 구성", unit="scenario")):
-        sel = seg_idx_all == s
+        sel = scen_idx_all == s
         x_scen, y_scen = x_all[sel], y_all[sel]
         if x_scen.shape[0] < 20:
             tqdm_write(f"[groups] {seg_name}: 표본 부족({x_scen.shape[0]}) — 스킵")

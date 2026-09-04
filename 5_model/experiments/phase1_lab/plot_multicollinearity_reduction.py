@@ -110,7 +110,7 @@ def main() -> None:
             break
     plt.rcParams["axes.unicode_minus"] = False
 
-    x_all, y_all, seg_idx_all, spec, names_by_seg = _load_all_scenarios(args)
+    x_all, y_all, scen_idx_all, spec, names_by_seg = _load_all_scenarios(args)
     before = json.loads(Path(args.before).read_text(encoding="utf-8"))
     after = json.loads(Path(args.after).read_text(encoding="utf-8"))
 
@@ -124,7 +124,7 @@ def main() -> None:
         key = f"seg_{s}_groups"
         if key not in before or key not in after:
             continue
-        sel = seg_idx_all == s
+        sel = scen_idx_all == s
         x_s = x_all[sel]
         n_hi = x_s.shape[1]
         raw_corr = np.nan_to_num(np.corrcoef(x_s, rowvar=False), nan=0.0)

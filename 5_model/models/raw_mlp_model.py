@@ -88,7 +88,7 @@ class RawMLPModel(nn.Module):
 
     @torch.no_grad()
     def get_probe_x(self, x_hi: torch.Tensor, direction: torch.Tensor,
-                     seg_idx: torch.Tensor) -> torch.Tensor:
+                     scen_idx: torch.Tensor) -> torch.Tensor:
         """SCREvaluator 호환용 — raw 모델은 HI 게이트가 없으므로 x_hi를 그대로 반환."""
         return x_hi
 

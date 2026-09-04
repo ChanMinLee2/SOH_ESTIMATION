@@ -158,6 +158,42 @@ class QFracWideSegmenter(Segmenter):
             return np.array([(lo + hi) / 2.0])
         return np.linspace(lo, hi, self.n_samples)
 
+    # ── 세그먼트 배치 훅 (2026-09-03) ────────────────────────────────────────
+    # 고정폭 격자 모드에서 "이 존을 어떤 (시작, 끝) 조각들로 자를지"를 결정하는 훅.
+    # 기본구현 = 기존 동작 그대로(길이 n2 고정, _start_positions 균등격자, 상한 배타).
+    # QFracRefSegmenter가 n2 범위 모드(n2_start/n2_end)에서 이 훅만 오버라이드해
+    # 가변 길이 타일링을 반환한다 — _extract 본체는 건드리지 않는다.
+
+    def _segment_plan(
+        self,
+        zone_start: float,
+        zone_end: float,
+        cell_id: str,
+        cycle: int,
+        direction: int,
+        zone_name: str,
+        q: np.ndarray,
+        q_tot: float,
+    ) -> list[tuple[float, float, bool, dict | None]]:
+        """(start_qf, end_qf, include_hi, extra_meta) 목록.
+
+        include_hi=True면 상한을 포함(q <= hi). extra_meta는 그 세그먼트의 meta에
+        덧붙일 dict(없으면 None).
+        q/q_tot은 기본구현에선 안 쓰지만, 오버라이드 쪽이 "이 조각에 실제로 포인트가
+        몇 개 들어가는지"를 보고 배치를 조정(min_pts 병합 등)할 수 있게 넘겨준다.
+        """
+        return [(float(s), float(s) + self.n2, False, None)
+                for s in self._start_positions(zone_start, zone_end)]
+
+    def _track_zone_coverage(self) -> bool:
+        """True면 고정폭 격자 모드에서도 존 포인트 커버리지를 self.coverage에 집계.
+
+        기본 False — 격자 모드는 설계상 존을 다 덮지 않으므로(균등격자 + 고정 n2)
+        집계해봐야 의미가 없고, 기존 런의 출력(coverage_stats.txt 생성 여부)도
+        바뀌지 않게 하기 위함. n2 범위 모드(100% 커버리지가 조건)에서만 켠다.
+        """
+        return False
+
     # ── 분모(q_tot) 산출 훅 ──────────────────────────────────────────────────
     # 기본구현: 이 세션(사이클) 자신의 전류적산 최종값 — q_frac_wide 원래 정의.
     # QFracRefSegmenter(q_frac_ref.py)가 이 메서드만 오버라이드해 과거 레퍼런스
@@ -236,22 +272,39 @@ class QFracWideSegmenter(Segmenter):
                 continue
 
             # ── 기존(고정폭 격자) 모드 ──────────────────────────────────────────
-            starts = self._start_positions(zone_start, zone_end)
-            if len(starts) == 0:
+            plan = self._segment_plan(
+                zone_start, zone_end, cell_id, cycle, direction, zone_name, q, q_tot)
+            if not plan:
                 continue
 
-            for start_qf in starts:
-                end_qf = start_qf + self.n2
+            track_cov = self._track_zone_coverage()
+            if track_cov:
+                # 존 전체 포인트(상·하한 모두 포함) 대비 실제로 방출된 세그먼트가
+                # 덮은 포인트 비율 — 겹침은 1회만 집계.
+                zmask   = (q >= zone_start * q_tot) & (q <= zone_end * q_tot)
+                covered = np.zeros(len(q), dtype=bool)
+
+            for start_qf, end_qf, include_hi, extra_meta in plan:
                 lo_q   = start_qf * q_tot
                 hi_q   = end_qf   * q_tot
-                m      = (q >= lo_q) & (q < hi_q)
+                m      = ((q >= lo_q) & (q <= hi_q)) if include_hi else ((q >= lo_q) & (q < hi_q))
                 n_pts  = int(m.sum())
                 self.n_attempted[sname] = self.n_attempted.get(sname, 0) + 1
                 self.candidate_n_points.setdefault(sname, []).append(n_pts)
                 if n_pts < self.min_pts:
                     continue
                 self.n_yielded[sname] = self.n_yielded.get(sname, 0) + 1
+                if track_cov:
+                    covered |= m
 
+                _meta = {
+                    "zone":      zone_name,
+                    "q_frac_lo": start_qf,
+                    "q_frac_hi": end_qf,
+                    "seg_len":   float(end_qf - start_qf),
+                }
+                if extra_meta:
+                    _meta.update(extra_meta)
                 records.append(SegmentRecord(
                     cell_id=cell_id,
                     cycle=cycle,
@@ -260,13 +313,14 @@ class QFracWideSegmenter(Segmenter):
                     latent_class=_latent,
                     direction=direction,
                     v=v[m], i=i[m], dt=dt[m], q=q[m],
-                    meta={
-                        "zone":      zone_name,
-                        "q_frac_lo": start_qf,
-                        "q_frac_hi": end_qf,
-                    },
+                    meta=_meta,
                 ))
                 seg_local += 1
+
+            if track_cov:
+                c = self.coverage.setdefault(sname, [0, 0])
+                c[0] += int((covered & zmask).sum())
+                c[1] += int(zmask.sum())
 
         return records, seg_local
 

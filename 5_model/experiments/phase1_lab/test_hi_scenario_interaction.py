@@ -183,7 +183,7 @@ def main() -> None:
               f"특이 {n_sig}개, 무작위 배정)")
         return
 
-    x_all, y_all, seg_idx_all, spec, names_by_seg = _load_all_scenarios(args)
+    x_all, y_all, scen_idx_all, spec, names_by_seg = _load_all_scenarios(args)
     n_hi = x_all.shape[1]
     n_scen = spec.n_scenarios
 
@@ -196,7 +196,7 @@ def main() -> None:
     r_by_scen = np.zeros((n_hi, n_scen))
     n_by_scen = np.zeros(n_scen, dtype=int)
     for s in range(n_scen):
-        sel = seg_idx_all == s
+        sel = scen_idx_all == s
         n_by_scen[s] = int(sel.sum())
         x_s, y_s = x_all[sel], y_all[sel]
         for i in range(n_hi):

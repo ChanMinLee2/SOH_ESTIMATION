@@ -2,12 +2,7 @@
 run_pipeline.py
 
 LFP SOH Prediction 전체 파이프라인 실행기.
-데이터 전처리(Step 1~5)부터 모델 학습/평가(Step 6~9)까지 지원.
-
-2026-07-30: Step 7(분류기)/Step 8(Phase 2) 순서를 재배치했다 — 분류기는 Phase 1
-게이트만 있으면 학습되므로(회귀와 완전 분리) Phase 2보다 먼저 돌리고, Phase 2가
---with-raw-cnn으로 그 분류기의 CNN을 바로 재사용할 수 있게 했다(REGRESSION_UPGRADE.md
-§8/§10). Step 6=Phase1, Step 7=분류기, Step 8=Phase2, Step 9=평가.
+데이터 전처리(Step 1~5)부터 모델 학습/평가(Step 6~7)까지 지원.
 
 2026-08-15: Step 4(HI 추출)가 예전엔 항상 `--force`로 캐시를 무시하고 재추출했다
 (코드/파라미터를 바꾸고 전체 파이프라인을 처음부터 돌릴 때 낡은 캐시를 실수로 쓰는 걸
@@ -20,50 +15,75 @@ LFP SOH Prediction 전체 파이프라인 실행기.
 그대로면 옛 캐시를 조용히 재사용할 수 있으니, 그런 축의 파라미터를 바꿀 땐
 `--force-extract`를 꼭 같이 줘야 한다.
 
+2026-09-03: Step 6(SCR Phase 1)을 원본 `train_scr.py --phase 1`("Stage0")에서
+`5_model/experiments/phase1_lab/phase1_trainer_v2.py`(v0~v5 게이트 안정화 계보)로
+교체하고, 기본 레시피를 v4로 맞췄다(`--model-config 5_model/config/main_qfref_S.yaml`
++ kernel_v3 features + N2 interaction json, docs/260827_RESULTS.md 기준). Step 6은
+`--phase1-model-config`/`--kernel-features-pkl`/`--interaction-json`/
+`--specific-group-ids-json`/`--p1-tag`로 다른 버전(v0/v2/v3/v5)도 재현 가능하다.
+phase1_trainer_v2.py는 `--seed`/`--split-seed`가 필수 인자라 미지정 시 42로 자동
+채워지고, `--exclude-cv`/`--skip-shape` 플래그는 아예 없어 Step 6에는 전달되지 않는다
+(경고만 출력). 또한 v0~v5 체크포인트는 전부 `SOH_EXCLUDE_STAT_LEAK=1`(N_HI=64) 기준이라
+Step 6~7 하위 프로세스 환경에 자동으로 이 값을 심는다.
+
+2026-09-03(같은 날, 후속): 구 Step 7(시나리오 분류기, `train_classifier.py`)과
+구 Step 8(SCR Phase 2, `train_scr.py --phase 2`)을 파이프라인에서 완전히 제거했다.
+phase1_trainer_v2.py(Step 6)가 probe게이트+시나리오게이트+cap_head를 전부 포함한
+**단일 통합 모델**을 한 번에 학습하므로, 원래 2단계로 나뉘어 있던 "시나리오 분류 →
+그 분류 결과로 회귀 헤드 미세조정"이라는 구조 자체가 더 이상 없다 — Phase 1 학습
+결과물이 곧 최종 산출물이다. 이에 따라 구 Step 9(평가, `test_scr.py`)도
+`5_model/experiments/phase1_lab/test_phase1_checkpoint.py`로 교체해 Step 6이 만든
+run_dir을 직접 평가하는 Step 7로 재배치했다. **별도 분류기 학습 스텝은 없어졌지만
+hard/soft 라우팅 평가 자체는 사라지지 않았다** — phase1_trainer_v2.py가 기본으로 쓰는
+lambda_scen>0 설정에서는 SCRModel 안에 probe_mlp라는 dual-objective 분류 헤드가 회귀와
+함께 CE로 학습되고(scr_model.py), test_phase1_checkpoint.py가 이 probe_mlp를
+SCREvaluator에 그대로 라우팅 분류기로 연결해 oracle/hard/soft를 전부 평가한다(2026-09-03
+복원, 별도 학습 스텝 불필요) — lambda_scen=0인 체크포인트만 oracle 단독으로 떨어진다.
+스텝 번호가 1~7로 당겨졌으므로(구 6/9 → 신 6/7), 예전 `--to-step 8`이나
+`--gates-from`/`--with-raw-cnn`/`--skip-classifier` 같은 Phase2·분류기 전용 옵션을
+쓰던 스크립트/문서는 갱신이 필요하다.
+
 사용:
   python run_pipeline.py                          # 전체 파이프라인 (Step 1부터)
   python run_pipeline.py 2                        # Step 2부터 재실행
-  python run_pipeline.py 6                        # 학습/평가만 (Step 6~9)
-  python run_pipeline.py 6 --to-step 8            # Phase1→분류기→Phase2 학습만(평가 제외)
-  python run_pipeline.py 6 --to-step 8 --with-raw-cnn  # 위와 동일 + Phase2에 raw CNN 융합(방안 a, 단일 패스)
-  python run_pipeline.py 9                         # 평가만(직전 Phase2 run의 best.pt 자동 탐색)
+  python run_pipeline.py 6                        # 학습+평가만 (Step 6~7, v4 기본)
+  python run_pipeline.py 6 --to-step 6            # 학습만(평가 제외)
+  python run_pipeline.py 7                        # 평가만(직전 Phase 1 run 자동 탐색)
   python run_pipeline.py 3 --workers 8
-  python run_pipeline.py --model-config 5_model/config/scr.yaml
+  python run_pipeline.py 6 --seed 0 --split-seed 0 --p1-tag p1v4_seed0
   python run_pipeline.py 4 --to-step 4 --force-extract --seg-axis random_grid --axis-config '{...}'  # 캐시 무시하고 강제 재추출
 """
 
 import argparse
 import os
-import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-MODEL_OUTPUT_DIR = ROOT / "_5_data_model_scr"
-_RUN_DIR_RE = re.compile(r"_p(\d+)_")  # train_scr.py 명명 규칙: {MMDD_HHMM}_p{phase}_...
+
+# phase1_trainer_v2.py는 "{MMDD_HHMM}_p1v2_{tag}_seed{seed}" 형식으로 저장한다.
+P1V2_RUNS_DIR = ROOT / "5_model" / "experiments" / "phase1_lab" / "results" / "p1v2_runs"
+
+# v4의 실제 학습 레시피(docs/260827_RESULTS.md "v4 정식 학습 결과" 절 그대로) — 다른
+# 버전(v0/v2/v3/v5)으로 돌리고 싶으면 --kernel-features-pkl/--interaction-json/
+# --specific-group-ids-json을 CLI로 덮어쓰면 된다(v0=둘 다 비우고 --synergy-groups-json,
+# v2/v3=--interaction-json만 빼고 kernel만, v5=--specific-group-ids-json 추가).
+P1V4_KERNEL_FEATURES_PKL = ("5_model/experiments/phase1_lab/results/"
+                             "kernel_group_features_k25_full_N2_kernel_v3.pkl")
+P1V4_INTERACTION_JSON = ("5_model/experiments/phase1_lab/results/"
+                          "hi_scenario_interaction_k25_full_N2.json")
 
 # (번호, 이름, 스크립트 경로, 기본 추가 인자, --workers 지원 여부)
-#
-# 2026-07-30 재배치: 분류기(구 Step 8)를 Phase 2(구 Step 7) 앞으로 옮겼다.
-# train_classifier.py는 원래도 Phase 1 게이트(run_dir/gates/*)만 있으면 동작했고
-# Phase 2 가중치는 전혀 안 썼다(회귀와 완전 분리 설계) — 다만 체크포인트 저장 위치가
-# "그 run_dir"이었을 뿐이라 관례상 Phase 2 뒤에 뒀었다. Phase 2가 with_raw_cnn으로
-# 그 분류기의 CNN을 재사용(REGRESSION_UPGRADE.md §8 방안 a)하려면 분류기가 먼저
-# 학습돼 있어야 하므로, Phase 2를 두 번 돌리지 않도록 순서를 Phase1→분류기→Phase2로
-# 바꿨다. 기존 run(분류기가 Phase 2 폴더 안에 저장됨)은 test_scr.py가 레거시 위치를
-# 우선 탐색해 그대로 호환된다(_resolve_classifier_ckpt 참조).
 STEPS = [
     (1, "데이터 변환",          "1_convert/convert_unified.py",    ["--dataset", "all"], True),
     (2, "이상 사이클 제거",     "2_preprocess/preprocess.py",       [],                   True),
     (3, "무결성 검사",          "3_integrity/check_integrity.py",   [],                   True),
     (4, "HI 상관 분석",         "4_hi_analysis/hi_correlation.py",  [],                   True),
     (5, "HI 세그먼트 시각화",   "4_hi_analysis/hi_segment_viz.py",  [],                   True),
-    (6, "SCR Phase 1 학습",     "5_model/train_scr.py",             ["--phase", "1"],     False),
-    (7, "시나리오 분류기 학습", "5_model/train_classifier.py",       [],                   False),
-    (8, "SCR Phase 2 학습",     "5_model/train_scr.py",             ["--phase", "2"],     False),
-    (9, "SCR 평가",             "5_model/test_scr.py",              [],                   False),
+    (6, "SCR Phase 1 학습(v4)", "5_model/experiments/phase1_lab/phase1_trainer_v2.py",     [], False),
+    (7, "Phase 1 평가",         "5_model/experiments/phase1_lab/test_phase1_checkpoint.py", [], False),
 ]
 
 
@@ -76,41 +96,23 @@ def _fmt_time(sec: float) -> str:
     return f"{m}분 {s}초" if m else f"{s}초"
 
 
-def _snapshot_run_dirs() -> set[Path]:
-    """현재 MODEL_OUTPUT_DIR 내 디렉터리 집합 스냅샷."""
-    if not MODEL_OUTPUT_DIR.exists():
+def _snapshot_p1v2_run_dirs() -> set[Path]:
+    """현재 P1V2_RUNS_DIR 내 디렉터리 집합 스냅샷 (phase1_trainer_v2.py 전용)."""
+    if not P1V2_RUNS_DIR.exists():
         return set()
-    return {d for d in MODEL_OUTPUT_DIR.iterdir() if d.is_dir()}
+    return {d for d in P1V2_RUNS_DIR.iterdir() if d.is_dir()}
 
 
-def _find_new_run_dir(before: set[Path], phase: int | None = None) -> Path | None:
-    """스냅샷 이후 새로 생긴 run 디렉터리 반환. 없으면 가장 최신 run 디렉터리.
-
-    train_scr.py가 만드는 run 디렉터리 이름 패턴('_p{phase}_' 포함)에 맞는 것만
-    후보로 삼는다 — 이 필터가 없으면 파이프라인 실행 도중 우연히 mtime이 더 최근으로
-    갱신된 무관한 폴더(사용자가 수동으로 정리/이동해 만든 폴더 등)를 잘못 골라
-    --gates-from/--run-dir/--checkpoint 에 엉뚱한 경로가 들어갈 수 있다.
-    phase 지정 시 해당 phase(_p{phase}_)만 후보로 제한.
-    """
-    if not MODEL_OUTPUT_DIR.exists():
+def _find_new_p1v2_run_dir(before: set[Path]) -> Path | None:
+    """스냅샷 이후 새로 생긴 p1v2 run 디렉터리 반환. 없으면 가장 최신 디렉터리."""
+    if not P1V2_RUNS_DIR.exists():
         return None
-    after = {d for d in MODEL_OUTPUT_DIR.iterdir() if d.is_dir() and _RUN_DIR_RE.search(d.name)}
-    if phase is not None:
-        after = {d for d in after if f"_p{phase}_" in d.name}
+    after = {d for d in P1V2_RUNS_DIR.iterdir() if d.is_dir()}
     new = after - before
     if new:
         return max(new, key=lambda d: d.stat().st_mtime)
-    # fallback: 가장 최근 수정 run 디렉터리
     all_dirs = sorted(after, key=lambda d: d.stat().st_mtime)
     return all_dirs[-1] if all_dirs else None
-
-
-def _find_checkpoint(run_dir: Path | None) -> str | None:
-    """run 디렉터리에서 best.pt 경로 반환."""
-    if run_dir is None:
-        return None
-    ckpt = run_dir / "checkpoints" / "best.pt"
-    return str(ckpt) if ckpt.exists() else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,21 +126,27 @@ def run_step(
     extra_args: list,
     use_workers: bool,
     workers: int,
-    model_config: str,
+    model_config: str | None,
+    config_flag: str | None = None,
+    extra_env: dict | None = None,
 ) -> bool:
     cmd = [sys.executable, str(ROOT / script)] + extra_args
     if use_workers:
         cmd += ["--workers", str(workers)]
-    elif "--config" not in extra_args:
-        cmd += ["--config", model_config]
+    elif config_flag and config_flag not in extra_args:
+        cmd += [config_flag, model_config]
 
     print(f"\n{'='*60}")
     print(f"  Step {num}  {name}")
     print(f"  $ {' '.join(str(a) for a in cmd)}")
     print(f"{'='*60}")
 
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+
     t0 = time.time()
-    result = subprocess.run(cmd, cwd=str(ROOT))
+    result = subprocess.run(cmd, cwd=str(ROOT), env=env)
     elapsed = time.time() - t0
 
     ok = result.returncode == 0
@@ -162,7 +170,7 @@ def _ask_continue(num: int) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LFP SOH 파이프라인 실행기 (데이터 전처리 → 모델 학습/평가)",
+        description="LFP SOH 파이프라인 실행기 (데이터 전처리 → Phase 1 통합 학습/평가)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="스텝 목록:\n" + "\n".join(
             f"  {n}  {name}" for n, name, _, _, _ in STEPS
@@ -177,12 +185,6 @@ def main():
         help=f"종료 스텝 번호 포함 (미지정 시 끝까지, 범위: 1~{len(STEPS)})",
     )
     parser.add_argument(
-        "--skip-classifier", action="store_true",
-        help="Step 7(시나리오 분류기 학습) 건너뛰기 — test_scr.py가 분류기 체크포인트 "
-             "없으면 자동으로 oracle 모드만 평가하므로 안전함(2026-08-12). "
-             "hard/soft 라우팅 비교가 필요 없을 때 학습 시간 절약용.",
-    )
-    parser.add_argument(
         "--workers", type=int, default=min(8, os.cpu_count() or 1),
         help="데이터 스텝(1~5)에 전달할 병렬 프로세스 수 (기본: 8)",
     )
@@ -195,23 +197,63 @@ def main():
              "조용히 재사용함).",
     )
     parser.add_argument(
-        "--model-config", default="5_model/config/scr.yaml",
-        help="모델 학습/평가 설정 파일 (기본: 5_model/config/scr.yaml)",
+        "--phase1-model-config", default="5_model/config/main_qfref_S.yaml",
+        dest="phase1_model_config",
+        help="Step 6(phase1_trainer_v2.py) 모델 설정 파일 (기본: main_qfref_S.yaml — "
+             "v4 학습에 실제로 쓰인 설정).",
+    )
+    parser.add_argument(
+        "--kernel-features-pkl", default=P1V4_KERNEL_FEATURES_PKL,
+        dest="kernel_features_pkl",
+        help="Step 6 전용 — 커널 특징 pkl 경로 (기본: v4가 쓴 kernel_v3 파일). "
+             "빈 문자열('')이면 전달하지 않음(v0 재현 등).",
+    )
+    parser.add_argument(
+        "--interaction-json", default=P1V4_INTERACTION_JSON,
+        dest="interaction_json",
+        help="Step 6/7 전용 — HI x 시나리오 상호작용 JSON 경로 (기본: v4가 쓴 파일). "
+             "학습(6)과 평가(7) 양쪽에 동일하게 전달된다(v4 체크포인트는 이 파일 경로가 "
+             "p1v2_summary.json에 자동 기록되지 않아 평가 시에도 다시 필요함). "
+             "빈 문자열('')이면 전달하지 않음(v0/v2/v3 재현 등).",
+    )
+    parser.add_argument(
+        "--specific-group-ids-json", default=None, dest="specific_group_ids_json",
+        help="Step 6/7 전용 — v5(그룹 게이팅) 계보를 재현할 때만 지정. 기본은 미사용(v4 방식).",
+    )
+    parser.add_argument(
+        "--p1-tag", default="p1v4_full", dest="p1_tag",
+        help="Step 6 phase1_trainer_v2.py의 --tag (run 디렉터리 이름에 들어감, 기본: p1v4_full)",
+    )
+    parser.add_argument(
+        "--rep-cells", nargs="+", default=None, dest="rep_cells",
+        help="Step 7 평가 시 용량곡선 비교 플랏을 그릴 셀 ID(들) (미지정 시 데이터셋별 1개 자동 선정)",
+    )
+    parser.add_argument(
+        "--export-for-visualize", action="store_true", dest="export_for_visualize",
+        help="Step 7 평가 결과를 visualize_results.py가 읽을 수 있는 "
+             "metrics/predictions/routing 파일로 run_dir에 추가 저장",
     )
     parser.add_argument(
         "--seg-axis", default=None, metavar="AXIS",
-        help="세그멘테이션 축 (Step 4~6, 8에 전달 — 분류기(Step 7)는 run_dir의 "
-             "scenario_spec.json에서 축을 읽으므로 이 옵션이 필요 없음). 예: qfrac, q_frac_wide",
+        help="세그멘테이션 축 (Step 4~6에 전달). 예: qfrac, q_frac_wide, q_frac_ref",
     )
     parser.add_argument(
         "--axis-config", default=None, metavar="JSON",
-        help="축 파라미터 JSON (Step 4~6, 8에 전달). 예: '{\"n1\": 0.4, \"n2\": 0.2, \"n_samples\": 4}'",
+        help="축 파라미터 JSON (Step 4~6에 전달). 예: '{\"n1\": 0.4, \"n2\": 0.2, \"n_samples\": 4}'",
     )
-    # 단축 인자 (PowerShell JSON 우회) — Step 4~6, 8에 그대로 전달
+    # 단축 인자 (PowerShell JSON 우회) — Step 4~6에 그대로 전달
     parser.add_argument("--n1",        type=float, default=None,
                         help="q_frac_wide 구간 크기 (--axis-config 대체, PowerShell 호환)")
     parser.add_argument("--n2",        type=float, default=None,
                         help="q_frac_wide 세그먼트 길이 (--axis-config 대체)")
+    parser.add_argument("--n2-start",  type=float, default=None, dest="n2_start",
+                        help="q_frac_ref n2 범위 모드 하한 — 세그먼트 길이를 고정하지 않고 "
+                             "{n2_start, +n2_step, ..., n2_end} 격자에서 랜덤 추첨(커버리지 100%% "
+                             "타일링). --n2-end와 반드시 함께 (--axis-config 대체)")
+    parser.add_argument("--n2-end",    type=float, default=None, dest="n2_end",
+                        help="q_frac_ref n2 범위 모드 상한 (--n2-start와 함께, --axis-config 대체)")
+    parser.add_argument("--n2-step",   type=float, default=None, dest="n2_step",
+                        help="q_frac_ref n2 격자 간격 (기본 0.1, --axis-config 대체)")
     parser.add_argument("--n-samples", type=int,   default=None, dest="n_samples",
                         help="q_frac_wide/vqslope 구간당 세그먼트 수 (--axis-config 대체)")
     # q_frac_ref 전용 단축 인자 (n1/n2/n_samples는 q_frac_wide와 공유해 위 인자 그대로 씀)
@@ -227,57 +269,75 @@ def main():
     parser.add_argument("--min-pts", type=int, default=None, dest="min_pts",
                         help="q_frac_wide/q_frac_ref 세그먼트 최소 포인트 수(기본 10, --axis-config 대체). "
                              "기본값과 다르면 '_minptsN' 접미사 경로에 별도 저장됨")
+    parser.add_argument("--calibration-period", type=int, default=None, dest="calibration_period",
+                        help="q_frac_ref 레퍼런스 재보정 주기(사이클 수) — N사이클마다 드리프트를 "
+                             "리셋(docs/260903_RESULTS.md §1). 미지정 시 재보정 없음(기존 동작). "
+                             "권장값 100 (--axis-config 대체)")
+    parser.add_argument("--calibration-mode", type=str, default=None, dest="calibration_mode",
+                        choices=["drift_only", "full"],
+                        help="재보정 시 무엇을 리셋할지 — drift_only(기본, OU만) | full(바이어스까지) "
+                             "(--axis-config 대체)")
+    parser.add_argument("--calibration-jitter", type=int, default=None, dest="calibration_jitter",
+                        help="재보정 주기를 ±jitter 사이클 흔듦(기본 0=정확히 주기대로). "
+                             "calibration_jitter < calibration_period 필요 (--axis-config 대체)")
+    parser.add_argument("--data-dir", default=None, dest="p1_data_dir",
+                        help="Step 6(phase1_trainer_v2.py) 전용 cycle pkl 경로 오버라이드. "
+                             "phase1_trainer_v2.py는 --axis-config만으로 데이터 경로를 자동 계산하지 "
+                             "않고 항상 자기 자신의 기본 경로(정식 q_frac_ref 캐논 설정)로 fallback "
+                             "하므로, n2 범위 모드·calibration 등 캐논이 아닌 축 설정으로 학습하려면 "
+                             "**반드시** 이 옵션과 --seg-data-dir을 함께 줘야 한다(안 주면 축 설정과 "
+                             "무관하게 조용히 캐논 데이터로 학습됨).")
+    parser.add_argument("--seg-data-dir", default=None, dest="p1_seg_data_dir",
+                        help="Step 6 전용 seg pkl 경로 오버라이드. --data-dir와 항상 같이 줄 것 "
+                             "(위 설명 참고).")
     parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
-                        help="충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외 (Step 4/6/7/8 전달). "
-                             "Step 4는 결과를 '_ccOnly' 접미사 경로에 저장하고, "
-                             "Step 6/7/8은 동일 접미사로 해당 데이터를 찾는다.")
+                        help="충전 세그먼트 HI에서 CC→CV 전환 이후 구간 제외 (Step 4 전달; "
+                             "Step 6=phase1_trainer_v2.py는 이 플래그가 없어 미전달, 경고만 출력). "
+                             "Step 4는 결과를 '_ccOnly' 접미사 경로에 저장한다.")
     parser.add_argument("--skip-shape", action="store_true", dest="skip_shape",
-                        help="전처리 필터7(형상 이상치 제거) 비활성화 (Step 2/4/6/7/8 전달). "
+                        help="전처리 필터7(형상 이상치 제거) 비활성화 (Step 2/4 전달; "
+                             "Step 6=phase1_trainer_v2.py는 이 플래그가 없어 미전달, 경고만 출력). "
                              "Step 2는 _4_data_hi/clean_noshape/에 저장하고, Step 4는 그 데이터로 "
-                             "'_noshape' 접미사 경로에 추출하며, Step 6/7/8은 동일 접미사로 "
-                             "해당 데이터를 찾는다.")
-    # m/k 오버라이드 (Step 6, 8에 그대로 전달 — train_scr.py --charge-m/--discharge-m/--scen-k.
-    # 분류기(Step 7)는 이 CLI 옵션이 없고 yaml classifier.charge_probe_m 등을 직접 읽음)
+                             "'_noshape' 접미사 경로에 추출한다.")
+    # m/k 오버라이드 (Step 6에 그대로 전달 — phase1_trainer_v2.py --charge-m/--discharge-m/--scen-k)
     parser.add_argument("--charge-m",    type=int, default=None,
-                        help="충전 probe 상위 m개 (yaml charge_probe_m 오버라이드, Step 6/8 전달)")
+                        help="충전 probe 상위 m개 (yaml charge_probe_m 오버라이드, Step 6 전달)")
     parser.add_argument("--discharge-m", type=int, default=None,
-                        help="방전 probe 상위 m개 (yaml discharge_probe_m 오버라이드, Step 6/8 전달)")
+                        help="방전 probe 상위 m개 (yaml discharge_probe_m 오버라이드, Step 6 전달)")
     parser.add_argument("--scen-k",      type=int, default=None,
-                        help="시나리오별 scen HI 수 (yaml scen_k_count 오버라이드, Step 6/8 전달)")
+                        help="시나리오별 scen HI 수 (yaml scen_k_count 오버라이드, Step 6 전달)")
     parser.add_argument("--seed",        type=int, default=None,
-                        help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (yaml training.seed 오버라이드, Step 6/8 전달)")
+                        help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (Step 6 전달, 기본 42)")
     parser.add_argument("--split-seed",  type=int, default=None,
-                        help="train/val/test 셀 분할 시드 (yaml data.split_seed 오버라이드, Step 6/8 전달)")
-    parser.add_argument("--gates-from", default=None, dest="gates_from_override",
-                        help="Step 8(Phase 2)이 쓸 gates 디렉터리를 수동 지정 (예: 다중시드 앙상블, "
-                             "특정 seed의 Phase1 run, 수정 전 baseline run 등 '가장 최근 Phase1 run' "
-                             "자동탐지로는 못 집는 디렉터리와 비교 실험할 때). 미지정 시 기존 동작(같은 "
-                             "실행의 Phase1 결과 → 없으면 가장 최근 Phase1 run 자동탐지) 그대로.")
-    parser.add_argument("--with-raw-cnn", action="store_true", dest="with_raw_cnn",
-                        help="Phase 2(Step 8)에 회귀 헤드 raw CNN 융합 적용 (REGRESSION_UPGRADE.md "
-                             "§5/§8/§10). Step 7에서 학습된 분류기의 RawCNN을 자동으로 얼려서 "
-                             "재사용한다(방안 a) — Step 6→9를 한 번에 돌리면 Phase 2를 두 번 학습할 "
-                             "필요 없이 단일 패스로 완료됨. yaml model.regression_model 등 다른 "
-                             "model 설정은 --model-config로 지정한 파일 그대로 사용됨")
+                        help="train/val/test 셀 분할 시드 (Step 6 전달, 기본 42)")
     args = parser.parse_args()
 
     # 단축 인자 → args.axis_config(JSON) 로 합침. 이후 기존 --axis-config 전달 로직이
-    # 모든 하위 스텝(4~7)에 올바른 JSON을 넘긴다. subprocess는 shell 없이 인자를 그대로
+    # 모든 하위 스텝(4~6)에 올바른 JSON을 넘긴다. subprocess는 shell 없이 인자를 그대로
     # 전달하므로 PowerShell 따옴표 벗김 문제가 발생하지 않는다.
     if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
             or args.ref_lag is not None or args.noise_amp is not None
             or args.noise_mode is not None or args.noise_period_cycles is not None
-            or args.min_pts is not None):
+            or args.min_pts is not None or args.n2_start is not None
+            or args.n2_end is not None or args.n2_step is not None
+            or args.calibration_period is not None or args.calibration_mode is not None
+            or args.calibration_jitter is not None):
         import json as _json
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
         if args.n2        is not None: _quick["n2"]        = args.n2
+        if args.n2_start  is not None: _quick["n2_start"]  = args.n2_start
+        if args.n2_end    is not None: _quick["n2_end"]    = args.n2_end
+        if args.n2_step   is not None: _quick["n2_step"]   = args.n2_step
         if args.n_samples is not None: _quick["n_samples"] = args.n_samples
         if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
         if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
         if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
         if args.noise_period_cycles is not None: _quick["noise_period_cycles"] = args.noise_period_cycles
         if args.min_pts is not None: _quick["min_pts"] = args.min_pts
+        if args.calibration_period is not None: _quick["calibration_period"] = args.calibration_period
+        if args.calibration_mode   is not None: _quick["calibration_mode"]   = args.calibration_mode
+        if args.calibration_jitter is not None: _quick["calibration_jitter"] = args.calibration_jitter
         args.axis_config = _json.dumps(_quick)
 
     to_step = args.to_step if args.to_step is not None else len(STEPS)
@@ -290,16 +350,19 @@ def main():
         parser.error("from_step 이 to_step 보다 클 수 없습니다.")
 
     selected = [s for s in STEPS if args.from_step <= s[0] <= to_step]
-    if args.skip_classifier:
-        selected = [s for s in selected if s[0] != 7]
 
     print("\n" + "="*60)
     print("  LFP SOH Prediction — 전체 파이프라인")
     print("="*60)
-    print(f"  스텝 범위   : {args.from_step} → {to_step}"
-          + ("  (Step 7 분류기 스킵)" if args.skip_classifier else ""))
+    print(f"  스텝 범위   : {args.from_step} → {to_step}")
     print(f"  병렬 워커   : {args.workers}  (데이터 스텝 전용)")
-    print(f"  모델 설정   : {args.model_config}")
+    if any(s[0] == 6 for s in selected):
+        print(f"  Phase1 설정 : {args.phase1_model_config}  (Step 6, phase1_trainer_v2.py)")
+        print(f"  Phase1 tag  : {args.p1_tag}")
+        print(f"  kernel-pkl  : {args.kernel_features_pkl or '(미사용)'}")
+        print(f"  interaction : {args.interaction_json or '(미사용)'}")
+        if args.specific_group_ids_json:
+            print(f"  group-ids   : {args.specific_group_ids_json}  (v5 계보)")
     if args.seg_axis:
         print(f"  seg-axis    : {args.seg_axis}")
     if args.axis_config:
@@ -324,16 +387,15 @@ def main():
     total_t0 = time.time()
     failed: list[int] = []
 
-    # Phase 간 디렉터리 핸드오프
+    # Phase 1 run_dir 핸드오프 (Step 6 → Step 7)
     p1_run_dir: Path | None = None
-    p2_run_dir: Path | None = None
     snapshot: set[Path] = set()
 
     for num, name, script, extra, use_workers in selected:
         step_extra = list(extra)
 
-        # ── 축 정보 주입 (Step 4~6, 8 — 분류기(7)는 run_dir의 scenario_spec.json에서 축을 읽음) ──
-        if num in (4, 5, 6, 8):
+        # ── 축 정보 주입 (Step 4~6) ──────────────────────────────────────────
+        if num in (4, 5, 6):
             if args.seg_axis:
                 step_extra += ["--seg-axis", args.seg_axis]
             if args.axis_config:
@@ -343,108 +405,115 @@ def main():
         if num == 4 and args.force_extract:
             step_extra += ["--force"]
 
-        # ── CV 제외 옵션 주입 (Step 4=추출, 6=Phase1, 7=분류기, 8=Phase2 — 모두 '_ccOnly' 경로 인지 필요) ──
-        if num in (4, 6, 7, 8) and args.exclude_cv:
+        # ── CV 제외 옵션 주입 (Step 4=추출만 — '_ccOnly' 경로 인지 필요).
+        #    Step 6(phase1_trainer_v2.py)은 --exclude-cv 플래그 자체가 없어 제외 — 아래
+        #    Step 6 전용 블록에서 경고만 출력한다. ──
+        if num == 4 and args.exclude_cv:
             step_extra += ["--exclude-cv"]
 
         # ── shape filter 비활성화 옵션 주입 (Step 2=전처리 자체가 필터7 스킵,
-        #    Step 4=추출, 6=Phase1, 7=분류기, 8=Phase2 — 모두 '_noshape' 경로 인지 필요) ──
-        if num in (2, 4, 6, 7, 8) and args.skip_shape:
+        #    Step 4=추출 — '_noshape' 경로 인지 필요).
+        #    Step 6은 --skip-shape 플래그가 없어 제외(아래 Step 6 전용 블록에서 경고) ──
+        if num in (2, 4) and args.skip_shape:
             step_extra += ["--skip-shape"]
 
-        # ── m/k 오버라이드 주입 (Step 6=Phase1, 8=Phase2 — 분류기(7)는 이 CLI 옵션이 없음) ──
-        if num in (6, 8):
+        # ── m/k/시드 오버라이드 주입 (Step 6=Phase1) ─────────────────────────
+        if num == 6:
             if args.charge_m is not None:
                 step_extra += ["--charge-m", str(args.charge_m)]
             if args.discharge_m is not None:
                 step_extra += ["--discharge-m", str(args.discharge_m)]
             if args.scen_k is not None:
                 step_extra += ["--scen-k", str(args.scen_k)]
-            if args.seed is not None:
-                step_extra += ["--seed", str(args.seed)]
-            if args.split_seed is not None:
-                step_extra += ["--split-seed", str(args.split_seed)]
+            # phase1_trainer_v2.py는 --seed/--split-seed가 required=True라 항상 값을
+            # 넘겨야 한다 — 미지정 시 42로 채운다.
+            _seed = args.seed if args.seed is not None else 42
+            _split_seed = args.split_seed if args.split_seed is not None else 42
+            if args.seed is None or args.split_seed is None:
+                print(f"\n  [안내] Step 6(phase1_trainer_v2.py)는 --seed/--split-seed가 "
+                      f"필수 인자라 미지정 값을 기본 42로 채웁니다 "
+                      f"(seed={_seed}, split-seed={_split_seed}).")
+            step_extra += ["--seed", str(_seed), "--split-seed", str(_split_seed)]
 
-        # ── Phase 1 전: 스냅샷 ──────────────────────────────────────────────
-        if num == 6:
-            snapshot = _snapshot_run_dirs()
+            step_extra += ["--tag", args.p1_tag]
+            if args.kernel_features_pkl:
+                step_extra += ["--kernel-features-pkl", args.kernel_features_pkl]
+            if args.interaction_json:
+                step_extra += ["--interaction-json", args.interaction_json]
+            if args.specific_group_ids_json:
+                step_extra += ["--specific-group-ids-json", args.specific_group_ids_json]
 
-        # ── 분류기 학습 전: Phase 1 run_dir 주입 (2026-07-30 재배치 — 분류기는 Phase 1
-        #    게이트만 있으면 되므로 Phase 2보다 먼저 학습해, Phase 2가 with_raw_cnn으로
-        #    이 분류기의 CNN을 그 자리에서 재사용할 수 있게 한다) ──────────────────────
+            # phase1_trainer_v2.py는 --axis-config만으로 데이터 경로를 자동 계산하지
+            # 않는다 — --data-dir/--seg-data-dir을 안 주면 자기 자신의 기본값(정식
+            # q_frac_ref 캐논 경로)으로 항상 fallback한다. n2 범위 모드·calibration처럼
+            # 캐논이 아닌 축 설정을 쓰면서 이걸 빠뜨리면, scenario_spec.json은 그
+            # 설정을 반영해 만들어지는데 실제로 로드되는 pkl은 캐논 데이터라는
+            # "spec과 데이터 불일치"가 조용히 발생한다 — 반드시 명시적으로 확인.
+            if args.p1_data_dir:
+                step_extra += ["--data-dir", args.p1_data_dir]
+            if args.p1_seg_data_dir:
+                step_extra += ["--seg-data-dir", args.p1_seg_data_dir]
+            _non_canon = (args.n2_start is not None or args.calibration_period is not None
+                          or (args.axis_config and args.axis_config != "{}"))
+            if _non_canon and not (args.p1_data_dir and args.p1_seg_data_dir):
+                print("\n  [경고] --seg-axis/--axis-config가 정식(캐논) q_frac_ref 설정과 다른데 "
+                      "--data-dir/--seg-data-dir을 안 줬습니다 — Step 6이 이 축 설정을 반영한 "
+                      "scenario_spec.json은 만들면서, 실제 pkl 데이터는 phase1_trainer_v2.py의 "
+                      "기본 캐논 경로에서 그대로 읽어버립니다(spec-데이터 불일치, 조용히 틀린 "
+                      "결과). Step 4로 미리 추출한 경로를 --data-dir/--seg-data-dir로 명시하세요.")
+
+            if args.exclude_cv or args.skip_shape:
+                print("\n  [경고] phase1_trainer_v2.py는 --exclude-cv/--skip-shape 옵션이 "
+                      "없습니다(train_scr.py 전용 플래그) — Step 6에는 전달하지 않습니다. "
+                      "해당 변형 데이터로 Phase 1을 학습하려면 --data-dir/--seg-data-dir을 "
+                      "phase1_trainer_v2.py에 직접 지정하는 별도 실행이 필요합니다.")
+            if os.environ.get("SOH_EXCLUDE_STAT_LEAK") != "1":
+                print("\n  [안내] SOH_EXCLUDE_STAT_LEAK=1 을 Step 6 하위 프로세스 환경에 "
+                      "자동 설정합니다(v0~v5 체크포인트 계보는 전부 N_HI=64 기준 — 이 값이 "
+                      "없으면 66으로 계산돼 shape 불일치가 납니다). Step 7도 동일 계보를 "
+                      "이어가야 하므로 같은 값을 물려받습니다.")
+
+            # Phase 1 학습 전 스냅샷 (phase1_trainer_v2.py는 p1v2_runs/ 전용 디렉터리 사용)
+            snapshot = _snapshot_p1v2_run_dirs()
+
+        # ── Step 7 전용: 평가할 run_dir + v4/v5 재구성에 필요한 인자 주입 ──────
         if num == 7:
-            clf_run = str(p1_run_dir) if p1_run_dir else None
-            if clf_run is None:
-                latest = _find_new_run_dir(set(), phase=1)
-                clf_run = str(latest) if latest else None
-            if clf_run:
-                step_extra += ["--run-dir", str(clf_run)]
-                print(f"\n  → run-dir (분류기): {clf_run}")
+            run_src = str(p1_run_dir) if p1_run_dir else None
+            if run_src is None:
+                latest = _find_new_p1v2_run_dir(set())
+                run_src = str(latest) if latest else None
+            if run_src:
+                step_extra += ["--run-dir", run_src]
+                print(f"\n  → run-dir (평가 대상): {run_src}")
             else:
                 print("\n  [경고] Phase 1 run 디렉터리를 찾을 수 없습니다. "
-                      "--run-dir 직접 지정 권장.")
+                      "--run-dir을 직접 지정하려면 test_phase1_checkpoint.py를 따로 실행하세요.")
+            # v4는 interaction_json이 p1v2_summary.json에 자동 기록되지 않으므로 학습 때와
+            # 동일한 값을 평가에도 다시 넘겨야 한다(스크립트 자체 docstring 참고).
+            if args.interaction_json:
+                step_extra += ["--interaction-json", args.interaction_json]
+            if args.specific_group_ids_json:
+                step_extra += ["--specific-group-ids-json", args.specific_group_ids_json]
+            if args.rep_cells:
+                step_extra += ["--rep-cells", *args.rep_cells]
+            if args.export_for_visualize:
+                step_extra += ["--export-for-visualize"]
 
-        # ── Phase 2 전: 스냅샷 + gates-from 주입 (+ --with-raw-cnn 자동 연결) ──────
-        if num == 8:
-            snapshot = _snapshot_run_dirs()
-            if args.gates_from_override:
-                gates_src = args.gates_from_override
-                print(f"\n  → gates-from (수동 지정): {gates_src}")
-            else:
-                gates_src = str(p1_run_dir) if p1_run_dir else None
-                if gates_src is None:
-                    latest = _find_new_run_dir(set(), phase=1)  # Phase 1 run 중 최신
-                    gates_src = str(latest) if latest else None
-                if gates_src:
-                    print(f"\n  → gates-from (자동탐지): {gates_src}")
-            if gates_src:
-                step_extra += ["--gates-from", gates_src]
-            else:
-                print("\n  [경고] Phase 1 run 디렉터리를 찾을 수 없습니다.")
+        # v0~v5 체크포인트 계보는 N_HI=64(SOH_EXCLUDE_STAT_LEAK=1) 기준으로 통일돼 있어야
+        # 하므로, phase1_trainer_v2.py를 쓰는 Step 6과 그걸 평가하는 Step 7에 동일 값을 준다.
+        _config_flag = "--model-config" if num == 6 else None
+        _step_model_config = args.phase1_model_config if num == 6 else None
+        _extra_env = {"SOH_EXCLUDE_STAT_LEAK": "1"} if num in (6, 7) else None
+        ok = run_step(num, name, script, step_extra, use_workers, args.workers,
+                       _step_model_config, config_flag=_config_flag, extra_env=_extra_env)
 
-            if args.with_raw_cnn:
-                step_extra += ["--with-raw-cnn"]
-                if gates_src:
-                    _clf_ckpt = Path(gates_src) / "classifier" / "clf_best.pt"
-                    if not _clf_ckpt.is_absolute():
-                        _clf_ckpt = ROOT / _clf_ckpt
-                    if _clf_ckpt.exists():
-                        step_extra += ["--raw-cnn-pretrained-from", str(_clf_ckpt)]
-                        print(f"  → raw-cnn-pretrained-from: {_clf_ckpt}")
-                    else:
-                        print(f"\n  [경고] --with-raw-cnn 지정했지만 분류기 체크포인트가 없습니다"
-                              f"({_clf_ckpt}) — RawCNN을 랜덤 초기화해 Phase2와 함께 학습합니다(방안 b).")
-
-        # ── 평가 전: checkpoint 주입 ─────────────────────────────────────────
-        if num == 9:
-            ckpt = _find_checkpoint(p2_run_dir)
-            if ckpt is None:
-                # fallback: 가장 최신 Phase 2 run의 best.pt
-                latest = _find_new_run_dir(set(), phase=2)
-                ckpt = _find_checkpoint(latest)
-            if ckpt:
-                step_extra += ["--checkpoint", ckpt]
-                print(f"\n  → checkpoint: {ckpt}")
-            else:
-                print("\n  [경고] 체크포인트를 찾을 수 없습니다. --checkpoint 직접 지정 권장.")
-
-        ok = run_step(num, name, script, step_extra, use_workers, args.workers, args.model_config)
-
-        # ── Phase 1 후: 신규 run dir 기록 ────────────────────────────────────
+        # ── Phase 1 후: 신규 run dir 기록 (phase1_trainer_v2.py → p1v2_runs/) ──────
         if num == 6:
-            p1_run_dir = _find_new_run_dir(snapshot, phase=1)
+            p1_run_dir = _find_new_p1v2_run_dir(snapshot)
             if p1_run_dir:
                 print(f"  → Phase 1 run dir: {p1_run_dir}")
             else:
                 print("  [경고] Phase 1 run 디렉터리를 감지하지 못했습니다.")
-
-        # ── Phase 2 후: 신규 run dir 기록 ────────────────────────────────────
-        if num == 8:
-            p2_run_dir = _find_new_run_dir(snapshot, phase=2)
-            if p2_run_dir:
-                print(f"  → Phase 2 run dir: {p2_run_dir}")
-            else:
-                print("  [경고] Phase 2 run 디렉터리를 감지하지 못했습니다.")
 
         if not ok:
             failed.append(num)

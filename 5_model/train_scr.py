@@ -532,7 +532,7 @@ def main() -> None:
     # spec(gates_from 시점 것)과 어긋날 수 있었다. 시나리오 축 코드(예: _ROUTING)가
     # gates_from run 이후 바뀌면, test_scr.py가 나중에 그 "어긋난" 파일을 읽어 "구"
     # 모델(옛 routing으로 학습됨)을 "신" routing으로 잘못 해석해 평가하게 되고, hard
-    # 라우팅·분류 정확도·routing_gap_pct가 전부 깨진다(oracle은 seg_idx를 직접 쓰므로
+    # 라우팅·분류 정확도·routing_gap_pct가 전부 깨진다(oracle은 scen_idx를 직접 쓰므로
     # 영향 없음 — docs/260731_RESULTS.md에서 실측으로 확인됨). build_datasets/spec.save
     # 전에 최종 spec을 먼저 확정해 이 어긋남 자체를 없앤다.
     _gates_dir: "Path | None" = None
@@ -560,24 +560,26 @@ def main() -> None:
     # n_scenarios=2 매핑 테이블(_id_to_lvl 등, segment_dataset.py)에 없는 값이 되고,
     # 그 결과 level 컬럼이 NaN → astype(int64)에서 pandas.errors.IntCastingNaNError가 난다.
     _assign_sfx = "" if _axis_cfg.get("assign", "position_bin") == "position_bin" else "_noscen"
+    # n2 조각: 고정 n2면 "n2-20%", q_frac_ref n2 범위 모드면 "n2-10~30%s10"
+    # (hi_correlation._qfw_tag / train_classifier / visualize_results 와 공통 규칙)
+    from common.scenario.q_frac_ref import n2_path_tag as _n2_path_tag, calib_path_tag as _calib_path_tag
+    _n2_frag = _n2_path_tag(_axis_cfg)
     # q_frac_wide: n1/n2/n_samples 별 하위 디렉터리 결정
     if _axis_name == "q_frac_wide":
         _n1 = int(round(_axis_cfg.get("n1", 0.4) * 100))
-        _n2 = int(round(_axis_cfg.get("n2", 0.2) * 100))
         _ns = int(_axis_cfg.get("n_samples", 4))
-        _axis_dir = f"q_frac_wide/n1-{_n1}%_n2-{_n2}%_N-{_ns}{_rand_sfx}{_minpts_sfx}{_assign_sfx}"
+        _axis_dir = f"q_frac_wide/n1-{_n1}%_{_n2_frag}_N-{_ns}{_rand_sfx}{_minpts_sfx}{_assign_sfx}"
     elif _axis_name == "q_frac_ref":
         # q_frac_ref: n1/n2/n_samples(q_frac_wide와 동일 규칙) + ref_lag/noise_amp
         # (hi_correlation._qfref_tag 와 동일 규칙)
         _n1 = int(round(_axis_cfg.get("n1", 0.4) * 100))
-        _n2 = int(round(_axis_cfg.get("n2", 0.2) * 100))
         _ns = int(_axis_cfg.get("n_samples", 4))
         _lag = int(_axis_cfg.get("ref_lag", 0))
         _noise = int(round(_axis_cfg.get("noise_amp", 0.03) * 100))
         _nmode = str(_axis_cfg.get("noise_mode", "ou"))
         _period = int(round(_axis_cfg.get("noise_period_cycles", 200.0)))
-        _axis_dir = (f"q_frac_ref/n1-{_n1}%_n2-{_n2}%_N-{_ns}{_rand_sfx}{_minpts_sfx}{_assign_sfx}"
-                     f"_lag-{_lag}_noise-{_noise}%_{_nmode}-{_period}")
+        _axis_dir = (f"q_frac_ref/n1-{_n1}%_{_n2_frag}_N-{_ns}{_rand_sfx}{_minpts_sfx}{_assign_sfx}"
+                     f"_lag-{_lag}_noise-{_noise}%_{_nmode}-{_period}{_calib_path_tag(_axis_cfg)}")
     elif _axis_name == "q_abs":
         # q_abs: mid_start/mid_end/seg_len/n_samples 별 하위 디렉터리 (hi_correlation._qabs_tag 와 동일)
         _ms = int(round(_axis_cfg.get("mid_start", 0.20) * 100))

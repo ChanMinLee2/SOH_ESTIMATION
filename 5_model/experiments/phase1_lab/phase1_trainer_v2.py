@@ -147,8 +147,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--interaction-json", default=None, dest="interaction_json",
                    help="test_hi_scenario_interaction.py 산출물 경로(v4). significant=True인 "
                         "HI만 기존 scen_gates(시나리오별)로 남기고, 나머지는 새 shared_gate "
-                        "1개로 통합한다. --synergy-groups-json과 동시 사용 불가(스코프 밖 — "
-                        "SCRModel도 shared_hi_mask+scen_group_ids 동시 사용을 막아둠).")
+                        "1개로 통합한다. --synergy-groups-json(v0의 64폭 그룹)과는 동시 사용"
+                        "불가 — --specific-group-ids-json(v5, 39폭 그룹)과는 함께 쓴다.")
+    p.add_argument("--specific-group-ids-json", default=None, dest="specific_group_ids_json",
+                   help="v5 전용: build_specific_component_groups.py 산출물. --interaction-json으로 "
+                        "좁혀진 특이(specific) HI 폭 안에서, scen_gates를 연결요소 기준 "
+                        "GroupedHardConcreteGate로 학습한다(docs/260901_V5_DESIGN.md). "
+                        "--interaction-json과 반드시 함께 줘야 하고, --synergy-groups-json/"
+                        "--kernel-features-pkl과는 각각의 기존 규칙을 그대로 따른다(전자는 "
+                        "상호배타, 후자는 v5도 v3 커널을 그대로 쓰므로 함께 줌).")
     p.add_argument("--l0-warmup-epochs-override", type=int, default=None,
                    dest="l0_warmup_epochs_override",
                    help="loss.lambda_l0_warmup_epochs을 이 값으로 강제 고정(yaml 값 무시). "
@@ -161,7 +168,14 @@ def _parse_args() -> argparse.Namespace:
                 "(커널 융합을 쓰면 그룹 정보가 이미 피처에 반영되어 게이트 레벨 그룹핑이 불필요함)")
     if args.interaction_json and args.synergy_groups_json:
         p.error("--interaction-json과 --synergy-groups-json은 동시에 줄 수 없습니다 "
-                "(SCRModel이 shared_hi_mask+scen_group_ids 동시 사용을 지원하지 않음)")
+                "(--synergy-groups-json은 64폭 전체 기준이라 --interaction-json이 좁히는 "
+                "specific 폭과 맞지 않음 — 그룹 게이팅을 같이 쓰려면 --specific-group-ids-json 사용)")
+    if args.specific_group_ids_json and not args.interaction_json:
+        p.error("--specific-group-ids-json은 --interaction-json 없이 줄 수 없습니다 "
+                "(specific 폭 자체가 --interaction-json의 shared/specific 분류로 정해짐)")
+    if args.specific_group_ids_json and args.synergy_groups_json:
+        p.error("--specific-group-ids-json과 --synergy-groups-json은 동시에 줄 수 없습니다 "
+                "(둘 다 scen_group_ids를 채우는 서로 다른 메커니즘 — 하나만 선택)")
     return args
 
 
@@ -333,6 +347,29 @@ def main() -> None:
         print(f"[p1v2] interaction-json 적용: {args.interaction_json} "
               f"({n_shared}/{len(shared_hi_mask)}개 HI -> shared_gate, "
               f"{len(shared_hi_mask) - n_shared}개 -> 기존 scen_gates)")
+
+    if args.specific_group_ids_json:
+        # v5: build_specific_component_groups.py 산출물 — seg_{s}_specific_group_ids는 이미
+        # specific 폭(len(specific_idx)) 기준 로컬 인덱스로 정렬돼 있어(그 스크립트가 concepts를
+        # 오름차순으로 순회해서 만듦) SCRModel의 _specific_idx 순서와 그대로 맞는다. 여기서
+        # 다시 재정렬/변환하지 않는다 — 하면 오히려 순서가 어긋날 위험만 생긴다.
+        spec_data = json.loads(Path(args.specific_group_ids_json).read_text(encoding="utf-8"))
+        if spec_data.get("n_specific") != int(shared_hi_mask.numel() - shared_hi_mask.sum().item()):
+            raise ValueError(
+                f"--specific-group-ids-json의 n_specific({spec_data.get('n_specific')})이 "
+                f"--interaction-json에서 나온 specific 개수"
+                f"({int(shared_hi_mask.numel() - shared_hi_mask.sum().item())})와 다릅니다 — "
+                f"같은 --interaction-json으로 만든 파일인지 확인하세요."
+            )
+        scen_group_ids = {
+            s: spec_data[f"seg_{s}_specific_group_ids"]
+            for s in range(spec.n_scenarios)
+            if f"seg_{s}_specific_group_ids" in spec_data
+        }
+        n_groups_total = sum(spec_data.get(f"seg_{s}_n_groups", 0) for s in range(spec.n_scenarios))
+        print(f"[p1v2] specific-group-ids-json 적용: {args.specific_group_ids_json} "
+              f"({len(scen_group_ids)}/{spec.n_scenarios}개 시나리오, 총 그룹 {n_groups_total}개, "
+              f"연결요소 기준 GroupedHardConcreteGate)")
 
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
@@ -520,6 +557,8 @@ def main() -> None:
         "synergy_n_groups": ({s: max(g) + 1 for s, g in scen_group_ids.items()}
                               if scen_group_ids else None),
         "kernel_features_pkl": args.kernel_features_pkl,
+        "interaction_json": args.interaction_json,
+        "specific_group_ids_json": args.specific_group_ids_json,
     }
     (output_dir / "p1v2_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[p1v2] 선택된 epoch={best_epoch} (gate_saturation={best_sat:.4f})")

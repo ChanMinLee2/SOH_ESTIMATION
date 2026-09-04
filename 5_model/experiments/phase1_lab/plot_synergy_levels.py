@@ -96,8 +96,8 @@ def _level1_scores(groups_data: dict) -> list[float]:
     return scores
 
 
-def _level2_gap_for_pkl(kernel_pkl: str, x_all, y_all, seg_idx_all, spec) -> list[tuple]:
-    """이미 로드된 (x_all, y_all, seg_idx_all, spec)로 kernel_pkl 하나의 Level2 gap을 계산.
+def _level2_gap_for_pkl(kernel_pkl: str, x_all, y_all, scen_idx_all, spec) -> list[tuple]:
+    """이미 로드된 (x_all, y_all, scen_idx_all, spec)로 kernel_pkl 하나의 Level2 gap을 계산.
     데이터 로딩(_load_train_split, ~1~2분)을 pkl 개수만큼 반복하지 않도록 _level2_gaps에서
     분리해뒀다 — plot_level2_gap_comparison.py(v1/v2/v3 여러 pkl 비교)가 이 함수를 재사용
     (중복 구현 금지)."""
@@ -108,7 +108,7 @@ def _level2_gap_for_pkl(kernel_pkl: str, x_all, y_all, seg_idx_all, spec) -> lis
     out = []
     for f in artifact["features"]:
         scen_idx = f["scenario"] if isinstance(f["scenario"], int) else spec.scenario_names.index(f["scenario"])
-        mask = seg_idx_all == scen_idx
+        mask = scen_idx_all == scen_idx
         x_group = x_all[mask][:, f["members"]]
         y = y_all[mask]
         lin = LinearRegression().fit(x_group, y)
@@ -127,8 +127,8 @@ def _level2_gaps(args) -> list[tuple] | None:
         return None
     from build_kernel_group_features import _load_train_split
 
-    x_all, y_all, seg_idx_all, spec, _ = _load_train_split(args)
-    return _level2_gap_for_pkl(args.kernel_pkl, x_all, y_all, seg_idx_all, spec)
+    x_all, y_all, scen_idx_all, spec, _ = _load_train_split(args)
+    return _level2_gap_for_pkl(args.kernel_pkl, x_all, y_all, scen_idx_all, spec)
 
 
 def main() -> None:

@@ -1447,8 +1447,11 @@ def _rand_suffix(axis_cfg: dict) -> str:
 
 def _qfw_tag(axis_cfg: dict) -> str:
     """q_frac_wide 파라미터 → 파일/디렉터리 식별 태그."""
+    from common.scenario.q_frac_ref import n2_path_tag
     n1 = int(round(axis_cfg.get("n1", 0.4) * 100))
-    n2 = int(round(axis_cfg.get("n2", 0.2) * 100))
+    # n2 조각: 고정 n2면 "n2-20%", q_frac_ref n2 범위 모드면 "n2-10~30%s10"
+    # (네 곳 공통 규칙 — common/scenario/q_frac_ref.n2_path_tag 참고)
+    n2_frag = n2_path_tag(axis_cfg)
     ns = int(axis_cfg.get("n_samples", 4))
     # 2026-08-10: min_pts 기본값(10)이 아니면 접미사 — 세그먼트 최소 포인트 임계값이
     # 달라지면 완전히 다른 데이터이므로 반드시 다른 경로에 저장(confound 방지, §4.6).
@@ -1457,7 +1460,7 @@ def _qfw_tag(axis_cfg: dict) -> str:
     # assign="none"(시나리오-only 대조군, docs/260816_RESULTS.md §5 no_scen)이면
     # 반드시 다른 경로에 저장 — position_bin(6시나리오)과 confound 방지(§4.6과 동일 원칙).
     assign_sfx = "" if axis_cfg.get("assign", "position_bin") == "position_bin" else "_noscen"
-    return f"n1-{n1}%_n2-{n2}%_N-{ns}{_rand_suffix(axis_cfg)}{minpts_sfx}{assign_sfx}"
+    return f"n1-{n1}%_{n2_frag}_N-{ns}{_rand_suffix(axis_cfg)}{minpts_sfx}{assign_sfx}"
 
 
 def _qfref_tag(axis_cfg: dict) -> str:
@@ -1465,13 +1468,16 @@ def _qfref_tag(axis_cfg: dict) -> str:
 
     n1/n2/N은 q_frac_wide와 동일 규칙(부모 클래스 파라미터 상속) + ref_lag/noise_amp/
     noise_period를 덧붙여 lag·노이즈 파라미터가 다르면 반드시 다른 경로에 저장되게 한다
-    (docs/SOC.md §6 Phase 3 "데이터 경로 분리 확인" — §4.6 confound 방지)."""
+    (docs/SOC.md §6 Phase 3 "데이터 경로 분리 확인" — §4.6 confound 방지). calibration_*
+    (docs/260903_RESULTS.md §1)이 있으면 calib_path_tag로 추가 접미사를 붙인다 —
+    미설정(기본)이면 빈 문자열이라 기존 경로와 100% 동일하게 유지된다."""
+    from common.scenario.q_frac_ref import calib_path_tag
     base = _qfw_tag(axis_cfg)
     lag = int(axis_cfg.get("ref_lag", 0))
     noise_pct = int(round(axis_cfg.get("noise_amp", 0.03) * 100))
     mode = str(axis_cfg.get("noise_mode", "ou"))
     period = int(round(axis_cfg.get("noise_period_cycles", 200.0)))
-    return f"{base}_lag-{lag}_noise-{noise_pct}%_{mode}-{period}"
+    return f"{base}_lag-{lag}_noise-{noise_pct}%_{mode}-{period}{calib_path_tag(axis_cfg)}"
 
 
 def _qabs_tag(axis_cfg: dict) -> str:
@@ -1492,14 +1498,25 @@ def _vqslope_tag(axis_cfg: dict) -> str:
 
 
 def _save_coverage_stats(path: Path, per_ds_cov: dict, axis: str, axis_cfg: dict) -> None:
-    """random_segment 누락 비율(샘플링되지 못한 존 포인트 비율)을 텍스트로 저장."""
+    """존 포인트 커버리지/누락 비율을 텍스트로 저장.
+
+    두 모드에서 채워진다 —
+      - random_segment=True: 랜덤 배치라 설계상 누락이 생김(그 비율을 재는 게 목적).
+      - q_frac_ref n2 범위 모드: 100% 커버리지가 **설계 조건**이므로, 여기 100% 미만이
+        찍히면 그건 "존 전체 포인트 수 < min_pts라 세그먼트를 못 만든 사이클"뿐이어야
+        한다(common/scenario/q_frac_ref.py 모듈 docstring 참고).
+    """
+    _n2_range = axis_cfg.get("n2_start") is not None and axis_cfg.get("n2_end") is not None
     order = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
     lines = [
         "=" * 72,
-        f"  random_segment 누락 비율 통계   (axis={axis}, cfg={json.dumps(axis_cfg, ensure_ascii=False)})",
+        f"  존 포인트 커버리지 통계   (axis={axis}, cfg={json.dumps(axis_cfg, ensure_ascii=False)})",
         "=" * 72,
-        "  누락 비율 = 1 - (어느 창에든 포함된 존 포인트 수 / 존 전체 포인트 수)",
-        "  (창 겹침은 covered 1회 집계; 랜덤 추출로 샘플링되지 못한 부분)",
+        "  누락 비율 = 1 - (어느 세그먼트에든 포함된 존 포인트 수 / 존 전체 포인트 수)",
+        ("  (n2 범위 모드: 랜덤 길이 타일링이라 커버율 100%가 조건 — 미달분은 "
+         "존 포인트 수 < min_pts인 사이클)"
+         if _n2_range else
+         "  (창 겹침은 covered 1회 집계; 랜덤 추출로 샘플링되지 못한 부분)"),
         "",
     ]
     for ds, cov in per_ds_cov.items():
@@ -1880,6 +1897,10 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
         _axis_dir = f"{_axis_dir}_noshape"
 
     _is_rand = bool(axis_cfg.get("random_segment", False))
+    # q_frac_ref n2 범위 모드 — 세그먼트 길이가 고정이 아니라 격자에서 랜덤 추첨되고,
+    # 존을 100% 덮도록 타일링된다(common/scenario/q_frac_ref.py 모듈 docstring).
+    _n2_range = (axis_cfg.get("n2_start") is not None
+                 and axis_cfg.get("n2_end") is not None)
     w = 64
     print("\n" + "=" * w)
     print("  HI 추출 실행 조건")
@@ -1890,6 +1911,15 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
     print(f"  random_segment  : {_is_rand}"
           + (f"  (seg_len_pts={int(axis_cfg.get('seg_len_pts', 20))}, "
              f"seed={int(axis_cfg.get('random_seed', 42))})" if _is_rand else "  (기존 격자 방식)"))
+    if _n2_range:
+        _step = float(axis_cfg.get("n2_step", 0.1))
+        _grid = [round(float(axis_cfg["n2_start"]) + j * _step, 10)
+                 for j in range(int(round((float(axis_cfg["n2_end"])
+                                           - float(axis_cfg["n2_start"])) / _step)) + 1)]
+        print(f"  n2 범위 모드     : True   길이 격자={_grid}  "
+              f"seed={int(axis_cfg.get('n2_seed', 20260903))}")
+        print(f"                    (존을 랜덤 길이로 타일링 — 커버리지 100% 보장, "
+              f"n_samples 무시)")
     print(f"  워커 수          : {getattr(args, 'workers', '?')}")
     print(f"  force 재추출     : {getattr(args, 'force', False)}")
     print(f"  exclude_cv      : {_exclude_cv}"
@@ -1924,6 +1954,17 @@ def main():
     parser.add_argument("--n-samples", type=int, default=None, dest="n_samples",
                         help="q_frac_wide/vqslope: 구간당 세그먼트 수. --axis-config 대체")
     # q_frac_ref 전용 단축 인자 (n1/n2/n_samples는 q_frac_wide와 공유해 위 인자 그대로 씀)
+    parser.add_argument("--n2-start", type=float, default=None, dest="n2_start",
+                        help="q_frac_ref: n2 범위 모드 하한 — 세그먼트 길이를 고정하지 않고 "
+                             "{n2_start, +n2_step, ..., n2_end} 격자에서 랜덤 추첨하고 존을 "
+                             "그 길이들로 타일링해 커버리지 100%%를 보장한다(n_samples 무시). "
+                             "--n2-end와 반드시 함께. --axis-config 대체")
+    parser.add_argument("--n2-end", type=float, default=None, dest="n2_end",
+                        help="q_frac_ref: n2 범위 모드 상한 (--n2-start와 함께). --axis-config 대체")
+    parser.add_argument("--n2-step", type=float, default=None, dest="n2_step",
+                        help="q_frac_ref: n2 길이 격자 간격 (기본 0.1). --axis-config 대체")
+    parser.add_argument("--n2-seed", type=int, default=None, dest="n2_seed",
+                        help="q_frac_ref: n2 길이 추첨 시드 (기본 20260903). --axis-config 대체")
     parser.add_argument("--ref-lag",   type=int, default=None, dest="ref_lag",
                         help="q_frac_ref: 레퍼런스 지연 사이클 수 (기본 0=q_frac_wide와 동등). --axis-config 대체")
     parser.add_argument("--noise-amp", type=float, default=None, dest="noise_amp",
@@ -1937,6 +1978,16 @@ def main():
     parser.add_argument("--min-pts", type=int, default=None, dest="min_pts",
                         help="q_frac_wide/q_frac_ref: 세그먼트 최소 포인트 수(기본 10). "
                              "기본값과 다르면 '_minptsN' 접미사 경로에 별도 저장(§4.6 confound 방지). "
+                             "--axis-config 대체")
+    parser.add_argument("--calibration-period", type=int, default=None, dest="calibration_period",
+                        help="q_frac_ref: 레퍼런스 재보정 주기(사이클 수, docs/260903_RESULTS.md §1). "
+                             "미지정 시 재보정 없음(기존 동작). 권장값 100. --axis-config 대체")
+    parser.add_argument("--calibration-mode", type=str, default=None, dest="calibration_mode",
+                        choices=["drift_only", "full"],
+                        help="q_frac_ref: 재보정 시 리셋 범위 — drift_only(기본, OU만) | "
+                             "full(바이어스까지). --axis-config 대체")
+    parser.add_argument("--calibration-jitter", type=int, default=None, dest="calibration_jitter",
+                        help="q_frac_ref: 재보정 주기를 ±jitter 사이클 흔듦(기본 0). "
                              "--axis-config 대체")
     parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
                         help="충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간 제외 "
@@ -1959,16 +2010,26 @@ def main():
     if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
             or args.ref_lag is not None or args.noise_amp is not None
             or args.noise_mode is not None or args.noise_period_cycles is not None
-            or args.min_pts is not None):
+            or args.min_pts is not None or args.n2_start is not None
+            or args.n2_end is not None or args.n2_step is not None
+            or args.n2_seed is not None or args.calibration_period is not None
+            or args.calibration_mode is not None or args.calibration_jitter is not None):
         _quick: dict = {}
         if args.n1        is not None: _quick["n1"]        = args.n1
         if args.n2        is not None: _quick["n2"]        = args.n2
+        if args.n2_start  is not None: _quick["n2_start"]  = args.n2_start
+        if args.n2_end    is not None: _quick["n2_end"]    = args.n2_end
+        if args.n2_step   is not None: _quick["n2_step"]   = args.n2_step
+        if args.n2_seed   is not None: _quick["n2_seed"]   = args.n2_seed
         if args.n_samples is not None: _quick["n_samples"] = args.n_samples
         if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
         if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
         if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
         if args.noise_period_cycles is not None: _quick["noise_period_cycles"] = args.noise_period_cycles
         if args.min_pts is not None: _quick["min_pts"] = args.min_pts
+        if args.calibration_period is not None: _quick["calibration_period"] = args.calibration_period
+        if args.calibration_mode   is not None: _quick["calibration_mode"]   = args.calibration_mode
+        if args.calibration_jitter is not None: _quick["calibration_jitter"] = args.calibration_jitter
         args.axis_config = json.dumps(_quick)
 
     _axis = args.seg_axis

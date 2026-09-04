@@ -227,7 +227,7 @@ def main() -> None:
             break
     plt.rcParams["axes.unicode_minus"] = False
 
-    x_all, y_all, seg_idx_all, spec, names_by_seg = _load_all_scenarios(args)
+    x_all, y_all, scen_idx_all, spec, names_by_seg = _load_all_scenarios(args)
     groups_data = json.loads(Path(args.groups_json).read_text(encoding="utf-8"))
 
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.groups_json).parent
@@ -241,7 +241,7 @@ def main() -> None:
         if args.scenarios and seg_name not in args.scenarios:
             continue
 
-        sel = seg_idx_all == s
+        sel = scen_idx_all == s
         x_s = x_all[sel]
         raw_corr = np.nan_to_num(np.corrcoef(x_s, rowvar=False), nan=0.0)
         names = names_by_seg[s]

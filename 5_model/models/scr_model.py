@@ -68,7 +68,10 @@ class SCRModel(nn.Module):
             # test_hi_scenario_interaction.py 산출물 기반. True인 HI는 시나리오 무관 단일
             # shared_gate로, False인 HI는 기존처럼 시나리오별 scen_gates로 라우팅한다.
             # None(기본)이면 완전히 비활성 — 기존과 100% 동일 동작(전부 scen_gates).
-            # scen_group_ids와 동시 사용 불가(그룹 게이팅+공유 게이팅 조합은 미지원 스코프).
+            # scen_group_ids와 동시 사용 가능(v5, docs/260901_V5_DESIGN.md): shared_hi_mask가
+            # 있으면 scen_gate_width가 specific 폭으로 좁아지고, scen_group_ids[s]도 그 좁은
+            # 폭(len(specific_idx)) 기준 로컬 인덱스여야 한다 —
+            # build_specific_component_groups.py가 정확히 이 형태로 만들어준다.
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -103,10 +106,6 @@ class SCRModel(nn.Module):
         # Stage B — per-scenario gates (n_scenarios × N_HI), 단 shared_hi_mask가 있으면
         # 그 HI들은 이 폭에서 빠지고 아래 shared_gate가 대신 담당한다(v4).
         # ----------------------------------------------------------------
-        if shared_hi_mask is not None and scen_group_ids:
-            raise ValueError("shared_hi_mask와 scen_group_ids는 동시 사용을 지원하지 않습니다 "
-                              "(그룹 게이팅 + 공유/시나리오별 분리 조합은 스코프 밖).")
-
         self.shared_gate = None
         if shared_hi_mask is not None:
             shared_hi_mask = shared_hi_mask.bool()
@@ -252,13 +251,13 @@ class SCRModel(nn.Module):
     # Gate helpers
     # ------------------------------------------------------------------
     def _apply_probe_gate(
-        self, x: torch.Tensor, direction: torch.Tensor, seg_idx: torch.Tensor
+        self, x: torch.Tensor, direction: torch.Tensor, scen_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Routes each sample to its direction-specific probe gate.
         x         : (B, N_HI)
         direction : (B,)  +1.0=charge, -1.0=discharge
-        seg_idx   : (B,)  0-5
+        scen_idx   : (B,)  0-5
         Returns (probe_x, probe_z): both (B, N_HI)
         """
         B = x.size(0)
@@ -293,16 +292,16 @@ class SCRModel(nn.Module):
 
     @staticmethod
     def _apply_gate_list(
-        gates: nn.ModuleList, x: torch.Tensor, seg_idx: torch.Tensor
+        gates: nn.ModuleList, x: torch.Tensor, scen_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """시나리오별 독립 게이트 리스트(scen_gates 또는 scen_kernel_gates) 공통 라우팅 로직.
-        각 세그먼트를 자기 시나리오(seg_idx)에 해당하는 gates[s]로만 통과시킨다.
+        각 세그먼트를 자기 시나리오(scen_idx)에 해당하는 gates[s]로만 통과시킨다.
         x: (B, width) — width는 게이트 종류에 따라 다름(raw HI면 N_HI, 커널 HI면 n_kernel_hi).
         Returns (masked_x, z): 둘 다 x와 같은 shape."""
         masked = torch.zeros_like(x)
         z_out  = torch.zeros_like(x)
         for s, gate in enumerate(gates):
-            sel = (seg_idx == s)
+            sel = (scen_idx == s)
             if sel.any():
                 mx, zz = gate(x[sel])
                 masked[sel] = mx
@@ -310,13 +309,13 @@ class SCRModel(nn.Module):
         return masked, z_out
 
     def _apply_scen_gate(
-        self, x: torch.Tensor, seg_idx: torch.Tensor
+        self, x: torch.Tensor, scen_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """raw HI(scen_gates, 폭 N_HI) 전용. Phase2는 고정 마스크(scen_masks)를 쓸 수 있어
         그 경우만 별도 분기 — 학습 가능한 게이트일 때는 _apply_gate_list로 위임.
 
         shared_gate가 있으면(v4) N_HI 폭을 shared_idx/specific_idx로 쪼개서, shared 부분은
-        시나리오 무관 단일 shared_gate로(seg_idx 라우팅 없음 — 전체 배치에 동일 적용),
+        시나리오 무관 단일 shared_gate로(scen_idx 라우팅 없음 — 전체 배치에 동일 적용),
         specific 부분만 기존처럼 scen_gates[s]로 라우팅한 뒤 원래 컬럼 위치로 재조립한다.
         재조립하므로 반환 shape/컬럼 순서는 shared_gate 유무와 무관하게 항상 (B,N_HI) 그대로라
         cap_head 등 하위 코드는 변경이 필요 없다."""
@@ -329,7 +328,7 @@ class SCRModel(nn.Module):
             z_out[:, self._shared_idx] = z_shared
             if len(self._specific_idx) > 0:
                 x_specific = x[:, self._specific_idx]
-                m_specific, z_specific = self._apply_gate_list(self.scen_gates, x_specific, seg_idx)
+                m_specific, z_specific = self._apply_gate_list(self.scen_gates, x_specific, scen_idx)
                 masked[:, self._specific_idx] = m_specific
                 z_out[:, self._specific_idx] = z_specific
             return masked, z_out
@@ -337,21 +336,21 @@ class SCRModel(nn.Module):
             masked = torch.zeros_like(x)
             z_out  = torch.zeros_like(x)
             for s in range(self.n_scenarios):
-                sel = (seg_idx == s)
+                sel = (scen_idx == s)
                 if sel.any():
                     m = self._scen_masks_buf[s]
                     n_sel = int(sel.sum().item())
                     masked[sel] = x[sel] * m
                     z_out[sel]  = m.unsqueeze(0).expand(n_sel, -1)
             return masked, z_out
-        return self._apply_gate_list(self.scen_gates, x, seg_idx)
+        return self._apply_gate_list(self.scen_gates, x, scen_idx)
 
     def _apply_scen_kernel_gate(
-        self, x: torch.Tensor, seg_idx: torch.Tensor
+        self, x: torch.Tensor, scen_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """커널 융합 HI(scen_kernel_gates, 폭 n_kernel_hi) 전용 — 고정 마스크 개념이 아직
         없으므로(Phase1 전용) 항상 _apply_gate_list로 위임."""
-        return self._apply_gate_list(self.scen_kernel_gates, x, seg_idx)
+        return self._apply_gate_list(self.scen_kernel_gates, x, scen_idx)
 
     # ------------------------------------------------------------------
     # Forward
@@ -359,7 +358,7 @@ class SCRModel(nn.Module):
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """
         batch keys: x_hi (B,N_HI), nan_mask (B,N_HI), direction (B,),
-                    seg_idx (B,), cap_init (B,)
+                    scen_idx (B,), cap_init (B,)
 
         Returns:
           cap_pred     : (B,)      SOH ratio prediction
@@ -371,24 +370,24 @@ class SCRModel(nn.Module):
         x         = batch["x_hi"]                           # (B, N_HI)
         nan_mask  = batch["nan_mask"]                       # (B, N_HI)
         direction = batch["direction"]                      # (B,)
-        seg_idx   = batch["seg_idx"]                        # (B,)
+        scen_idx   = batch["scen_idx"]                        # (B,)
 
         x = x * nan_mask  # NaN positions → 0
 
         # Stage A: direction-aware probe gate
         # MSE gradient → probe_gate (regression signal)
         # CE gradient  → probe_gate via probe_mlp (classification signal, Phase 1 only)
-        probe_x, probe_z = self._apply_probe_gate(x, direction, seg_idx)
+        probe_x, probe_z = self._apply_probe_gate(x, direction, scen_idx)
 
         # Stage B: scenario-conditioned gate (MSE gradient only)
-        scen_x, scen_z = self._apply_scen_gate(x, seg_idx) # (B, N_HI)
+        scen_x, scen_z = self._apply_scen_gate(x, scen_idx) # (B, N_HI)
 
         # Capacity head: probe_x + scen_x [+ 커널 융합 HI] [+ raw CNN 임베딩 | raw flat]
         #                + direction + cap_init
         feat_parts = [probe_x, scen_x]
         if self.scen_kernel_gates is not None:
             x_kernel = batch["x_kernel"]                     # (B, n_kernel_hi), 이미 정규화됨
-            kernel_x, kernel_z = self._apply_scen_kernel_gate(x_kernel, seg_idx)
+            kernel_x, kernel_z = self._apply_scen_kernel_gate(x_kernel, scen_idx)
             feat_parts.append(kernel_x)
         else:
             kernel_z = None
@@ -437,13 +436,13 @@ class SCRModel(nn.Module):
 
     @torch.no_grad()
     def get_probe_x(
-        self, x_hi: torch.Tensor, direction: torch.Tensor, seg_idx: torch.Tensor
+        self, x_hi: torch.Tensor, direction: torch.Tensor, scen_idx: torch.Tensor
     ) -> torch.Tensor:
         """
         Direction-aware probe masking for external use (e.g., classifier inference).
         Returns probe_x (B, N_HI) — same shape as x_hi but only m active positions.
         """
-        probe_x, _ = self._apply_probe_gate(x_hi, direction, seg_idx)
+        probe_x, _ = self._apply_probe_gate(x_hi, direction, scen_idx)
         return probe_x
 
     @torch.no_grad()
@@ -461,7 +460,7 @@ class SCRModel(nn.Module):
 
     @torch.no_grad()
     def get_selected_scen_his(self) -> dict[int, list[int]]:
-        """Returns {seg_idx: [active_hi_indices]}."""
+        """Returns {scen_idx: [active_hi_indices]}."""
         if self._fixed_scen:
             return {
                 s: self._scen_masks_buf[s].nonzero(as_tuple=False).squeeze(1).tolist()

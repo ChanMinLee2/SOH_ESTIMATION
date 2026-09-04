@@ -6,14 +6,14 @@ uncertainty.py — Last-Layer Laplace Approximation (LLA) for SCRModel.
 
 수식 (시나리오별 이분산 aleatoric noise):
   φ(x)    : cap_head 최종 레이어 직전 피처 (d,) — 바이어스 확장 후 (d+1,)
-  σ_n(s)  : 시나리오 s(=seg_idx)별 관측 노이즈 표준편차 (n_scenarios,)
+  σ_n(s)  : 시나리오 s(=scen_idx)별 관측 노이즈 표준편차 (n_scenarios,)
   H       : (d+1, d+1) = Σᵢ (φᵢ/σ_n(sᵢ))(φᵢ/σ_n(sᵢ))ᵀ + λI
   σ²(x*)  = σ_n(s*)² + φ(x*)ᵀ H⁻¹ φ(x*)
 
 Why: 전역 스칼라 σ_n 하나로는 시나리오 간 실제 오차 스케일 차이(예: dis_lo RMSE
      0.006 vs chg_mid RMSE 0.023, ~4배)를 반영하지 못해 68% 구간이 13~17%p
      과잉 커버리지되는 것을 확인함(calibration.png 히스토그램이 사실상 점질량).
-     σ_n을 seg_idx별로 분리해 이분산성을 aleatoric 항에 직접 반영한다.
+     σ_n을 scen_idx별로 분리해 이분산성을 aleatoric 항에 직접 반영한다.
 
 Usage:
     uq = LaplaceUQ(model, device)
@@ -92,9 +92,9 @@ class LaplaceUQ:
     # ------------------------------------------------------------------
 
     def _collect_phi(self, loader: DataLoader) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """로더 전체에서 φ_aug = [φ; 1] 피처, target, seg_idx를 수집한다."""
+        """로더 전체에서 φ_aug = [φ; 1] 피처, target, scen_idx를 수집한다."""
         last_lin = _get_last_linear(self.model.cap_head)
-        feats, targets, seg_idxs = [], [], []
+        feats, targets, scen_idxs = [], [], []
 
         def _hook(_, inp, __):
             feats.append(inp[0].detach().cpu())
@@ -106,14 +106,14 @@ class LaplaceUQ:
                 batch_d = _batch_to_device(batch, self.device)
                 self.model(batch_d)
                 targets.append(batch["target"].cpu())
-                seg_idxs.append(batch["seg_idx"].cpu())
+                scen_idxs.append(batch["scen_idx"].cpu())
         handle.remove()
 
         phi = torch.cat(feats, dim=0)                           # (N, d)
         phi_aug = torch.cat([phi, torch.ones(len(phi), 1)], 1)  # (N, d+1)
         t = torch.cat(targets, dim=0)                           # (N,)
-        seg_idx = torch.cat(seg_idxs, dim=0).long()             # (N,)
-        return phi_aug, t, seg_idx
+        scen_idx = torch.cat(scen_idxs, dim=0).long()             # (N,)
+        return phi_aug, t, scen_idx
 
     def _collect_phi_batch(self, batch: dict) -> torch.Tensor:
         """단일 배치에서 φ_aug 피처를 수집한다 (추론용)."""
@@ -144,11 +144,11 @@ class LaplaceUQ:
         """
         LLA 사후 분포를 학습 데이터로 추정한다.
 
-        noise_std=None 이면 시나리오(seg_idx)별로 MAP 예측값과 실제 target의
+        noise_std=None 이면 시나리오(scen_idx)별로 MAP 예측값과 실제 target의
         잔차 표준편차를 따로 추정한다 (이분산 aleatoric noise).
         noise_std에 스칼라를 넘기면 모든 시나리오에 동일하게 적용(레거시 호환).
         """
-        phi_aug, t, seg_idx = self._collect_phi(train_loader)   # CPU
+        phi_aug, t, scen_idx = self._collect_phi(train_loader)   # CPU
 
         # σ_n(s) 추정 — 시나리오별
         if noise_std is None:
@@ -162,7 +162,7 @@ class LaplaceUQ:
 
             sigma_n = torch.full((self.n_scenarios,), global_std)
             for s in range(self.n_scenarios):
-                sel = seg_idx == s
+                sel = scen_idx == s
                 if sel.sum() > 1:
                     sigma_n[s] = resid[sel].std().clamp(min=1e-6)
                 else:
@@ -172,7 +172,7 @@ class LaplaceUQ:
             sigma_n = torch.full((self.n_scenarios,), float(noise_std))
         self._sigma_n = sigma_n
 
-        self._fit_H(phi_aug, seg_idx)
+        self._fit_H(phi_aug, scen_idx)
         self._fitted = True
         sigma_str = ", ".join(f"{v:.4f}" for v in sigma_n.tolist())
         print(
@@ -182,10 +182,10 @@ class LaplaceUQ:
         )
         return self
 
-    def _fit_H(self, phi_aug: torch.Tensor, seg_idx: torch.Tensor) -> None:
+    def _fit_H(self, phi_aug: torch.Tensor, scen_idx: torch.Tensor) -> None:
         """H = Σᵢ (φᵢ/σ_n(sᵢ))(φᵢ/σ_n(sᵢ))ᵀ + λI 의 Cholesky 인수분해를 저장한다."""
         d1 = phi_aug.shape[1]
-        sigma_per_sample = self._sigma_n[seg_idx].unsqueeze(1)  # (N, 1)
+        sigma_per_sample = self._sigma_n[scen_idx].unsqueeze(1)  # (N, 1)
         phi_scaled = phi_aug / sigma_per_sample                 # (N, d+1)
         H = phi_scaled.T @ phi_scaled + self.prior_precision * torch.eye(d1)
         try:
@@ -209,20 +209,20 @@ class LaplaceUQ:
         if grid is None:
             grid = [0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0]
 
-        phi_aug, t_val, seg_idx_val = self._collect_phi(val_loader)
+        phi_aug, t_val, scen_idx_val = self._collect_phi(val_loader)
         t_np = t_val.numpy()
 
         best_nll, best_lam = float("inf"), self.prior_precision
         for lam in grid:
             self.prior_precision = lam
-            self._fit_H(phi_aug, seg_idx_val)
-            mu, std = self._predict_from_phi(phi_aug, seg_idx_val)
+            self._fit_H(phi_aug, scen_idx_val)
+            mu, std = self._predict_from_phi(phi_aug, scen_idx_val)
             nll = _nll(t_np, mu.numpy(), std.numpy())
             if nll < best_nll:
                 best_nll, best_lam = nll, lam
 
         self.prior_precision = best_lam
-        self._fit_H(phi_aug, seg_idx_val)   # best_lam으로 복원
+        self._fit_H(phi_aug, scen_idx_val)   # best_lam으로 복원
         print(f"[LaplaceUQ] 최적 prior_precision={best_lam:.4f}  val_NLL={best_nll:.4f}")
         return best_lam
 
@@ -231,7 +231,7 @@ class LaplaceUQ:
     # ------------------------------------------------------------------
 
     def _predict_from_phi(
-        self, phi_aug: torch.Tensor, seg_idx: torch.Tensor
+        self, phi_aug: torch.Tensor, scen_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         last_lin = _get_last_linear(self.model.cap_head)
         W = last_lin.weight.data.cpu()          # (1, d)
@@ -243,7 +243,7 @@ class LaplaceUQ:
         v = torch.linalg.solve_triangular(
             self._L, phi_aug.T, upper=False
         )                                              # (d+1, B)
-        sigma_n_b = self._sigma_n[seg_idx.long()]            # (B,)
+        sigma_n_b = self._sigma_n[scen_idx.long()]            # (B,)
         pred_var = sigma_n_b ** 2 + (v ** 2).sum(dim=0)       # (B,)
         pred_std = pred_var.clamp(min=0.0).sqrt()
         return mu, pred_std
@@ -268,8 +268,8 @@ class LaplaceUQ:
         mean = out["cap_pred"].cpu()
 
         phi_aug = self._collect_phi_batch(batch).cpu()
-        seg_idx = batch["seg_idx"].cpu()
-        _, std = self._predict_from_phi(phi_aug, seg_idx)
+        scen_idx = batch["scen_idx"].cpu()
+        _, std = self._predict_from_phi(phi_aug, scen_idx)
         return mean, std
 
     # ------------------------------------------------------------------

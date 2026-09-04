@@ -108,7 +108,7 @@ def main() -> None:
 
     from build_kernel_group_features import _load_train_split
 
-    x_all, y_all, seg_idx_all, spec, _ = _load_train_split(args)
+    x_all, y_all, scen_idx_all, spec, _ = _load_train_split(args)
 
     labels: list[str] = []
     by_label: dict[str, list[tuple]] = {}
@@ -116,7 +116,7 @@ def main() -> None:
         label, _, path = item.partition("=")
         if not path:
             raise ValueError(f"--kernel-pkl은 label=path 형식이어야 합니다: {item!r}")
-        recs = _level2_gap_for_pkl(path, x_all, y_all, seg_idx_all, spec)
+        recs = _level2_gap_for_pkl(path, x_all, y_all, scen_idx_all, spec)
         by_label[label] = recs
         labels.append(label)
         gaps = np.array([r[1] - r[2] for r in recs])

@@ -35,7 +35,7 @@ SegmentToken = {
         cell_id:   str       — 저장용, 모델 미사용 (현행 유지)
         dataset:   str
         cycle:     int
-        seg_idx:   int       — 시나리오 인덱스 (0-5)
+        scen_idx:   int       — 시나리오 인덱스 (0-5)
         direction: float     — +1.0(충전) / -1.0(방전)
         level:     int       — 잠재 클래스 (0/1/2)
     }
@@ -159,7 +159,7 @@ def __getitem__(self, idx):
         "nan_mask":  self.nan_mask[idx],    # (64,)
         "direction": self.direction[idx],   # scalar
         "level":     self.level[idx],       # scalar
-        "seg_idx":   self.seg_idx[idx],     # scalar
+        "scen_idx":   self.scen_idx[idx],     # scalar
         "target":    self.target[idx],      # scalar
         "cap_init":  self.cap_init[idx],    # scalar
     }
@@ -314,7 +314,7 @@ x_hi (64개 HI)
    │
    ├─ scen_gates[0] (chg_lo용 게이트) ─┐
    ├─ scen_gates[1] (chg_mid용 게이트) ─┤
-   ├─ ...                              ├─→ 선택된 seg_idx의 게이트만 통과
+   ├─ ...                              ├─→ 선택된 scen_idx의 게이트만 통과
    └─ scen_gates[5] (dis_lo용 게이트) ─┘
                     │
               x_scen (게이트 통과 후 HI)
@@ -332,7 +332,7 @@ hard/soft가 결정하는 것은 **"어느 시나리오 게이트로 회귀 입�
 |---|---|---|
 | **hard** | 분류기 argmax로 고른 시나리오 게이트 **1개**만 적용 | 1회 (선택된 게이트 결과로만 예측) |
 | **soft** | **n_classes개**(lo/mid/hi 3개) 시나리오 게이트를 전부 적용 | 3회 (각각 예측 후 softmax 확률로 가중평균) |
-| **oracle** | 정답 seg_idx로 게이트 **1개** 고정 (분류기 우회) | 1회 |
+| **oracle** | 정답 scen_idx로 게이트 **1개** 고정 (분류기 우회) | 1회 |
 
 즉 "어느 회귀 헤드를 쓸지"보다는 **"어느 시나리오의 HI 서브셋(게이트)으로 회귀
 입력을 구성할지"** 결정이라고 보는 게 더 정확하다. `cap_head` 신경망 가중치는
@@ -557,3 +557,146 @@ classifier:
 - 회귀 헤드 공유 CNN 통합(§5.2): `SCRModel.with_raw_cnn` + `cap_heads._HEAD_IN` 동적화.
   HUST chg_hi/mid 평탄 예측 진단 결과에 따라 착수 여부 결정.
 - CNN 분류기 학습 후 `test_rs.hard`(분류기 argmax 라우팅) 평가로 MLP 대비 분류 정확도·SOH RMSE 비교.
+
+---
+
+## 10. q_frac_ref — n2 범위 모드 (가변 세그먼트 길이, 2026-09-03)
+
+### 10.1 배경과 목적
+
+지금까지 `q_frac_ref`는 세그먼트 길이(`n2`)가 **고정**이었다(정식 설정 n2=0.20).
+하지만 실제 BMS 배포에서 "관측 창의 길이가 항상 같다"는 보장은 없다 — 사용자가
+언제 충전을 끊는지, 주행이 언제 끝나는지에 따라 관측 구간 길이가 매번 달라진다.
+고정 n2로만 학습한 모델은 이 변동에 대해 검증된 적이 없다.
+
+**n2 범위 모드**는 세그먼트 길이를 고정하지 않고 격자
+`{n2_start, n2_start+n2_step, ..., n2_end}`(기본 step=0.1)에서 매번 랜덤 추첨한다.
+
+이 설계가 §2.2와 맞물린다는 점을 짚어둔다 — §2.2에서 raw 곡선을 **q-정규화 48pt
+그리드**로 리샘플링한 이유가 "세그먼트 길이(n2)가 달라도 동일 해상도로 비교
+가능하다"였다. 즉 raw 토큰 쪽은 처음부터 가변 n2를 전제로 설계돼 있었고, 이번
+변경으로 그 전제가 실제로 쓰이게 됐다. HI 쪽도 전부 스칼라 요약량이라 세그먼트
+포인트 수가 달라져도 차원이 변하지 않는다 — **모델/로더/토큰 구조는 무수정**이다.
+
+### 10.2 핵심 조건: 커버리지 100%
+
+이 모드의 하드 요구사항은 **존의 모든 포인트가 최소 하나의 세그먼트에 반드시
+포함될 것**이다. 그래서 "구간 안에 랜덤 배치"(기존 `random_segment` 방식)를 쓰지
+않았다 — 랜덤 배치는 원리적으로 틈이 생겨 100%가 불가능하다. 대신 **랜덤 길이
+타일링**을 쓴다:
+
+```
+1) s = zone_start 에서 시작
+2) 격자에서 길이 L을 랜덤 추첨 → [s, s+L] 배치 → s += L   (조각 사이 틈 없음)
+3) s+L 이 zone_end 를 넘어서는 순간:
+      마지막 조각 = [zone_end - L, zone_end]   ← 길이는 격자값 유지, 끝점을 존 끝에 정렬
+      (앞 조각과 겹칠 수는 있어도 틈은 안 생김 — "겹침 허용, 틈 금지")
+4) 마지막 조각만 상한 포함(q <= hi)으로 마스킹 → 존 끝점 포인트도 누락 없음
+5) 포인트 수 < min_pts 인 조각은 버리지 않고 이웃에 병합
+      (마지막이면 앞 조각에 병합) — 안 그러면 min_pts 필터가 커버리지에 구멍을 뚫음
+```
+
+5번이 특히 중요하다. 이게 없으면 짧은 조각(n2=0.1)이 min_pts 미달로 탈락하면서
+그 구간이 통째로 커버리지 구멍이 된다.
+
+따라서 커버리지가 100% 미만이 되는 유일한 경우는 **"존 전체 포인트 수 < min_pts"라
+아무 세그먼트도 못 만드는 사이클**뿐이다(알고리즘 한계가 아니라 데이터 한계).
+그 경우는 `zone_too_small` 카운터에 따로 집계되고,
+`_4_data_hi/<axis_dir>/coverage_stats.txt`에 실측 커버리지가 남는다.
+
+### 10.3 실측 검증 (실제 MIT/HUST 셀)
+
+| 설정 | 셀 | 사이클 | 커버리지 |
+|---|---|---|---|
+| n1=0.35(정식) + n2∈{0.1,0.2,0.3} | 8 | 13,121 | **100.000%** (11,056,358 / 11,056,358) |
+| n1=0.40 + 노이즈 ±3% OU | 12 | 17,775 | **100.000%** (15,893,822 / 15,893,822) |
+| n1=0.40 + ref_lag=5 | 12 | 17,775 | **100.000%** |
+| n1=0.40 + 좁은 범위 {0.1, 0.2} | 12 | 17,775 | **100.000%** |
+
+6개 존 모두 개별 100%. 길이 분포는 격자 위에 균등(0.1/0.2/0.3 각 33.2~33.4%),
+포인트 수는 길이에 비례(평균 39.4 / 76.1 / 111.7pt). n1=0.35에서 min_pts 병합이
+실제로 2회 발동해 그 경로도 실데이터에서 동작함을 확인했다.
+
+### 10.4 파라미터
+
+| 파라미터 | 기본값 | 의미 |
+|---|---|---|
+| `n2_start` | `None` | 길이 격자 하한. `n2_end`와 **둘 다** 줘야 범위 모드가 켜짐 |
+| `n2_end` | `None` | 길이 격자 상한 |
+| `n2_step` | `0.1` | 격자 간격 (요구사항이 0.1 단위) |
+| `n2_seed` | `20260903` | 길이 추첨 재현성 시드 (노이즈용 `ref_seed`와 분리) |
+
+**검증 규칙** (위반 시 `ValueError`):
+`n2_start`/`n2_end` 둘 다 또는 둘 다 아님 · `0 < n2_start <= n2_end` ·
+`n2_end < n1`(존 폭이 곧 n1이므로) · `(n2_end - n2_start)`가 `n2_step`의 정수배.
+
+**재현성**: `n2_seed` + `crc32(cell_id, cycle, direction, zone)` 결정론적 RNG —
+멀티프로세싱/재실행에서 동일한 세그먼트가 나온다(`q_frac_wide._rng_for`와 같은
+관례). 존까지 시드에 넣은 이유는 한 사이클이 통째로 "짧은 세그먼트만 있는
+사이클"이 되지 않게 하기 위함이다.
+
+**`n_samples`는 이 모드에서 무시된다** — 존당 조각 수가 타일링 결과로 정해지기
+때문이다(존 폭 / 추첨된 길이들).
+
+### 10.5 구조 — 부모 클래스 훅 방식
+
+`q_frac_ref`만의 기능이지만 `_extract`(부모 `q_frac_wide`)를 복제하지 않으려고
+**훅 2개**를 부모에 추가하고 자식이 그것만 오버라이드한다:
+
+| 훅 | 기본구현(q_frac_wide) | 오버라이드(q_frac_ref 범위 모드) |
+|---|---|---|
+| `_segment_plan(...) -> [(start_qf, end_qf, include_hi, extra_meta), ...]` | 기존 그대로 — 길이 n2 고정, `_start_positions` 균등격자, 상한 배타 | 랜덤 길이 타일링 + min_pts 병합, 마지막만 상한 포함 |
+| `_track_zone_coverage() -> bool` | `False` (격자 모드는 설계상 존을 다 안 덮으므로 집계 무의미) | `True` (100%가 설계 조건이므로 항상 실측) |
+
+`meta`에 `seg_len`(실제 길이)과 `merged`(이웃을 흡수한 조각이면 True)가 추가된다.
+`merged` 조각은 길이가 대개 격자를 벗어나지만 0.1+0.1=0.2처럼 우연히 격자값과
+같아질 수도 있으므로, "순수 격자 조각만" 골라내려면 `seg_len`이 아니라 이 플래그를
+봐야 한다.
+
+### 10.6 데이터 경로 분리 (§4.6 confound 방지)
+
+범위 모드는 `n2-10~30%s10` 태그로 **별도 디렉터리**에 저장된다 — 고정 n2 캐시를
+조용히 재사용하는 사고를 막기 위함이다.
+
+```
+고정 :  _4_data_hi/q_frac_ref/n1-35%_n2-20%_N-4_lag-0_noise-3%_ou-200/
+범위 :  _4_data_hi/q_frac_ref/n1-35%_n2-10~30%s10_N-4_lag-0_noise-3%_ou-200/
+```
+
+n2 태그를 만들던 곳이 4군데(`hi_correlation._qfw_tag`, `train_scr`,
+`train_classifier._axis_dir_from_spec`, `visualize_results._axis_dir_from_spec`)로
+복붙돼 있었고 **하나만 빠뜨려도 학습이 엉뚱한 캐시를 읽는다.** 그래서
+`common/scenario/q_frac_ref.n2_path_tag(params)` 하나로 모으고 4곳이 전부 호출하게
+바꿨다. 범위 파라미터가 없으면 기존 문자열(`n2-20%`)을 그대로 돌려주므로 **기존 런의
+경로는 바이트 단위로 불변**이다(테스트로 확인).
+
+### 10.7 수정 파일
+
+| 파일 | 수정 내용 |
+|---|---|
+| `common/scenario/q_frac_wide.py` | `_segment_plan`/`_track_zone_coverage` 훅 추가, `_extract` 격자 분기를 훅 기반으로 리팩터(기본 동작 불변), `meta`에 `seg_len` 추가, 커버리지 집계 |
+| `common/scenario/q_frac_ref.py` | `n2_start`/`n2_end`/`n2_step`/`n2_seed` 파라미터, `_n2_rng`/`_tile_zone`/`_merge_below_min_pts`/`_segment_plan` 구현, `n2_path_tag()` 공통 헬퍼, `get_spec()` 전파 |
+| `4_hi_analysis/hi_correlation.py` | `_qfw_tag`가 `n2_path_tag` 사용, `--n2-start/--n2-end/--n2-step/--n2-seed` 단축 인자, 실행조건 출력에 격자 표시, `_save_coverage_stats` 문구 일반화 |
+| `5_model/train_scr.py`, `train_classifier.py`, `visualize_results.py` | 경로 태그가 `n2_path_tag` 사용 |
+| `run_pipeline.py` | `--n2-start/--n2-end/--n2-step` 단축 인자 → `--axis-config` JSON 자동 합성 |
+
+### 10.8 사용법
+
+```bash
+# Step 4만 — 범위 모드로 HI 재추출 (별도 경로에 저장됨)
+python run_pipeline.py 4 --to-step 4 --seg-axis q_frac_ref \
+    --n1 0.35 --n2-start 0.1 --n2-end 0.3 --workers 40
+
+# 직접 실행도 동일
+python 4_hi_analysis/hi_correlation.py --seg-axis q_frac_ref \
+    --n1 0.35 --n2-start 0.1 --n2-end 0.3
+```
+
+추출 후 `_4_data_hi/q_frac_ref/n1-35%_n2-10~30%s10_.../coverage_stats.txt`에서
+실측 커버리지를 반드시 확인할 것 — 100% 미만이면 그만큼 `min_pts` 미달 사이클이
+있다는 뜻이다(전체 200셀에서는 표본 검증(12셀)에 안 잡힌 사례가 나올 수 있다).
+
+### 10.9 미착수
+
+- 전체 200셀 Step 4 재추출은 아직 안 돌렸다(시간 소요) — 위 검증은 12셀 표본 기준.
+- 범위 모드 데이터로 학습한 v4와 고정 n2 v4의 성능 비교(가변 길이 강건성 실험)도 미착수.

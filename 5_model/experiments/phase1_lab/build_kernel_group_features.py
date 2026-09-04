@@ -149,9 +149,9 @@ def _load_train_split(args) -> tuple:
 
     x_all = (train_ds.x_hi * train_ds.nan_mask).numpy()  # NaN 위치는 0으로 (forward()와 동일 처리)
     y_all = train_ds.target.numpy()
-    seg_idx_all = train_ds.seg_idx.numpy()
+    scen_idx_all = train_ds.scen_idx.numpy()
     names_by_seg = {s: get_hi_cols_for_seg(name) for s, name in enumerate(spec.scenario_names)}
-    return x_all, y_all, seg_idx_all, spec, names_by_seg
+    return x_all, y_all, scen_idx_all, spec, names_by_seg
 
 
 def _fit_group_kernel(
@@ -228,7 +228,7 @@ def _round_robin_select(
 
 def main() -> None:
     args = _parse_args()
-    x_all, y_all, seg_idx_all, spec, names_by_seg = _load_train_split(args)
+    x_all, y_all, scen_idx_all, spec, names_by_seg = _load_train_split(args)
 
     groups_data = json.loads(Path(args.synergy_groups_json).read_text(encoding="utf-8"))
 
@@ -239,7 +239,7 @@ def main() -> None:
         key = f"seg_{s}_groups"
         if key not in groups_data:
             continue
-        sel = seg_idx_all == s
+        sel = scen_idx_all == s
         if sel.sum() < 20:
             tqdm_write(f"[kernel] {seg_name}: 표본 부족({int(sel.sum())}) — 스킵")
             continue

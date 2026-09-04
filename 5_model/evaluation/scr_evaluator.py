@@ -90,16 +90,16 @@ class SCREvaluator:
           "soft" — 분류기 확률 가중 평균 (분류기 활성화 필요)
 
         direction_routing:
-          True  — routing_mode="none"일 때 방향별 첫 번째 시나리오로 seg_idx 보정
-                  (test_rs처럼 seg_idx 0/1만 있어 모델 시나리오 ID와 불일치할 때 사용)
-          False — seg_idx 그대로 사용 (qfrac 정규 테스트 기본값)
+          True  — routing_mode="none"일 때 방향별 첫 번째 시나리오로 scen_idx 보정
+                  (test_rs처럼 scen_idx 0/1만 있어 모델 시나리오 ID와 불일치할 때 사용)
+          False — scen_idx 그대로 사용 (qfrac 정규 테스트 기본값)
         """
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=_collate)
         self.model.eval()
 
         preds_norm, trues_norm = [], []
         level_preds, level_trues = [], []
-        seg_idxs, directions = [], []
+        scen_idxs, directions = [], []
         probe_zs, scen_zs = [], []
 
         # routing table: (n_dir, n_classes) — hard/soft 라우팅용
@@ -116,7 +116,7 @@ class SCREvaluator:
                     _routing_t[_d, _c] = _sid
 
         # direction-only fallback: routing_mode="none"일 때 방향별 첫 시나리오로 보정
-        # (test_rs: seg_idx 0/1 → 모델 시나리오 ID 불일치 해소)
+        # (test_rs: scen_idx 0/1 → 모델 시나리오 ID 불일치 해소)
         _dir_t = None
         if direction_routing and routing_mode == "none" and hasattr(self._spec, "routing"):
             _dir_t = torch.tensor(
@@ -131,7 +131,7 @@ class SCREvaluator:
             if _dir_t is not None:
                 # direction_routing 보정: 방향에 맞는 첫 번째 모델 시나리오로 재매핑
                 dir_idx = (batch_d["direction"] <= 0).long()   # 0=charge, 1=discharge
-                batch_d["seg_idx"] = _dir_t[dir_idx]
+                batch_d["scen_idx"] = _dir_t[dir_idx]
 
             if _use_clf and _routing_t is not None:
                 x_hi    = batch_d["x_hi"]
@@ -139,7 +139,7 @@ class SCREvaluator:
                 dir_idx = (dir_t <= 0).long()              # 0=charge, 1=discharge
 
                 # Phase 1 probe mask 적용 — train_classifier.py와 동일한 입력
-                probe_x_clf = self.model.get_probe_x(x_hi, dir_t, batch_d["seg_idx"])
+                probe_x_clf = self.model.get_probe_x(x_hi, dir_t, batch_d["scen_idx"])
                 from models.scenario_classifier import CNNProbeClassifier
                 if isinstance(self._classifier, CNNProbeClassifier):
                     # CNN: probe_x + x_raw + direction 내부 융합 (batch_d에 x_raw 포함)
@@ -150,7 +150,7 @@ class SCREvaluator:
 
                 if routing_mode == "hard":
                     class_pred = clf_logits.argmax(1)                     # (B,)
-                    batch_d["seg_idx"] = _routing_t[dir_idx, class_pred]  # (B,)
+                    batch_d["scen_idx"] = _routing_t[dir_idx, class_pred]  # (B,)
                     out = self.model(batch_d)
                     lv_pred = class_pred.cpu().numpy()
 
@@ -159,7 +159,7 @@ class SCREvaluator:
                     cap_cls   = []
                     for c in range(self._n_classes):
                         b_c = dict(batch_d)
-                        b_c["seg_idx"] = _routing_t[dir_idx, c]   # (B,)
+                        b_c["scen_idx"] = _routing_t[dir_idx, c]   # (B,)
                         out_c = self.model(b_c)
                         cap_cls.append(out_c["cap_pred"])
                     cap_stack = torch.stack(cap_cls, dim=1)        # (B, n_classes)
@@ -181,7 +181,7 @@ class SCREvaluator:
             trues_norm.append(batch["target"].numpy())
             level_preds.append(lv_pred)
             level_trues.append(batch["level"].numpy())
-            seg_idxs.append(batch_d["seg_idx"].cpu().numpy())   # 라우팅 후 수정된 값 저장
+            scen_idxs.append(batch_d["scen_idx"].cpu().numpy())   # 라우팅 후 수정된 값 저장
             directions.append(batch["direction"].numpy())
             probe_zs.append(out["probe_z"].cpu().numpy())   # (B, N_HI)
             scen_zs.append(out["scen_z"].cpu().numpy())     # (B, N_HI)
@@ -190,7 +190,7 @@ class SCREvaluator:
         trues_norm   = np.concatenate(trues_norm)
         level_preds  = np.concatenate(level_preds)
         level_trues  = np.concatenate(level_trues)
-        seg_idxs     = np.concatenate(seg_idxs)
+        scen_idxs     = np.concatenate(scen_idxs)
         directions   = np.concatenate(directions)
         probe_zs     = np.concatenate(probe_zs)   # (N, 65)
         scen_zs      = np.concatenate(scen_zs)    # (N, 65)
@@ -207,7 +207,7 @@ class SCREvaluator:
             "cap_init_raw":  ds.cap_init_raw,  # Ah per sample (SOH→Ah 변환용)
             "level_pred":    level_preds,
             "level_true":    level_trues,
-            "seg_idx":       seg_idxs,
+            "scen_idx":       scen_idxs,
             "direction":     directions,
             "probe_z":       probe_zs,
             "scen_z":        scen_zs,
@@ -276,7 +276,7 @@ class SCREvaluator:
         """각 라우팅 모드로 분류→회귀 평가.
 
         modes:
-          oracle : 정답 seg_idx로 라우팅 (분류 100% 가정 → 회귀 상한선)
+          oracle : 정답 scen_idx로 라우팅 (분류 100% 가정 → 회귀 상한선)
           hard   : 학습된 분류기 argmax로 라우팅 (실배포 시나리오)
           soft   : 분류기 확률 가중 평균
         Returns {mode: {"capacity","breakdown","classification","_pred"}}.
@@ -674,7 +674,7 @@ class SCREvaluator:
     def plot_hi_category_heatmap(
         self,
         routing_dir: Path,
-        scen_ranked_names: dict[int, list[str]],   # {seg_idx: [rank순 HI이름, ...]}
+        scen_ranked_names: dict[int, list[str]],   # {scen_idx: [rank순 HI이름, ...]}
         top_k: int | None = None,
     ) -> None:
         """행=HI 랭크 순위, 열=시나리오, 셀 색=HI 카테고리(A/B/C/D)."""
@@ -801,9 +801,9 @@ class SCREvaluator:
         cap_true    = pred_dict["cap_true_raw"] * cap_init_ah   # SOH→Ah
         cap_pred    = pred_dict["cap_pred_raw"] * cap_init_ah   # SOH→Ah
         directions  = pred_dict["direction"]
-        seg_idxs    = pred_dict["seg_idx"]
+        scen_idxs    = pred_dict["scen_idx"]
 
-        # (seg_idx, level_idx, display label) — derived from spec routing
+        # (scen_idx, level_idx, display label) — derived from spec routing
         _spec = self.model.spec
         _chg_ids  = _spec.charge_scenario_ids     # dir_idx=0
         _dis_ids  = _spec.discharge_scenario_ids  # dir_idx=1
@@ -832,7 +832,7 @@ class SCREvaluator:
             c_true = cap_true[sel]
             c_pred = cap_pred[sel]
             c_dir  = directions[sel]
-            c_seg  = seg_idxs[sel]
+            c_seg  = scen_idxs[sel]
 
             uniq_cyc = np.unique(c_cyc)
 
@@ -855,8 +855,8 @@ class SCREvaluator:
 
                 ax_cap.plot(uniq_cyc, true_line, "b-", label="True", linewidth=1.5)
 
-                for seg_idx, lv_idx, lv_name in seg_list:
-                    s_mask = dir_mask & (c_seg == seg_idx)
+                for scen_idx, lv_idx, lv_name in seg_list:
+                    s_mask = dir_mask & (c_seg == scen_idx)
                     if s_mask.sum() == 0:
                         continue
                     s_cyc  = c_cyc[s_mask]

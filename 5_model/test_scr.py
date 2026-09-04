@@ -262,7 +262,7 @@ def main() -> None:
     _clf_ckpt_path = (Path(args.classifier_ckpt) if args.classifier_ckpt
                       else _resolve_classifier_ckpt(run_dir))
     if _is_raw_mode:
-        # RawMLPModel은 seg_idx를 직접 입력받아 회귀 — 분류기 기반 라우팅이 무의미하므로
+        # RawMLPModel은 scen_idx를 직접 입력받아 회귀 — 분류기 기반 라우팅이 무의미하므로
         # 설령 classifier 체크포인트가 남아 있어도(예: 분류기 스텝 수동 실행) 무시하고
         # oracle만 평가.
         print("[test] raw_mlp 모드 — 분류기 로드 생략, oracle 모드만 평가")
@@ -296,7 +296,7 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 통합 평가: 학습된 분류기로 분류 → 라우팅 → 회귀 (oracle / hard / soft)
-    #   oracle : 정답 seg_idx 라우팅 (회귀 상한선)
+    #   oracle : 정답 scen_idx 라우팅 (회귀 상한선)
     #   hard   : 분류기 argmax 라우팅 (실배포)   ← 분류기 있을 때만
     #   soft   : 분류기 확률 가중 평균           ← 분류기 있을 때만
     # ------------------------------------------------------------------
@@ -441,8 +441,8 @@ def _run_random_segment_test(
     print(f"[random_seg_test] {len(rs_ds):,} 세그먼트")
 
     # ── 통합 평가: oracle / hard / soft (메인 테스트와 동일 플로우) ──────────
-    # 구 test_rs(seg_idx 0/1, 2-시나리오)는 oracle 라우팅 시 방향별 보정 필요.
-    # 재생성 test_rs(위치기반 6-시나리오)는 seg_idx가 이미 모델공간이라 보정 불필요.
+    # 구 test_rs(scen_idx 0/1, 2-시나리오)는 oracle 라우팅 시 방향별 보정 필요.
+    # 재생성 test_rs(위치기반 6-시나리오)는 scen_idx가 이미 모델공간이라 보정 불필요.
     _is_model_space = (rs_spec is not None
                        and getattr(rs_spec, "n_scenarios", 0) == model.n_scenarios)
     has_clf  = evaluator._classifier is not None

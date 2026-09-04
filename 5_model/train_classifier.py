@@ -87,20 +87,23 @@ def _axis_dir_from_spec(spec: "ScenarioSpec") -> str:
     minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
     # assign="none"(no_scen 대조군, docs/260816_RESULTS.md §5)이면 접미사 (hi_correlation._qfw_tag 와 동일 규칙)
     assign_sfx = "" if p.get("assign", "position_bin") == "position_bin" else "_noscen"
+    # n2 조각: 고정 n2면 "n2-20%", q_frac_ref n2 범위 모드면 "n2-10~30%s10"
+    # (hi_correlation._qfw_tag / train_scr / visualize_results 와 공통 규칙)
+    from common.scenario.q_frac_ref import n2_path_tag, calib_path_tag
+    n2_frag = n2_path_tag(p)
     if spec.axis == "q_frac_wide":
         n1 = int(round(p.get("n1", 0.4) * 100))
-        n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
-        return f"q_frac_wide/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}"
+        return f"q_frac_wide/n1-{n1}%_{n2_frag}_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}"
     if spec.axis == "q_frac_ref":
         n1 = int(round(p.get("n1", 0.4) * 100))
-        n2 = int(round(p.get("n2", 0.2) * 100))
         ns = int(p.get("n_samples", 4))
         lag = int(p.get("ref_lag", 0))
         noise = int(round(p.get("noise_amp", 0.03) * 100))
         nmode = str(p.get("noise_mode", "ou"))
         period = int(round(p.get("noise_period_cycles", 200.0)))
-        return f"q_frac_ref/n1-{n1}%_n2-{n2}%_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}_lag-{lag}_noise-{noise}%_{nmode}-{period}"
+        return (f"q_frac_ref/n1-{n1}%_{n2_frag}_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}"
+                f"_lag-{lag}_noise-{noise}%_{nmode}-{period}{calib_path_tag(p)}")
     if spec.axis == "q_abs":
         ms = int(round(p.get("mid_start", 0.20) * 100))
         me = int(round(p.get("mid_end", 0.50) * 100))
@@ -278,7 +281,7 @@ def main() -> None:
         )
     print(f"[clf] run_dir: {run_dir}")
 
-    # raw_mlp 모드 run — RawMLPModel은 seg_idx를 직접 입력받아 회귀하므로
+    # raw_mlp 모드 run — RawMLPModel은 scen_idx를 직접 입력받아 회귀하므로
     # HI 기반 방향/시나리오 분류기가 의미가 없다. 학습을 건너뛴다.
     _saved_cfg_path = run_dir / "config.yaml"
     if _saved_cfg_path.exists():

@@ -34,7 +34,7 @@ class ScenarioClassifier(ABC):
     ) -> torch.Tensor:
         """
         probe_x : (B, N_HI) direction-gated probe features
-        batch   : raw batch dict — may contain seg_idx, level, direction, etc.
+        batch   : raw batch dict — may contain scen_idx, level, direction, etc.
         Returns : (B, n_classes) logits — fed directly to cross_entropy
         """
 
@@ -145,7 +145,7 @@ class CNNProbeClassifier(ScenarioClassifier, nn.Module):
 
 class RuleClassifier(ScenarioClassifier):
     """
-    Deterministic classifier: infers latent class from seg_idx via ScenarioSpec.
+    Deterministic classifier: infers latent class from scen_idx via ScenarioSpec.
 
     Suitable for qfrac, vwindow, and protocol axes where each segment
     type deterministically maps to one latent class (lo / mid / hi).
@@ -161,10 +161,10 @@ class RuleClassifier(ScenarioClassifier):
         self._n_classes = spec.n_classes
 
     def classify(self, probe_x: torch.Tensor, batch: dict) -> torch.Tensor:
-        seg_idx = batch["seg_idx"].long()        # (B,)
+        scen_idx = batch["scen_idx"].long()        # (B,)
         device = probe_x.device
         lut = self._lut.to(device)
-        cls_ids = lut[seg_idx]                   # (B,)
+        cls_ids = lut[scen_idx]                   # (B,)
         B = probe_x.size(0)
         logits = torch.full(
             (B, self._n_classes), -1e9, dtype=probe_x.dtype, device=device
