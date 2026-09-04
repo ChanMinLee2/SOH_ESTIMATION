@@ -449,6 +449,7 @@ def main() -> None:
         f.write("epoch,lambda_l0,beta,tr_rmse,tr_r2,val_rmse,val_r2,gate_saturation,is_selected\n")
 
     best_sat = float("inf")
+    best_val_rmse = float("inf")  # sat 동률일 때 tie-break용 (2026-09-04 추가)
     best_epoch = -1
     no_improve = 0  # L0 완전 램프 이후, best_sat 갱신 없이 지난 에폭 수
 
@@ -505,11 +506,20 @@ def main() -> None:
 
         sat = _gate_saturation_fraction(model)
 
-        # Stage1: 체크포인트 선택 = "L0가 완전히 램프된 이후" 구간에서 포화도 최소
+        # Stage1: 체크포인트 선택 = "L0가 완전히 램프된 이후" 구간에서 포화도 최소.
+        # sat은 "애매구간([0.1,0.9]) 게이트 개수/전체 게이트 개수"라 이산값이다 — 게이트가
+        # 완전히 이산화된 뒤에는(흔한 경우) 수십~수백 에폭 동안 정확히 같은 값이 이어지는데,
+        # 예전엔 엄격한 부등호(sat < best_sat)라 그 구간의 첫 에폭에 영원히 고정되고 이후
+        # val_rmse가 더 좋아져도(예: 0903 calib100 런에서 epoch 235 고정 vs epoch 268이
+        # val_rmse 3.1% 더 좋음) 전부 버려졌다. sat이 정확히 같을 때는(부동소수점 근사 아닌
+        # 진짜 이산값 동률이므로 epsilon 불필요) val_rmse가 더 좋은 쪽으로 갱신한다 — sat이
+        # 이미 같으므로 "게이트가 덜 이산화된 애매한 시점을 고른다"는 원래 우려는 재발하지
+        # 않는다(2026-09-04).
         is_selected = False
         if epoch >= l0_fully_ramped_ep:
-            if sat < best_sat:
+            if sat < best_sat or (sat == best_sat and val_rmse_v < best_val_rmse):
                 best_sat = sat
+                best_val_rmse = val_rmse_v
                 best_epoch = epoch
                 is_selected = True
                 no_improve = 0
