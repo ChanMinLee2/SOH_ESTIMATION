@@ -311,6 +311,9 @@ def main():
                         help="방전 probe 상위 m개 (yaml discharge_probe_m 오버라이드, Step 6 전달)")
     parser.add_argument("--scen-k",      type=int, default=None,
                         help="시나리오별 scen HI 수 (yaml scen_k_count 오버라이드, Step 6 전달)")
+    parser.add_argument("--lambda-l0-override", type=float, default=None, dest="lambda_l0_override",
+                        help="loss.lambda_l0을 이 값으로 강제 고정(lambda_l0_auto/yaml 값 무시, "
+                             "phase1_trainer_v2.py --lambda-l0-override 그대로 전달, Step 6 전용)")
     parser.add_argument("--seed",        type=int, default=None,
                         help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (Step 6 전달, 기본 42)")
     parser.add_argument("--split-seed",  type=int, default=None,
@@ -383,6 +386,8 @@ def main():
         print(f"  discharge-m : {args.discharge_m}")
     if args.scen_k is not None:
         print(f"  scen-k      : {args.scen_k}")
+    if args.lambda_l0_override is not None:
+        print(f"  lambda-l0   : {args.lambda_l0_override} (고정, auto/yaml 무시)")
     if args.force_extract:
         print(f"  force-extract: True  (Step4 캐시 무시)")
     print(f"  실행 스텝   :")
@@ -431,6 +436,8 @@ def main():
                 step_extra += ["--discharge-m", str(args.discharge_m)]
             if args.scen_k is not None:
                 step_extra += ["--scen-k", str(args.scen_k)]
+            if args.lambda_l0_override is not None:
+                step_extra += ["--lambda-l0-override", str(args.lambda_l0_override)]
             # phase1_trainer_v2.py는 --seed/--split-seed가 required=True라 항상 값을
             # 넘겨야 한다 — 미지정 시 42로 채운다.
             _seed = args.seed if args.seed is not None else 42
