@@ -65,7 +65,11 @@ DIS_SEG_LABELS = ["SoC 60~100%\n(초반·고전압)", "SoC 30~60%\n(플래토)",
 CHG_SEG_COLORS = ["#f9e79f", "#a9dfbf", "#aed6f1"]
 CHG_SEG_LABELS = ["SoC 0~30%\n(초반·저전압)", "SoC 30~60%\n(플래토)", "SoC 60~100%\n(후반·CV)"]
 
-DS_COLOR = {"MIT": "#1f77b4", "HUST": "#d55e00"}
+DS_COLOR = {"MIT": "#1f77b4", "HUST": "#d55e00", "TJU": "#2ca02c", "CALCE": "#9467bd"}
+# 2026-09-05: TJU/CALCE(ncm 그룹) 통합 — df에 실제로 있는 데이터셋만 그리므로
+# (모든 함수가 `sub = df[df["dataset"]==ds]; if len(sub)==0: continue` 패턴) lfp
+# 그룹(df에 MIT/HUST만 존재)을 넘겨도 TJU/CALCE 항목은 자동으로 건너뛰어져 무해함.
+DS_LINESTYLE = {"MIT": "-", "HUST": "--", "TJU": "-", "CALCE": "--"}
 
 # ── 카테고리 메타 ──────────────────────────────────────────────────────────────
 CATEGORIES = [
@@ -491,13 +495,16 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
             color    = scen_colors.get(scen, "#888888")
             scen_lbl = scen_labels.get(scen, scen)
 
-            for ds, ls in [("MIT", "-"), ("HUST", "--")]:
+            _first_ds_with_data = None
+            for ds, ls in DS_LINESTYLE.items():
                 sub = df[df["dataset"] == ds][
                     ["cell_id", full_key, "capacity_Ah"]
                 ].dropna()
                 if len(sub) == 0:
                     continue
                 has_data = True
+                if _first_ds_with_data is None:
+                    _first_ds_with_data = ds
 
                 for _, grp in sub.groupby("cell_id"):
                     grp_s = grp.sort_values("capacity_Ah", ascending=False)
@@ -506,8 +513,7 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
 
                 mx, my = _median_trend(sub, full_key)
                 if len(mx) >= 2:
-                    lbl = (f"{scen_lbl} / {ds}"
-                           if (ds == "MIT" and ls == "-") else None)
+                    lbl = f"{scen_lbl} / {ds}" if ds == _first_ds_with_data else None
                     ax.plot(mx, my, color=color, lw=2.0, alpha=0.85,
                             ls=ls, label=lbl, zorder=3)
 

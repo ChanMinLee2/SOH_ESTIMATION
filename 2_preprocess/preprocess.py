@@ -70,9 +70,16 @@ def _resolve_unified_src(dataset: str) -> Path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _remove_empty_cycles(df: pd.DataFrame, min_active_rows: int = 5) -> tuple:
-    """charge/discharge 행이 min_active_rows 미만인 사이클 제거.
+    """charge/discharge 행이 min_active_rows 미만인 사이클, 또는 discharge phase가
+    전혀 없는 사이클(capacity_Ah 정의 불가) 제거.
 
     MIT cycle 1처럼 rest 2행만 존재하는 초기화 아티팩트를 제거.
+    CALCE는 원본 파일이 세션 경계에서 끊기면서 charge만 있고 discharge가 없는
+    조각 사이클이 파일 경계마다 산발적으로 생긴다(2026-09-05 실측: 16개 CALCE
+    셀 전체에서 49건 확인, capacity_Ah가 항상 0.0으로 계산되어 SOH 라벨링 불가).
+    이런 조각은 active row 수만으로는 못 걸러지므로(수백 행짜리 charge-only
+    조각도 있음) discharge phase 존재 여부로 별도 검사. MIT/HUST/TJU는 이 조건으로
+    추가 제거되는 사이클 0건(실측 확인) — 기존 데이터셋에 영향 없음.
 
     Returns:
         (cleaned_df, n_removed, removed_cycles_set)
@@ -82,6 +89,9 @@ def _remove_empty_cycles(df: pd.DataFrame, min_active_rows: int = 5) -> tuple:
     bad_cycles    = set(active_counts[active_counts < min_active_rows].index)
     all_cycles    = set(df["cycle"].unique())
     bad_cycles   |= all_cycles - set(active_counts.index)   # active 행 전혀 없는 사이클
+
+    dis_cycles    = set(df.loc[df["phase"] == "discharge", "cycle"].unique())
+    bad_cycles   |= all_cycles - dis_cycles                 # discharge 행이 전혀 없는 사이클
 
     if not bad_cycles:
         return df, 0, set()
@@ -589,8 +599,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="unified PKL → 7단계 이상 사이클·행 제거 → postprocess 저장"
     )
-    parser.add_argument("--dataset",  default="all", choices=["mit", "hust", "all"],
-                        help="처리할 데이터셋 (기본: all)")
+    parser.add_argument("--dataset",  default="all",
+                        choices=["mit", "hust", "tju", "calce", "all"],
+                        help="처리할 데이터셋 (기본: all). TJU/CALCE는 2026-09-05 추가 — "
+                             "필터 로직 자체는 스키마 기반이라 데이터셋 무관하게 그대로 재사용된다.")
     parser.add_argument("--skip-shape",   action="store_true",
                         help="[필터7] 완전 비활성화 — shape_sigma/KNOWN_SHAPE_ANOMALIES "
                              "무관하게 호출 자체를 건너뜀(기존 --shape-sigma 완화와 분리된 "
@@ -629,7 +641,7 @@ def main():
         print(f"  출력 경로            : {postprocess_root}  (--skip-shape로 기존 clean/과 분리)")
 
     all_records = []
-    SAMPLE_IDS  = {"MIT": "b1c0", "HUST": "1-1"}
+    SAMPLE_IDS  = {"MIT": "b1c0", "HUST": "1-1", "TJU": "CY25-05_1-#1", "CALCE": "CS2_8"}
     before_caps: dict = {}
 
     if args.dataset in ("mit", "all"):
@@ -657,6 +669,34 @@ def main():
             print(f"\n[HUST] {hust_src} → {hust_dst}")
             all_records.extend(
                 process_dir(hust_src, hust_dst, w, s, m, vm,
+                            dgs, dgf, cgs, cgf, csgs, csgf,
+                            ss, sw, sg, args.workers, args.skip_shape))
+
+    if args.dataset in ("tju", "all"):
+        tju_src = _resolve_unified_src("TJU")
+        tju_dst = postprocess_root / "TJU"
+        if not tju_src.exists():
+            print(f"\n[SKIP] TJU 폴더 없음: {tju_src}")
+        else:
+            before_caps["TJU"] = (SAMPLE_IDS["TJU"],
+                                  *_cap_series(tju_src / f"{SAMPLE_IDS['TJU']}.pkl"))
+            print(f"\n[TJU] {tju_src} → {tju_dst}")
+            all_records.extend(
+                process_dir(tju_src, tju_dst, w, s, m, vm,
+                            dgs, dgf, cgs, cgf, csgs, csgf,
+                            ss, sw, sg, args.workers, args.skip_shape))
+
+    if args.dataset in ("calce", "all"):
+        calce_src = _resolve_unified_src("CALCE")
+        calce_dst = postprocess_root / "CALCE"
+        if not calce_src.exists():
+            print(f"\n[SKIP] CALCE 폴더 없음: {calce_src}")
+        else:
+            before_caps["CALCE"] = (SAMPLE_IDS["CALCE"],
+                                    *_cap_series(calce_src / f"{SAMPLE_IDS['CALCE']}.pkl"))
+            print(f"\n[CALCE] {calce_src} → {calce_dst}")
+            all_records.extend(
+                process_dir(calce_src, calce_dst, w, s, m, vm,
                             dgs, dgf, cgs, cgf, csgs, csgf,
                             ss, sw, sg, args.workers, args.skip_shape))
 

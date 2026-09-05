@@ -13,3 +13,5 @@
 ./docs/date_results/*
 *_RESULTS.md
 *.log
+/1_convert/CALCE/*
+/1_convert/TJU/*

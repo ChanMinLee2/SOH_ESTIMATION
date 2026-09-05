@@ -145,10 +145,9 @@ def _parse_args() -> argparse.Namespace:
                    help="config.yaml의 data.seg_data_dir 오버라이드 (위와 동일 이유)")
     p.add_argument("--device", default="auto")
     p.add_argument("--export-for-visualize", action="store_true", dest="export_for_visualize",
-                   help="visualize_results.py의 RunBundle이 읽을 수 있도록 "
-                        "metrics/metrics.json, predictions/test_predictions.csv, "
-                        "routing/routing_table.csv를 run_dir에 추가로 저장한다 "
-                        "(plot_phase1_capacity_comparison.py로 여러 run을 비교할 때 필요)")
+                   help="(레거시, 기본 동작이 됨— 지정 여부 무관) metrics/metrics.json, "
+                        "predictions/test_predictions.csv, routing/routing_table.csv는 "
+                        "이제 항상 저장된다(2026-09-06)")
     return p.parse_args()
 
 
@@ -327,8 +326,10 @@ def main() -> None:
     evaluator._plot_capacity_curves(test_modes[_curve_mode]["_pred"])
     print(f"[test_p1] 저장: {figures_dir}")
 
-    if args.export_for_visualize:
-        _export_for_visualize(run_dir, evaluator, test_modes, spec)
+    # 2026-09-06: metrics/metrics.json 등은 기본으로 항상 저장(예전엔 --export-for-visualize
+    # 없이 돌리면 콘솔 출력·figures/ PNG만 남고 metrics.json 자체가 아예 안 생겨서 혼동을
+    # 일으켰다). 플래그는 하위 호환을 위해 그대로 받되 더 이상 이 저장 여부를 좌우하지 않는다.
+    _export_for_visualize(run_dir, evaluator, test_modes, spec)
 
 
 def _smoothed_error_grid(x: np.ndarray, y: np.ndarray, err: np.ndarray,

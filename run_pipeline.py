@@ -221,6 +221,14 @@ def main():
         help="Step 6/7 전용 — v5(그룹 게이팅) 계보를 재현할 때만 지정. 기본은 미사용(v4 방식).",
     )
     parser.add_argument(
+        "--include-stat-leak", action="store_true", dest="include_stat_leak",
+        help="Step 6/7 전용 — SOH_EXCLUDE_STAT_LEAK=1 자동 주입을 끄고 N_HI=66(stat_q_abs/"
+             "stat_energy_seg 포함)으로 학습·평가한다. 기본(미지정)은 N_HI=64(v0~v5 체크포인트 "
+             "계보와 동일). 66으로 돌리려면 --kernel-features-pkl/--interaction-json도 66-HI "
+             "기준으로 새로 만든 파일을 같이 지정해야 한다 — 64-HI용 기본 파일(shared_hi_mask가 "
+             "64 길이)을 그대로 쓰면 shape 불일치로 죽는다(docs/260903_RESULTS.md §5-3).",
+    )
+    parser.add_argument(
         "--p1-tag", default="p1v4_full", dest="p1_tag",
         help="Step 6 phase1_trainer_v2.py의 --tag (run 디렉터리 이름에 들어감, 기본: p1v4_full)",
     )
@@ -480,11 +488,16 @@ def main():
                       "없습니다(train_scr.py 전용 플래그) — Step 6에는 전달하지 않습니다. "
                       "해당 변형 데이터로 Phase 1을 학습하려면 --data-dir/--seg-data-dir을 "
                       "phase1_trainer_v2.py에 직접 지정하는 별도 실행이 필요합니다.")
-            if os.environ.get("SOH_EXCLUDE_STAT_LEAK") != "1":
+            if args.include_stat_leak:
+                print("\n  [안내] --include-stat-leak 지정 — SOH_EXCLUDE_STAT_LEAK을 설정하지 "
+                      "않습니다(N_HI=66, stat_q_abs/stat_energy_seg 포함). --kernel-features-pkl/"
+                      "--interaction-json이 66-HI 기준 파일이 아니면 shape 불일치로 실패합니다.")
+            elif os.environ.get("SOH_EXCLUDE_STAT_LEAK") != "1":
                 print("\n  [안내] SOH_EXCLUDE_STAT_LEAK=1 을 Step 6 하위 프로세스 환경에 "
                       "자동 설정합니다(v0~v5 체크포인트 계보는 전부 N_HI=64 기준 — 이 값이 "
                       "없으면 66으로 계산돼 shape 불일치가 납니다). Step 7도 동일 계보를 "
-                      "이어가야 하므로 같은 값을 물려받습니다.")
+                      "이어가야 하므로 같은 값을 물려받습니다. 66으로 돌리려면 "
+                      "--include-stat-leak을 지정하세요.")
 
             # Phase 1 학습 전 스냅샷 (phase1_trainer_v2.py는 p1v2_runs/ 전용 디렉터리 사용)
             snapshot = _snapshot_p1v2_run_dirs()
@@ -514,9 +527,14 @@ def main():
 
         # v0~v5 체크포인트 계보는 N_HI=64(SOH_EXCLUDE_STAT_LEAK=1) 기준으로 통일돼 있어야
         # 하므로, phase1_trainer_v2.py를 쓰는 Step 6과 그걸 평가하는 Step 7에 동일 값을 준다.
+        # --include-stat-leak을 주면 이 자동주입 자체를 건너뛰어 N_HI=66으로 계산되게 한다
+        # (2026-09-06, docs/260903_RESULTS.md §5-3의 "실질적으로 유일한 코드 수정").
         _config_flag = "--model-config" if num == 6 else None
         _step_model_config = args.phase1_model_config if num == 6 else None
-        _extra_env = {"SOH_EXCLUDE_STAT_LEAK": "1"} if num in (6, 7) else None
+        if num in (6, 7) and not args.include_stat_leak:
+            _extra_env = {"SOH_EXCLUDE_STAT_LEAK": "1"}
+        else:
+            _extra_env = None
         ok = run_step(num, name, script, step_extra, use_workers, args.workers,
                        _step_model_config, config_flag=_config_flag, extra_env=_extra_env)
 

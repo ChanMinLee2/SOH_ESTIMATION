@@ -37,8 +37,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from data_directories import DATA_4_HI_ROOT  # noqa: E402
-MIT_DIR  = DATA_4_HI_ROOT / "clean" / "MIT"
-HUST_DIR = DATA_4_HI_ROOT / "clean" / "HUST"
+MIT_DIR   = DATA_4_HI_ROOT / "clean" / "MIT"
+HUST_DIR  = DATA_4_HI_ROOT / "clean" / "HUST"
+TJU_DIR   = DATA_4_HI_ROOT / "clean" / "TJU"     # 2026-09-05 추가
+CALCE_DIR = DATA_4_HI_ROOT / "clean" / "CALCE"   # 2026-09-05 추가
 OUT_DIR  = Path(__file__).resolve().parent / "outputs"
 
 EXPECTED_COLS = {"cell_id", "cycle", "segment_id", "time_s",
@@ -243,9 +245,11 @@ if __name__ == "__main__":
                         help="병렬 프로세스 수 (기본: 4)")
     args = parser.parse_args()
 
-    df_mit,  issues_mit  = run_check(MIT_DIR,  123, "MIT",  args.workers)
-    df_hust, issues_hust = run_check(HUST_DIR,  77, "HUST", args.workers)
-    all_issues = issues_mit + issues_hust
+    df_mit,   issues_mit   = run_check(MIT_DIR,    123, "MIT",   args.workers)
+    df_hust,  issues_hust  = run_check(HUST_DIR,    77, "HUST",  args.workers)
+    df_tju,   issues_tju   = run_check(TJU_DIR,     55, "TJU",   args.workers)
+    df_calce, issues_calce = run_check(CALCE_DIR,   16, "CALCE", args.workers)
+    all_issues = issues_mit + issues_hust + issues_tju + issues_calce
 
     # ── 콘솔 요약 ─────────────────────────────────────────────────────────────
     issues_df = pd.DataFrame(all_issues) if all_issues else pd.DataFrame()
@@ -278,7 +282,7 @@ if __name__ == "__main__":
     # ── CSV 저장 ──────────────────────────────────────────────────────────────
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    report_df = pd.concat([df_mit, df_hust], ignore_index=True)
+    report_df = pd.concat([df_mit, df_hust, df_tju, df_calce], ignore_index=True)
     report_path = OUT_DIR / "integrity_report.csv"
     report_df.to_csv(report_path, index=False)
 

@@ -65,6 +65,33 @@ def split_cells(
     return train, val, test
 
 
+def split_cells_per_dataset(
+    cell_ids_by_dataset: dict[str, list[str]],
+    train_ratio: float = 0.6,
+    val_ratio: float = 0.2,
+    seed: int = 42,
+) -> tuple[list[str], list[str], list[str]]:
+    """데이터셋별로 독립적으로 split_cells()를 적용한 뒤 합침 (2026-09-05).
+
+    기존 split_cells()를 cell_ids 전체 풀에 한 번만 적용하면(build_datasets의
+    기존 기본 경로), 데이터셋마다 셀 수가 크게 다를 때(MIT 123 / HUST 77 / TJU 55 /
+    CALCE 13) 랜덤 셔플 결과에 따라 특정 데이터셋이 train/val/test 중 한쪽에
+    쏠릴 수 있다 — 이 함수는 각 데이터셋 내에서 독립적으로 6:2:2(기본값)를 적용해
+    모든 split에 4개 데이터셋이 항상 비율대로 섞이도록 보장한다. 같은 seed를 모든
+    데이터셋에 동일하게 써서 재현성은 유지(데이터셋마다 다른 seed를 쓰면 "seed=42"의
+    의미가 데이터셋 조합에 따라 달라져 버림).
+    """
+    train: list[str] = []
+    val:   list[str] = []
+    test:  list[str] = []
+    for ds in sorted(cell_ids_by_dataset):
+        ds_train, ds_val, ds_test = split_cells(
+            cell_ids_by_dataset[ds], train_ratio=train_ratio, val_ratio=val_ratio, seed=seed,
+        )
+        train.extend(ds_train); val.extend(ds_val); test.extend(ds_test)
+    return train, val, test
+
+
 # ---------------------------------------------------------------------------
 # Internal loaders
 # ---------------------------------------------------------------------------
@@ -350,7 +377,22 @@ class SegmentDataset(Dataset):
             cap_init_raw = df["cell_id"].map(first_cap).values.astype(np.float32)
         else:
             nominal = cfg.get("nominal_capacities", {})
-            cap_init_raw = df["dataset"].map(nominal).fillna(1.0).values.astype(np.float32)
+            _missing = sorted(set(df["dataset"].unique()) - set(nominal))
+            if _missing:
+                # 2026-09-05: 예전엔 없는 데이터셋을 .fillna(1.0)으로 조용히 채웠다 —
+                # TJU(정격 ~3.2Ah)처럼 실제 스케일이 1.0Ah와 크게 다른 데이터셋이
+                # nominal_capacities에 빠지면 SOH=cap_raw/1.0로 계산되어 조용히
+                # 완전히 틀린 타깃(예: 3.2 등 >100%)이 만들어지는데도 에러 없이
+                # 학습이 진행됐다. 데이터가 있는데 설정만 깜빡한 경우를 즉시 드러내도록
+                # 명시적으로 실패시킨다.
+                raise ValueError(
+                    f"[dataset] use_initial_capacity=False인데 nominal_capacities에 "
+                    f"없는 데이터셋: {_missing} (있는 키: {sorted(nominal)}) — "
+                    f"cfg['data']['nominal_capacities']에 정격 용량(Ah)을 추가하세요. "
+                    f"CALCE처럼 셀마다 정격이 다른 데이터셋(CS2 1.1Ah/CX2 1.35Ah)은 "
+                    f"이 방식 자체가 부정확하므로 use_initial_capacity=True 권장."
+                )
+            cap_init_raw = df["dataset"].map(nominal).values.astype(np.float32)
 
         # target: SOH ratio (dataset-agnostic, 정규화 불필요)
         soh = cap_raw / np.where(cap_init_raw > 0, cap_init_raw, 1.0)
@@ -618,6 +660,23 @@ def build_datasets(
             print(f"[dataset] forced_test_cells 지정: {len(test_cells)}개 고정 test "
                   f"(전체 지정 {len(forced_test)}개 중 이 run에 존재하는 것만) — "
                   f"나머지 {len(remaining)}개를 train/val로 재분할")
+        elif data_cfg.get("stratify_split_by_dataset", False):
+            # 2026-09-05: 데이터셋별 6:2:2 독립 split (opt-in — 기본 False라 기존
+            # 단일 풀링 split을 쓰는 run들의 재현성에는 전혀 영향 없음). MIT/HUST/TJU/
+            # CALCE처럼 셀 수 편차가 큰 데이터셋을 함께 쓸 때 모든 split에 4개
+            # 데이터셋이 항상 비율대로 섞이도록 보장한다(split_cells_per_dataset 참고).
+            cell_ids_by_ds: dict[str, list[str]] = {
+                ds: sub["cell_id"].unique().tolist()
+                for ds, sub in df.groupby("dataset")
+            }
+            train_cells, val_cells, test_cells = split_cells_per_dataset(
+                cell_ids_by_ds,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                seed=seed,
+            )
+            print(f"[dataset] stratify_split_by_dataset=True — 데이터셋별 독립 6:2:2 적용: "
+                  + ", ".join(f"{ds}={len(ids)}셀" for ds, ids in sorted(cell_ids_by_ds.items())))
         else:
             train_cells, val_cells, test_cells = split_cells(
                 cell_ids,

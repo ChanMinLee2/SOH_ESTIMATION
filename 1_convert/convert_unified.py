@@ -164,6 +164,22 @@ def _remove_zero_current_rest(df: pd.DataFrame) -> tuple:
     return df[~mask].copy().reset_index(drop=True), n
 
 
+def _make_time_relative(df: pd.DataFrame) -> pd.DataFrame:
+    """time_s를 "파일(셀) 전체 누적" -> "사이클별 상대 시간"으로 변환.
+
+    MIT/HUST 원본은 이미 사이클별 상대 시간으로 들어오지만(각 사이클 raw 데이터가
+    자기 자신의 t[0]을 기준으로 만들어짐), TJU/CALCE 원본은 파일 전체(또는 셀 전체
+    수명) 기준 누적 시간이라 이 변환이 필요하다(convert_tju.py/convert_calce.py 전용,
+    2026-09-05 추가). _fix_time_monotonicity보다 먼저 호출할 것 — 그쪽은 사이클 내
+    지역적 역전만 고치지 전역 오프셋은 안 건드리므로 순서를 바꿔도 결과는 같지만,
+    "먼저 상대시간으로 만들고 그 다음 단조성 보정"이 의미상 자연스럽다.
+    """
+    df = df.copy()
+    first = df.groupby("cycle")["time_s"].transform("first")
+    df["time_s"] = df["time_s"] - first
+    return df
+
+
 def _fix_time_monotonicity(df: pd.DataFrame) -> pd.DataFrame:
     """사이클 내 time_s 역방향 점프를 단조 증가로 보정.
 
@@ -838,13 +854,15 @@ def convert_hust(out_root: Path, target_cell: str = None, n_workers: int = 4,
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="MIT/HUST → 통일 포맷 변환 (병렬 지원)")
-    parser.add_argument("--dataset",      default="all", choices=["mit", "hust", "all"])
+    parser = argparse.ArgumentParser(description="MIT/HUST/TJU/CALCE → 통일 포맷 변환 (병렬 지원)")
+    parser.add_argument("--dataset",      default="all",
+                        choices=["mit", "hust", "tju", "calce", "all"])
     parser.add_argument("--output-root",  default=str(OUTPUT_ROOT))
     parser.add_argument("--workers",      type=int, default=3,
                         help="병렬 프로세스 수 (기본: 3)")
     parser.add_argument("--no-cache",     action="store_true",
-                        help="캐시 무시 — _0_data_raw/ 가 있어도 원본 파일부터 재변환")
+                        help="캐시 무시 — _0_data_raw/ 가 있어도 원본 파일부터 재변환 "
+                             "(MIT/HUST 전용 — TJU/CALCE는 원본 자체가 캐시 없이 매번 재변환)")
     args = parser.parse_args()
 
     out_root = Path(args.output_root)
@@ -857,15 +875,33 @@ def main():
         convert_hust(out_root, n_workers=args.workers,
                      no_cache=args.no_cache)
 
+    if args.dataset in ("tju", "all"):
+        # 지연 import — convert_tju.py가 이 모듈(convert_unified)의 공용 유틸을 최상위에서
+        # 가져다 쓰므로, 여기서 최상위 import하면 순환참조가 생긴다(2026-09-05).
+        from convert_tju import convert_tju
+        convert_tju(out_root, n_workers=args.workers)
+
+    if args.dataset in ("calce", "all"):
+        from convert_calce import convert_calce
+        convert_calce(out_root, n_workers=args.workers)
+
     _plot_sample_cells(
         Path(__file__).resolve().parent / "outputs",
         out_root / "MIT",
         out_root / "HUST",
+        out_root / "TJU",
+        out_root / "CALCE",
     )
 
 
-def _plot_sample_cells(out_dir: Path, mit_dir: Path, hust_dir: Path) -> None:
-    """변환 완료 후 대표 셀(MIT b1c0, HUST 1-1) 시각화 → 1_convert/outputs/"""
+def _plot_sample_cells(out_dir: Path, mit_dir: Path, hust_dir: Path,
+                        tju_dir: Path | None = None, calce_dir: Path | None = None) -> None:
+    """변환 완료 후 대표 셀(MIT b1c0, HUST 1-1, TJU/CALCE는 첫 셀) 시각화 → 1_convert/outputs/.
+
+    TJU/CALCE는 convert_tju.py/convert_calce.py(2026-09-05 추가)가 만드는 디렉터리라
+    폴더가 없을 수도 있다(해당 --dataset을 아직 안 돌린 경우) — 그런 경우는 조용히
+    건너뛴다(아래 samples 구성 루프의 existence 체크가 처리).
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -883,8 +919,16 @@ def _plot_sample_cells(out_dir: Path, mit_dir: Path, hust_dir: Path) -> None:
             continue
     plt.rcParams["axes.unicode_minus"] = False
 
+    candidates = [("MIT", mit_dir, "b1c0"), ("HUST", hust_dir, "1-1")]
+    if tju_dir is not None:
+        candidates.append(("TJU", tju_dir, "CY25-05_1-#1"))
+    if calce_dir is not None:
+        candidates.append(("CALCE", calce_dir, "CS2_8"))
+
     samples = []
-    for ds, d, cell in [("MIT", mit_dir, "b1c0"), ("HUST", hust_dir, "1-1")]:
+    for ds, d, cell in candidates:
+        if not d.exists():
+            continue
         p = d / f"{cell}.pkl"
         if not p.exists():
             p_list = sorted(d.glob("*.pkl"))

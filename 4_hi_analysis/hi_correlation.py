@@ -109,8 +109,31 @@ if str(PROJECT_ROOT) not in sys.path:
 from data_directories import DATA_4_HI_ROOT, PKL_CACHE_ROOT  # noqa: E402
 MIT_DIR      = DATA_4_HI_ROOT / "clean" / "MIT"
 HUST_DIR     = DATA_4_HI_ROOT / "clean" / "HUST"
+TJU_DIR      = DATA_4_HI_ROOT / "clean" / "TJU"
+CALCE_DIR    = DATA_4_HI_ROOT / "clean" / "CALCE"
 CACHE_PATH   = PKL_CACHE_ROOT / "hi_features.pkl"
 HI_ROOT      = DATA_4_HI_ROOT
+
+# 데이터셋 그룹 — "lfp"(MIT+HUST, 기존 기본값·캐시 경로 그대로 유지)와
+# "ncm"(TJU+CALCE, NCM/LCO 화학종 신규 통합, 2026-09-05) 두 축을 독립적으로
+# 돌린다. 특징 추출 함수(_extract_one_cell 등)는 화학종을 전혀 구분하지 않고
+# 그대로 재사용 — LFP 카테고리(L01–L20, plateau 물리 기반)도 포함해 두 그룹 모두
+# 동일한 코드로 계산한다(화학종별 특화 로직을 넣지 않는다는 명시적 결정).
+DATASET_GROUPS = {
+    "lfp": ["MIT", "HUST"],
+    "ncm": ["TJU", "CALCE"],
+    "all": ["MIT", "HUST", "TJU", "CALCE"],
+}
+# 대표 셀(플롯용) — 2_preprocess/preprocess.py의 SAMPLE_IDS와 동일 셀
+SAMPLE_CELL_IDS = {"MIT": "b1c0", "HUST": "1-1", "TJU": "CY25-05_1-#1", "CALCE": "CS2_8"}
+DATASET_CMAPS   = {"MIT": "Blues", "HUST": "Oranges", "TJU": "Greens", "CALCE": "Purples"}
+DATASET_COLORS  = {"MIT": "#1f77b4", "HUST": "#d55e00", "TJU": "#2ca02c", "CALCE": "#9467bd"}
+
+
+def _ds_dir(name: str) -> Path:
+    """데이터셋 이름 -> 현재 디렉터리 (MIT_DIR/HUST_DIR은 --skip-shape 시 런타임에
+    재할당되므로 모듈 전역을 매번 새로 조회해야 한다)."""
+    return {"MIT": MIT_DIR, "HUST": HUST_DIR, "TJU": TJU_DIR, "CALCE": CALCE_DIR}[name]
 
 # common 패키지를 subprocess에서도 import 가능하게
 if str(PROJECT_ROOT) not in sys.path:
@@ -1380,11 +1403,10 @@ def _build_flat_correlation_df(df_seg: pd.DataFrame, df_cycle: pd.DataFrame) -> 
     return df_cycle.merge(wide, on=["cell_id", "cycle"], how="left").reset_index(drop=True)
 
 
-def _save_sample_csvs(
-    seg_mit: pd.DataFrame, cyc_mit: pd.DataFrame,
-    seg_hust: pd.DataFrame, cyc_hust: pd.DataFrame,
-) -> None:
+def _save_sample_csvs(per_ds: dict) -> None:
     """데이터셋별 대표 셀 첫 번째 사이클을 cycle/seg 형식으로 CSV 저장.
+
+    per_ds: {dataset_name: (df_cycle, df_seg)}.
 
     seg CSV엔 이제 그 사이클의 세그먼트 인스턴스가 (n_samples개면) 여러 행으로 그대로
     남는다 — 예전엔 시나리오당 1행으로 뭉개진 걸 저장했었다.
@@ -1392,7 +1414,8 @@ def _save_sample_csvs(
     sample_dir = HI_ROOT / "samples"
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    for ds_tag, df_cyc, df_seg in [("mit", cyc_mit, seg_mit), ("hust", cyc_hust, seg_hust)]:
+    for ds_name, (df_cyc, df_seg) in per_ds.items():
+        ds_tag = ds_name.lower()
         if df_cyc.empty:
             continue
         first_cell = df_cyc["cell_id"].iloc[0]
@@ -1557,6 +1580,7 @@ def load_or_extract(
     axis_cfg: dict | None = None,
     exclude_cv: bool = False,
     no_shape: bool = False,
+    dataset_group: str = "lfp",
 ) -> pd.DataFrame:
     """캐시가 있으면 로드, 없으면 전체 추출 후 저장.
 
@@ -1565,8 +1589,14 @@ def load_or_extract(
     no_shape=True: preprocess.py --skip-shape로 만든 _4_data_hi/clean_noshape/를
     입력으로 쓰고(main()에서 MIT_DIR/HUST_DIR을 그쪽으로 재지정), 결과 캐시/저장
     경로에 '_noshape' 접미사를 붙여 필터7 있는 기본 버전과 절대 안 겹치게 한다.
+    dataset_group="lfp"(기본, MIT+HUST): 기존 캐시 경로 그대로 유지(하위호환).
+    dataset_group="ncm"(TJU+CALCE) / "all": 캐시/저장 경로에 '_{group}' 접미사를
+    붙여 기존 lfp 결과와 절대 안 겹치게 한다(2026-09-05 신규).
     """
     axis_cfg = dict(axis_cfg or {})
+    if dataset_group not in DATASET_GROUPS:
+        raise ValueError(f"알 수 없는 dataset_group: {dataset_group!r} (선택: {list(DATASET_GROUPS)})")
+    _ds_names = DATASET_GROUPS[dataset_group]
 
     # q_frac_wide: 파라미터별 고유 경로 사용
     if axis == "q_frac_wide":
@@ -1601,6 +1631,10 @@ def load_or_extract(
         _cache    = _cache.with_name(_cache.stem + "_noshape.pkl")
         _axis_dir = f"{_axis_dir}_noshape"
 
+    if dataset_group != "lfp":
+        _cache    = _cache.with_name(_cache.stem + f"_{dataset_group}.pkl")
+        _axis_dir = f"{_axis_dir}_{dataset_group}"
+
     if not force and _cache.exists():
         print(f"  캐시 로드: {_cache}")
         return pd.read_pickle(_cache)
@@ -1620,15 +1654,18 @@ def load_or_extract(
         print("[경고] cluster 축은 fit() 없이 실행 시 모든 세그먼트가 cluster 0으로 분류됩니다. "
               "HI는 추출되지만 시나리오 라우팅이 무의미합니다.")
 
-    print(f"=== MIT HI 추출 (axis={axis}, exclude_cv={exclude_cv}) ===")
-    seg_mit,  cyc_mit,  cov_mit  = load_all(MIT_DIR,  n_workers=n_workers, axis=axis,
-                                             axis_cfg=axis_cfg, exclude_cv=exclude_cv)
-    _save_per_cell_hi(seg_mit, cyc_mit, "MIT", axis=_axis_dir)
-    print(f"=== HUST HI 추출 (axis={axis}, exclude_cv={exclude_cv}) ===")
-    seg_hust, cyc_hust, cov_hust = load_all(HUST_DIR, n_workers=n_workers, axis=axis,
-                                             axis_cfg=axis_cfg, exclude_cv=exclude_cv)
-    _save_per_cell_hi(seg_hust, cyc_hust, "HUST", axis=_axis_dir)
-    _save_sample_csvs(seg_mit, cyc_mit, seg_hust, cyc_hust)
+    seg_per_ds: dict = {}
+    cyc_per_ds: dict = {}
+    cov_per_ds: dict = {}
+    for ds_name in _ds_names:
+        print(f"=== {ds_name} HI 추출 (axis={axis}, exclude_cv={exclude_cv}) ===")
+        seg_i, cyc_i, cov_i = load_all(_ds_dir(ds_name), n_workers=n_workers, axis=axis,
+                                        axis_cfg=axis_cfg, exclude_cv=exclude_cv)
+        _save_per_cell_hi(seg_i, cyc_i, ds_name, axis=_axis_dir)
+        seg_per_ds[ds_name] = seg_i
+        cyc_per_ds[ds_name] = cyc_i
+        cov_per_ds[ds_name] = cov_i
+    _save_sample_csvs({ds: (cyc_per_ds[ds], seg_per_ds[ds]) for ds in _ds_names})
 
     # ScenarioSpec 저장
     _spec_dir = HI_ROOT / _axis_dir
@@ -1637,14 +1674,14 @@ def load_or_extract(
     print(f"  ScenarioSpec 저장: {_spec_dir / 'scenario_spec.json'}")
 
     # random_segment 누락 비율 텍스트 저장 (coverage가 있을 때만)
-    if cov_mit or cov_hust:
-        _save_coverage_stats(_spec_dir / "coverage_stats.txt",
-                             {"MIT": cov_mit, "HUST": cov_hust}, axis, axis_cfg)
+    if any(cov_per_ds.values()):
+        _save_coverage_stats(_spec_dir / "coverage_stats.txt", cov_per_ds, axis, axis_cfg)
 
-    seg_all = pd.concat([seg_mit, seg_hust], ignore_index=True)
-    cyc_all = pd.concat([cyc_mit, cyc_hust], ignore_index=True)
-    print(f"  총 사이클: MIT {len(cyc_mit):,}  /  HUST {len(cyc_hust):,}"
-          f"  (세그먼트 인스턴스: MIT {len(seg_mit):,} / HUST {len(seg_hust):,})")
+    seg_all = pd.concat([seg_per_ds[ds] for ds in _ds_names], ignore_index=True)
+    cyc_all = pd.concat([cyc_per_ds[ds] for ds in _ds_names], ignore_index=True)
+    print("  총 사이클: " + " / ".join(f"{ds} {len(cyc_per_ds[ds]):,}" for ds in _ds_names)
+          + "  (세그먼트 인스턴스: "
+          + " / ".join(f"{ds} {len(seg_per_ds[ds]):,}" for ds in _ds_names) + ")")
 
     # Step4 자체 상관분석/플롯 전용 wide df — 모델 학습(5_model)은 seg pkl(native
     # 포맷, 세그먼트당 1행)을 직접 읽으므로 이 df는 학습에 안 쓰인다(_build_flat_correlation_df
@@ -1655,12 +1692,13 @@ def load_or_extract(
     return df
 
 
-def compute_correlations(df: pd.DataFrame) -> pd.DataFrame:
-    """Spearman ρ(HI, capacity_Ah) — MIT / HUST 각각."""
+def compute_correlations(df: pd.DataFrame, datasets: list | None = None) -> pd.DataFrame:
+    """Spearman ρ(HI, capacity_Ah) — 데이터셋별(기본 MIT/HUST, ncm 그룹은 TJU/CALCE)."""
+    datasets = list(datasets) if datasets is not None else ["MIT", "HUST"]
     df = df.copy()
     df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
     result = {}
-    for ds in ["MIT", "HUST"]:
+    for ds in datasets:
         sub  = df[df["dataset"] == ds]
         rhos = {}
         for hi in ALL_HI_KEYS:
@@ -1688,14 +1726,15 @@ def _draw_heatmap(ax, keys, title, corr_df, datasets=("MIT", "HUST")):
         corr_df.loc[avail].abs().mean(axis=1)
         .fillna(0).sort_values(ascending=False).index.tolist()
     )
-    hm = corr_df.loc[order, list(datasets)].values
+    datasets = list(datasets)
+    hm = corr_df.loc[order, datasets].values
 
     im = ax.imshow(hm.T, aspect="auto", cmap="RdYlGn",
                    vmin=-1, vmax=1, interpolation="nearest")
     ax.set_xticks(range(len(order)))
     ax.set_xticklabels([HI_LABELS.get(k, k) for k in order],
                        rotation=38, ha="right", fontsize=7)
-    ax.set_yticks([0, 1])
+    ax.set_yticks(range(len(datasets)))
     ax.set_yticklabels(datasets, fontsize=9, fontweight="bold")
     ax.set_title(title, fontsize=8, pad=4, fontweight="bold")
     for xi, k in enumerate(order):
@@ -1710,8 +1749,8 @@ def _draw_heatmap(ax, keys, title, corr_df, datasets=("MIT", "HUST")):
 
 
 def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
-                     out_path: Path, n_top: int = 4):
-    datasets = ["MIT", "HUST"]
+                     out_path: Path, n_top: int = 4, datasets: list | None = None):
+    datasets = list(datasets) if datasets is not None else ["MIT", "HUST"]
     df = df.copy()
     df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
 
@@ -1742,7 +1781,7 @@ def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
     # ── 행 0: Global ──────────────────────────────────────────────────────
     ax0 = fig.add_subplot(gs_main[0])
     im0, _ = _draw_heatmap(ax0, HI_GROUPS["Global"],
-                           "Global  (15 HIs)", corr_df)
+                           "Global  (15 HIs)", corr_df, datasets=datasets)
 
     # ── 행 1–N: 세그먼트별 3 sub-panels (HI_GROUPS 기반 동적 생성) ─────────
     seg_rows = [
@@ -1760,6 +1799,7 @@ def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
                 HI_GROUPS[f"{seg} — {cat}"],
                 f"{seg_title}  [{cat}]",
                 corr_df,
+                datasets=datasets,
             )
             if im_s is not None and ref_im is None:
                 ref_im = im_s
@@ -1781,9 +1821,9 @@ def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
     top_his  = abs_mean.index[:n_top].tolist()
 
     gs_sc = gridspec.GridSpecFromSubplotSpec(
-        2, n_top, subplot_spec=gs_main[n_segs + 1], hspace=0.52, wspace=0.30)
-    cmaps  = {"MIT": "Blues",   "HUST": "Oranges"}
-    colors = {"MIT": "#1f77b4", "HUST": "#d55e00"}
+        len(datasets), n_top, subplot_spec=gs_main[n_segs + 1], hspace=0.52, wspace=0.30)
+    cmaps  = DATASET_CMAPS
+    colors = DATASET_COLORS
 
     for ci, hi_key in enumerate(top_his):
         for ri, ds in enumerate(datasets):
@@ -1818,10 +1858,12 @@ def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
     plt.close()
 
 
-def _plot_sample_hi(df: pd.DataFrame, corr_df: pd.DataFrame, out_dir: Path) -> None:
+def _plot_sample_hi(df: pd.DataFrame, corr_df: pd.DataFrame, out_dir: Path,
+                     datasets: list | None = None) -> None:
     """대표 셀 상위 HI 사이클 추이."""
-    SAMPLES = {"MIT": "b1c0", "HUST": "1-1"}
-    CMAPS   = {"MIT": "Blues", "HUST": "Oranges"}
+    datasets = list(datasets) if datasets is not None else ["MIT", "HUST"]
+    SAMPLES = {ds: SAMPLE_CELL_IDS[ds] for ds in datasets}
+    CMAPS   = {ds: DATASET_CMAPS[ds] for ds in datasets}
 
     df_p = df.copy()
     df_p["dataset"] = df_p["dataset"].replace("MIT_MAT", "MIT")
@@ -1940,8 +1982,11 @@ def main():
                         help=f"병렬 프로세스 수 (기본: CPU수-2 = {max(1, cpu - 2)})")
     parser.add_argument("--force",   action="store_true",
                         help="캐시 무시하고 HI 재추출")
-    parser.add_argument("--dataset", type=str, default="MIT",
-                        help="데이터셋 (MIT 또는 HUST, 기본: MIT)")
+    parser.add_argument("--dataset-group", type=str, default="lfp", dest="dataset_group",
+                        choices=list(DATASET_GROUPS),
+                        help="데이터셋 그룹: lfp(MIT+HUST, 기본, 기존 캐시 경로 그대로) | "
+                             "ncm(TJU+CALCE, NCM/LCO 신규 통합) | all(4개 전체). "
+                             "그룹별로 독립된 캐시/저장 경로를 쓰므로 서로 안 겹침.")
     # ── 시나리오 축 ──────────────────────────────────────────────────────────
     parser.add_argument("--seg-axis", type=str, default="qfrac",
                         help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster|q_frac_wide|q_abs|vqslope|"
@@ -2009,6 +2054,10 @@ def main():
     args = parser.parse_args()
 
     if args.skip_shape:
+        if args.dataset_group != "lfp":
+            print(f"[ERROR] --skip-shape는 clean_noshape/{{MIT,HUST}}만 있음 — "
+                  f"dataset_group={args.dataset_group!r}(TJU/CALCE 포함)와 함께 쓸 수 없음")
+            return
         global MIT_DIR, HUST_DIR
         MIT_DIR  = DATA_4_HI_ROOT / "clean_noshape" / "MIT"
         HUST_DIR = DATA_4_HI_ROOT / "clean_noshape" / "HUST"
@@ -2060,13 +2109,15 @@ def main():
     # ── 실행 조건 요약 출력 (추출 진입 전) ──────────────────────────────────
     _print_run_config(_axis, _axis_cfg, args)
 
+    _ds_names = DATASET_GROUPS[args.dataset_group]
+
     df = load_or_extract(n_workers=args.workers, force=args.force,
                          axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv,
-                         no_shape=args.skip_shape)
+                         no_shape=args.skip_shape, dataset_group=args.dataset_group)
     print(f"\n총 사이클: {len(df):,}")
 
     print("\n=== Spearman ρ 계산 ===")
-    corr = compute_correlations(df)
+    corr = compute_correlations(df, datasets=_ds_names)
 
     for gname, gkeys in HI_GROUPS.items():
         avail = [k for k in gkeys if k in corr.index]
@@ -2094,6 +2145,8 @@ def main():
         _dir_suffix += "_ccOnly"
     if args.skip_shape:
         _dir_suffix += "_noshape"
+    if args.dataset_group != "lfp":
+        _dir_suffix += f"_{args.dataset_group}"
     hi_plot_dir = STEP_DIR / "hi_plot" / (date.today().strftime("%m%d") + _dir_suffix)
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
     out = hi_plot_dir / "hi_correlation.png"
@@ -2105,14 +2158,14 @@ def main():
     # 동일하게 예외를 잡아 경고만 출력하고 계속 진행한다 — --to-step 4처럼 캐시
     # 빌드만 필요한 실행이 순전히 플롯 문제로 실패 처리(exit!=0)되지 않게 하기 위함.
     try:
-        plot_correlation(corr, df, out, n_top=4)
+        plot_correlation(corr, df, out, n_top=4, datasets=_ds_names)
     except Exception as _e:
         print(f"[경고] hi_correlation.png 생성 실패(캐시는 정상 저장됨): {_e}")
 
     out_dir = STEP_DIR / "outputs" / (date.today().strftime("%m%d") + _dir_suffix)
     print("\n=== 대표 셀 HI 플롯 ===")
     try:
-        _plot_sample_hi(df, corr, out_dir)
+        _plot_sample_hi(df, corr, out_dir, datasets=_ds_names)
     except Exception as _e:
         print(f"[경고] 대표 셀 HI 플롯 생성 실패(캐시는 정상 저장됨): {_e}")
 

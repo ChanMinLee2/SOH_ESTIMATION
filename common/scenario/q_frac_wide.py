@@ -144,19 +144,23 @@ class QFracWideSegmenter(Segmenter):
             "lo":  (1.0 - n1,    1.0),
         }
 
-    def _start_positions(self, zone_start: float, zone_end: float) -> np.ndarray:
+    def _start_positions(self, zone_start: float, zone_end: float, n_count: int | None = None) -> np.ndarray:
         """유효 시작 범위 [zone_start, zone_end-n2] 의 균등 격자점.
 
-        n_samples=1 → 범위 중앙점 반환.
+        n_count 생략 시 self.n_samples개(기존 동작). 명시하면 그 개수로 균등배치
+        (assign="none" 전체구간 타일링처럼 self.n_samples와 다른 개수가 필요한
+        경우용, 2026-09-04 추가).
+        개수(n_count 또는 self.n_samples)=1 → 범위 중앙점 반환.
         유효 범위 없음(n2 >= zone_end-zone_start) → 빈 배열.
         """
+        k = self.n_samples if n_count is None else n_count
         lo = zone_start
         hi = zone_end - self.n2
         if hi < lo - 1e-9:
             return np.array([])
-        if self.n_samples == 1:
+        if k == 1:
             return np.array([(lo + hi) / 2.0])
-        return np.linspace(lo, hi, self.n_samples)
+        return np.linspace(lo, hi, k)
 
     # ── 세그먼트 배치 훅 (2026-09-03) ────────────────────────────────────────
     # 고정폭 격자 모드에서 "이 존을 어떤 (시작, 끝) 조각들로 자를지"를 결정하는 훅.
@@ -181,9 +185,25 @@ class QFracWideSegmenter(Segmenter):
         덧붙일 dict(없으면 None).
         q/q_tot은 기본구현에선 안 쓰지만, 오버라이드 쪽이 "이 조각에 실제로 포인트가
         몇 개 들어가는지"를 보고 배치를 조정(min_pts 병합 등)할 수 있게 넘겨준다.
+
+        assign="none"(no_scen, docs/260816_RESULTS.md §5) + 고정폭 격자 모드(비
+        random_segment)일 때는 존 개념을 아예 없애고, 전체 충방전 구간 [0,1]을
+        n2-길이 세그먼트로 균등 타일링한다(2026-09-04). _segment_plan은 방향 하나당
+        한 번 호출되므로(_extract가 충전/방전 각각 한 번씩 부름), 호출당 개수를
+        (floor(n1/n2)+1)*3으로 둬서 **충방전 합산 총 개수가 (floor(n1/n2)+1)*6**이
+        되게 한다 — position_bin의 총 세그먼트 개수(3존×방향2×n_samples와 별개로,
+        시나리오 수 6 자체를 밀도 배수로 씀)와 맞춰, "세그먼트 개수 차이"가 아니라
+        "라우팅 유무"만 두 조건의 차이가 되게 하기 위함(§3-2-C 세그먼트 수 교란
+        통제와 동일 원칙). 호출부(_extract)가 이 경우 zone_start/zone_end를
+        무시하고 단일 "all" 존으로 한 번만 호출하는 것을 전제한다(안 그러면
+        _ZONES 3회 반복 때문에 세그먼트가 3배로 중복된다 — 아래 _extract 참고).
         """
-        return [(float(s), float(s) + self.n2, False, None)
-                for s in self._start_positions(zone_start, zone_end)]
+        if self.assign == "none" and not self.random_segment:
+            k = (int(np.floor(self.n1 / self.n2 + 1e-9)) + 1) * 3
+            starts = self._start_positions(0.0, 1.0, n_count=k)
+        else:
+            starts = self._start_positions(zone_start, zone_end)
+        return [(float(s), float(s) + self.n2, False, None) for s in starts]
 
     def _track_zone_coverage(self) -> bool:
         """True면 고정폭 격자 모드에서도 존 포인트 커버리지를 self.coverage에 집계.
@@ -233,11 +253,19 @@ class QFracWideSegmenter(Segmenter):
         records: list[SegmentRecord] = []
         seg_local = seg_local_start
 
-        for zone_name, latent_class in _ZONES:
-            zone_start, zone_end = bounds[zone_name]
+        # assign="none"(no_scen) + 고정폭 격자 모드는 존 개념이 없어져 _segment_plan이
+        # 전체 구간 [0,1]을 한 번에 타일링한다(위 _segment_plan 참고) — 그러니 여기서도
+        # _ZONES(hi/mid/lo) 3회 대신 단일 "all" 존으로 한 번만 돌아야 한다. 안 그러면
+        # 매번 같은 [0,1] 타일링이 그대로 3번 호출돼 세그먼트가 3배로 중복된다.
+        # random_segment 모드는 이 변경 대상이 아니라(§docs/260816_RESULTS.md §5는
+        # 고정폭 격자만 다룸) 기존 존별 동작을 그대로 유지한다.
+        no_scen_whole_session = (self.assign == "none" and not self.random_segment)
+        zone_iter = [("all", 0)] if no_scen_whole_session else _ZONES
+
+        for zone_name, latent_class in zone_iter:
+            zone_start, zone_end = (0.0, 1.0) if no_scen_whole_session else bounds[zone_name]
             # assign="none" 이면 latent_class(존)를 라우팅에 반영하지 않고 항상 0으로
-            # 고정 — 모델에 노출되는 scenario_id/이름은 방향만 구분(chg/dis), 존 경계
-            # 자체(zone_start/zone_end)는 그대로 사용해 세그먼트 위치는 안 바뀐다.
+            # 고정 — 모델에 노출되는 scenario_id/이름은 방향만 구분(chg/dis).
             _latent     = latent_class if self.assign == "position_bin" else 0
             scenario_id = spec.routing[dir_idx][_latent]
             sname       = spec.scenario_names[scenario_id]
