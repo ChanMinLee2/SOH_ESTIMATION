@@ -8,6 +8,8 @@ from typing import Any, Dict
 import yaml
 import torch
 
+from data_directories import DATA_4_HI_ROOT_STR
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """섹션 단위가 아니라 키 단위 재귀 병합. override가 항상 이긴다 —
@@ -19,6 +21,21 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
         else:
             result[k] = v
     return result
+
+
+def _substitute_data_root(obj: Any) -> Any:
+    """yaml 문자열 값의 `${DATA_4_HI_ROOT}` 토큰을 data_directories.DATA_4_HI_ROOT_STR로
+    치환한다. 로컬(D: 절대경로)과 서버(상대경로 `./`)가 data_directories.py의 `_D_ROOT`
+    하나로 갈리는데, 기존 config.yaml들은 D: 절대경로를 문자열로 직접 박아넣어서
+    서버에서 그대로 못 썼다(예: n2range 64-HI 평가가 상대경로 config라 로컬에 데이터가
+    없어 막혔던 사례) — 이 토큰을 쓰면 같은 yaml이 두 환경에서 다 동작한다."""
+    if isinstance(obj, str):
+        return obj.replace("${DATA_4_HI_ROOT}", DATA_4_HI_ROOT_STR)
+    if isinstance(obj, dict):
+        return {k: _substitute_data_root(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_substitute_data_root(v) for v in obj]
+    return obj
 
 
 def load_config(
@@ -47,7 +64,7 @@ def load_config(
             fixed_cfg = yaml.safe_load(f) or {}
         cfg = _deep_merge(fixed_cfg, cfg)
 
-    return cfg
+    return _substitute_data_root(cfg)
 
 
 def save_config(config: Dict[str, Any], save_path: pathlib.Path) -> None:
