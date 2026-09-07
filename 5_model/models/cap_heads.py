@@ -75,7 +75,10 @@ class TransformerHead(nn.Module):
     semantic 토큰으로 분할해 Transformer Encoder에 입력한다.
       Token 0: probe_x  (64-dim)  — 방향별 probe gate 출력
       Token 1: scen_x   (64-dim)  — 시나리오 gate 출력
-      Token 2: (with_raw_cnn=True) cnn_emb (3-dim) — raw V/I/t CNN 임베딩
+      Token 2: (n_kernel_hi>0) kernel_x (n_kernel_hi-dim) — build_kernel_group_features.py
+               산출물(그룹당 RBF 커널 융합값), probe/scen과 동일하게 통째로 한 토큰으로
+               선형 투영(2026-09-08, v4를 transformer에서도 돌릴 수 있게 추가)
+      Token 3: (with_raw_cnn=True) cnn_emb (3-dim) — raw V/I/t CNN 임베딩
                [h_scen,h_intensity,h_soh], 쪼개지 않고 통째로 한 토큰(docs/260803_RESULTS.md §10)
                또는 (with_raw_flat=True) raw_flat(96-dim) — raw_v‖raw_i를 압축 없이
                통째로 한 토큰으로 선형 투영(방안1, REGRESSION_UPGRADE.md §2). 96개
@@ -96,15 +99,21 @@ class TransformerHead(nn.Module):
         dropout: float = 0.1,
         with_raw_cnn: bool = False,
         with_raw_flat: bool = False,
+        n_kernel_hi: int = 0,
     ):
         super().__init__()
         assert not (with_raw_cnn and with_raw_flat), \
             "with_raw_cnn과 with_raw_flat을 동시에 켤 수 없습니다."
         self.with_raw_cnn = with_raw_cnn
         self.with_raw_flat = with_raw_flat
+        self.n_kernel_hi = n_kernel_hi
         self.probe_embed = nn.Linear(N_HI, d_model)
         self.scen_embed  = nn.Linear(N_HI, d_model)
         self.meta_embed  = nn.Linear(2, d_model)
+        # 커널 융합 HI 블록(build_kernel_group_features.py 산출물) — probe/scen과 마찬가지로
+        # 별도 semantic 토큰 1개로 투영한다. scr_model.py의 concat 순서(probe‖scen‖kernel‖
+        # cnn_emb/raw_flat‖meta)와 정확히 맞춰 forward()에서 슬라이싱한다.
+        self.kernel_embed = nn.Linear(n_kernel_hi, d_model) if n_kernel_hi > 0 else None
         self.cnn_embed   = nn.Linear(_D_CNN, d_model) if with_raw_cnn else None
         self.raw_flat_embed = nn.Linear(_D_RAW_FLAT, d_model) if with_raw_flat else None
 
@@ -128,6 +137,11 @@ class TransformerHead(nn.Module):
         t1 = self.scen_embed(scen_x).unsqueeze(1)            # (B, 1, d)
         tokens = [t0, t1]
         offset = 2 * N_HI
+
+        if self.kernel_embed is not None:
+            kernel_x = x[:, offset: offset + self.n_kernel_hi]   # (B, n_kernel_hi)
+            offset += self.n_kernel_hi
+            tokens.append(self.kernel_embed(kernel_x).unsqueeze(1))
 
         if self.with_raw_cnn:
             cnn_emb = x[:, offset: offset + _D_CNN]           # (B, 3)
@@ -370,8 +384,8 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
         d_head      : MLP hidden dim 또는 Transformer d_model / ResNet block width
         dropout     : dropout rate (yaml model.dropout)
         n_kernel_hi : build_kernel_group_features.py의 커널 융합 HI 블록 폭(0=없음).
-                      Phase 1은 항상 mlp를 강제하므로 mlp만 지원 — 다른 rtype에 이 값을
-                      주면 에러(아직 토큰화 설계가 안 됨).
+                      mlp/transformer/resnet_tab 지원(2026-09-08). i_transformer/
+                      ft_transformer는 아직 미지원 — 에러(설계 미정, 위 NotImplementedError 참고).
     """
     rtype = model_cfg.get("regression_model", "mlp").lower().replace("-", "_")
 
@@ -389,10 +403,12 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
             "i_transformer/ft_transformer는 96개 raw 스칼라의 개별 토큰화 설계가 필요합니다 "
             "(REGRESSION_UPGRADE.md §3.2)."
         )
-    if n_kernel_hi > 0 and rtype != "mlp":
+    if n_kernel_hi > 0 and rtype not in ("mlp", "transformer", "resnet_tab"):
         raise NotImplementedError(
-            f"n_kernel_hi(커널 융합 HI 블록)는 아직 mlp만 지원합니다 (rtype={rtype}). "
-            "transformer 계열은 커널 블록을 별도 토큰으로 넣을지 설계가 필요합니다."
+            f"n_kernel_hi(커널 융합 HI 블록)는 아직 mlp/transformer/resnet_tab만 지원합니다 "
+            f"(rtype={rtype}). i_transformer/ft_transformer는 전체 피처를 개별 스칼라 토큰으로 "
+            "다루는 구조라(feature-wise attention) 커널 블록을 같은 방식(n_kernel_hi개 토큰 "
+            "추가 vs 1개 토큰으로 뭉치기)으로 넣을지 설계가 더 필요합니다."
         )
     head_in = (
         _HEAD_IN_WITH_CNN if with_raw_cnn else
@@ -410,6 +426,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
             d_model=d_head, n_heads=n_heads,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
             with_raw_cnn=with_raw_cnn, with_raw_flat=with_raw_flat,
+            n_kernel_hi=n_kernel_hi,
         )
 
     if rtype in ("i_transformer", "itransformer"):

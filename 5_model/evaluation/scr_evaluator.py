@@ -43,6 +43,30 @@ except ImportError:
 _COST_VEC = np.array(get_hi_cost_vector("dis_hi"), dtype=np.float32)  # (65,)
 
 
+def _infer_dataset_from_cell_id(cell_id: str) -> str:
+    """cell_id 문자열만으로 MIT/HUST/TJU/CALCE를 구분한다(2026-09-08, 데이터셋별
+    breakdown 추가).
+
+    셀 명명 규칙이 4개 데이터셋 간 겹치지 않는다는 사실에 의존(1_convert/convert_*.py
+    변환기들이 만든 실제 셀 이름 확인됨):
+      MIT   : "b1c0", "b2c17" ...   (b + 숫자 + c + 숫자)
+      HUST  : "1-1", "3-8" ...      (숫자-숫자)
+      TJU   : "CY25-05_1-#1" ...    ("CY"로 시작)
+      CALCE : "CS2_33", "CX2_16" ...("CS2_" 또는 "CX2_"로 시작)
+    SegmentDataset이 dataset_id(float, datasets 리스트 내 순서 기반)를 이미 갖고
+    있지만, predict_dataset()의 반환 dict에 아직 안 실려 있어 재배선하는 대신
+    이미 있는 cell_ids 문자열에서 바로 판별한다 — 셀 이름 자체가 데이터셋마다
+    고유한 접두 패턴이라 안전하다.
+    """
+    if cell_id.startswith("CY"):
+        return "TJU"
+    if cell_id.startswith("CS2_") or cell_id.startswith("CX2_"):
+        return "CALCE"
+    if cell_id and cell_id[0].isdigit():
+        return "HUST"
+    return "MIT"
+
+
 class SCREvaluator:
 
     def __init__(
@@ -357,6 +381,18 @@ class SCREvaluator:
             if sel.sum() > 1:
                 m = compute_metrics(t[sel], pred[sel])
                 out[f"level_{name.lower()}"] = {k: float(v) for k, v in m.items()}
+
+        # 데이터셋별 breakdown (2026-09-08) — 4개 데이터셋(MIT/HUST/TJU/CALCE)을
+        # 함께 학습한 run에서 화학종별 성능이 얼마나 다른지 보려면 필요. cell_ids가
+        # 있을 때만(=predict_dataset()이 채워준 경우) 계산한다.
+        cell_ids = p.get("cell_ids")
+        if cell_ids is not None and len(cell_ids) == len(t):
+            ds_labels = np.array([_infer_dataset_from_cell_id(str(c)) for c in cell_ids])
+            for ds_name in sorted(set(ds_labels.tolist())):
+                sel = ds_labels == ds_name
+                if sel.sum() > 1:
+                    m = compute_metrics(t[sel], pred[sel])
+                    out[f"dataset_{ds_name}"] = {k: float(v) for k, v in m.items()}
         return out
 
     def _compute_scenario_metrics(self, p: dict) -> dict:

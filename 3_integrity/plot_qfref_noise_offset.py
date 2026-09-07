@@ -50,13 +50,20 @@ OUT_DIR = Path(__file__).resolve().parent / "outputs"
 EXAMPLE_CELLS = [
     ("MIT", "b1c0"), ("MIT", "b2c0"), ("MIT", "b3c0"),
     ("HUST", "1-1"), ("HUST", "1-2"), ("HUST", "1-3"),
+    # 2026-09-08: TJU/CALCE(NCM/LCO) 추가 — TJU는 온도 그룹(25/35/45°C)당 1개씩,
+    # CALCE는 Step4 게이트 통과한 13셀 중 CS2/CX2 각 화학종 대표 + 혼합 파일(txt+xlsx)
+    # 셀 1개(CX2_16, 재구성 로직 검증 겸용).
+    ("TJU", "CY25-05_1-#1"), ("TJU", "CY35-05_1-#1"), ("TJU", "CY45-05_1-#1"),
+    ("CALCE", "CS2_33"), ("CALCE", "CX2_34"), ("CALCE", "CX2_16"),
 ]
 
 _PHASE_POS = 0.01
 _PHASE_NEG = -0.01
 
-_COLORS = {0.0: "#4C72B0", 0.005: "#C44E52"}
-_FALLBACK = ["#55A868", "#DD8452", "#8172B2", "#937860"]
+# 2026-09-08: offset_amp 값 하나에 여러 조건(예: calib 유무)이 걸릴 수 있게 되면서
+# (offset_amp만으로 키를 잡던) _COLORS/_FALLBACK 조합이 서로 다른 조건에 같은 색을
+# 줄 수 있는 문제가 생겨, conditions 리스트 내 순서(idx) 기준 팔레트로 교체.
+_COND_COLORS = ["#4C72B0", "#C44E52", "#55A868", "#DD8452", "#8172B2", "#937860"]
 
 
 def _load_discharge_per_cycle(cell_pkl: Path) -> list[tuple[int, np.ndarray]]:
@@ -90,23 +97,31 @@ def _parse_offset_amps(raw: str) -> list[float]:
     return [float(x) for x in raw.split(",") if x.strip() != ""]
 
 
-def _parse_conditions(raw: str) -> list[tuple[str, int, float]]:
-    """"label:ref_lag:offset_amp,..." -> [(label, ref_lag, offset_amp), ...]."""
+def _parse_conditions(raw: str) -> list[tuple[str, int, float, "int | None"]]:
+    """"label:ref_lag:offset_amp[:calib_period],..." ->
+    [(label, ref_lag, offset_amp, calib_period), ...].
+
+    calib_period 필드는 선택(생략하거나 빈 문자열이면 None=재보정 없음, 기존 동작과 동일).
+    """
     out = []
     for chunk in raw.split(","):
         chunk = chunk.strip()
         if not chunk:
             continue
-        label, ref_lag_s, offset_s = chunk.split(":")
-        out.append((label, int(ref_lag_s), float(offset_s)))
+        parts = chunk.split(":")
+        label, ref_lag_s, offset_s = parts[0], parts[1], parts[2]
+        calib_s = parts[3] if len(parts) > 3 else ""
+        calib_period = int(calib_s) if calib_s.strip() != "" else None
+        out.append((label, int(ref_lag_s), float(offset_s), calib_period))
     return out
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--conditions", type=str, default=None,
-                        help='조건별 "label:ref_lag:offset_amp" 콤마 구분 목록 '
-                             '(예: "기존:0:0,신규:1:0.005"). 주면 --ref-lag/--offset-amps 무시')
+                        help='조건별 "label:ref_lag:offset_amp[:calib_period]" 콤마 구분 목록 '
+                             '(예: "기존:0:0,신규:1:0.005:100" — calib_period 생략 시 재보정 없음). '
+                             '주면 --ref-lag/--offset-amps/--calibration-period 무시')
     parser.add_argument("--ref-lag", type=int, default=1,
                         help="[--conditions 없을 때만] 모든 조건 공통 ref_lag (기본 1)")
     parser.add_argument("--noise-amp", type=float, default=0.03,
@@ -115,6 +130,14 @@ def main() -> None:
     parser.add_argument("--noise-period", type=float, default=200.0)
     parser.add_argument("--offset-amps", type=str, default="0,0.005",
                         help="[--conditions 없을 때만] 비교할 offset_amp 목록(A 단위), 콤마 구분")
+    parser.add_argument("--calibration-period", type=int, default=100, dest="calibration_period",
+                        help="[--conditions 없을 때만] --offset-amps 중 0이 아닌 최댓값 기준으로 "
+                             "'+calib{period}(신규)' 조건을 자동 추가한다 — 실제 프로덕션 레시피"
+                             "(offset+min_pts5+calib100)를 반영. 0 또는 음수면 이 조건을 추가하지 "
+                             "않음(기존 2조건 비교로 복귀).")
+    parser.add_argument("--calibration-mode", type=str, default="drift_only", dest="calibration_mode",
+                        choices=["drift_only", "full"],
+                        help="[--conditions 없을 때만] 위 자동 추가 조건의 calibration_mode (기본 drift_only)")
     parser.add_argument("--ref-seed", type=int, default=20260805)
     args = parser.parse_args()
 
@@ -122,10 +145,20 @@ def main() -> None:
     if args.conditions:
         conditions = _parse_conditions(args.conditions)
     else:
+        offset_amps = _parse_offset_amps(args.offset_amps)
         conditions = [
-            (("offset=0(기존)" if a == 0 else f"offset={a*1000:.0f}mA"), args.ref_lag, a)
-            for a in _parse_offset_amps(args.offset_amps)
+            (("offset=0(기존)" if a == 0 else f"offset={a*1000:.0f}mA"), args.ref_lag, a, None)
+            for a in offset_amps
         ]
+        # 실제 프로덕션 레시피(offset+min_pts5+calib100)까지 포함해 비교 — offset_amps 중
+        # 0이 아닌 값이 있으면 그 최댓값 기준으로 "+calib{period}(신규)" 조건을 자동 추가한다.
+        _nonzero = [a for a in offset_amps if a > 0]
+        if _nonzero and args.calibration_period and args.calibration_period > 0:
+            _a = max(_nonzero)
+            conditions.append((
+                f"offset={_a*1000:.0f}mA+calib{args.calibration_period}(신규)",
+                args.ref_lag, _a, args.calibration_period,
+            ))
 
     fig, axes = plt.subplots(len(EXAMPLE_CELLS), 2, figsize=(14, 4 * len(EXAMPLE_CELLS)), squeeze=False)
     stats_rows: list[dict] = []
@@ -144,12 +177,13 @@ def main() -> None:
         ax_l, ax_r = axes[row]
         q_dis_raw = np.array([q[-1] for _, _, q in per_cycle])
 
-        for idx, (label, ref_lag, offset_amp) in enumerate(conditions):
+        for idx, (label, ref_lag, offset_amp, calib_period) in enumerate(conditions):
             seg = QFracRefSegmenter(
                 n1=0.35, n2=0.20, n_samples=2,
                 ref_lag=ref_lag, noise_amp=args.noise_amp,
                 noise_mode=args.noise_mode, noise_period_cycles=args.noise_period,
                 ref_seed=args.ref_seed, offset_amp=offset_amp,
+                calibration_period=calib_period, calibration_mode=args.calibration_mode,
             )
             key = (str(cell_id), -1)
             q_ref = np.empty(len(per_cycle))
@@ -161,8 +195,9 @@ def main() -> None:
                 q_ref_raw[k] = q_ref_val / (1.0 + noise_frac)
 
             noise_pct = (q_ref / q_ref_raw - 1.0) * 100.0
-            color = _COLORS.get(offset_amp, _FALLBACK[idx % len(_FALLBACK)])
-            label_full = f"{label}(lag={ref_lag}, offset={offset_amp*1000:.0f}mA)"
+            color = _COND_COLORS[idx % len(_COND_COLORS)]
+            calib_tag = f", calib={calib_period}({args.calibration_mode})" if calib_period else ""
+            label_full = f"{label}(lag={ref_lag}, offset={offset_amp*1000:.0f}mA{calib_tag})"
             ax_r.plot(cycles, noise_pct, color=color, lw=1.1,
                       label=f"{label_full} (mean={noise_pct.mean():+.2f}%p, std={noise_pct.std():.2f}%p, "
                             f"max|.|={np.abs(noise_pct).max():.2f}%p)")
@@ -173,7 +208,10 @@ def main() -> None:
             stats_rows.append({
                 "dataset": ds, "cell_id": cell_id, "condition": label, "ref_lag": ref_lag,
                 "noise_mode": args.noise_mode, "noise_amp": args.noise_amp,
-                "offset_amp": offset_amp, "n_cycles": len(per_cycle),
+                "offset_amp": offset_amp,
+                "calibration_period": calib_period if calib_period else "",
+                "calibration_mode": args.calibration_mode if calib_period else "",
+                "n_cycles": len(per_cycle),
                 "noise_pct_mean": float(noise_pct.mean()), "noise_pct_std": float(noise_pct.std()),
                 "noise_pct_min": float(noise_pct.min()), "noise_pct_max": float(noise_pct.max()),
                 "noise_pct_absmax": float(np.abs(noise_pct).max()),
@@ -192,7 +230,10 @@ def main() -> None:
         ax_r.legend(fontsize=7, loc="upper right")
 
     cond_tag = "-".join(c[0] for c in conditions)
-    cond_desc = ", ".join(f"{c[0]}(lag={c[1]},off={c[2]*1000:g}mA)" for c in conditions)
+    cond_desc = ", ".join(
+        f"{c[0]}(lag={c[1]},off={c[2]*1000:g}mA" + (f",calib={c[3]}" if c[3] else "") + ")"
+        for c in conditions
+    )
     fig.suptitle(f"q_frac_ref 조건별 비교 (mode={args.noise_mode}, noise_amp=±{args.noise_amp*100:.0f}%, "
                  f"period={args.noise_period:.0f}cyc)\n{cond_desc}", fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.96])

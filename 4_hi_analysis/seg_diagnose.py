@@ -73,6 +73,16 @@ if str(PROJECT_ROOT) not in sys.path:
 from data_directories import DATA_4_HI_ROOT, PKL_CACHE_ROOT  # noqa: E402
 MIT_DIR      = DATA_4_HI_ROOT / "clean" / "MIT"
 HUST_DIR     = DATA_4_HI_ROOT / "clean" / "HUST"
+TJU_DIR      = DATA_4_HI_ROOT / "clean" / "TJU"
+CALCE_DIR    = DATA_4_HI_ROOT / "clean" / "CALCE"
+# 2026-09-08: TJU/CALCE(NCM/LCO) 통합 — MIT/HUST 하드코딩 3곳(root = MIT_DIR if ds=="MIT"
+# else HUST_DIR 패턴)을 이 dict 조회로 교체해 4개 데이터셋 전부 --dataset으로 선택 가능하게 함.
+_DATASET_DIRS = {"MIT": MIT_DIR, "HUST": HUST_DIR, "TJU": TJU_DIR, "CALCE": CALCE_DIR}
+
+# 2026-09-08: seg_diagnose 산출물(플롯/통계 텍스트)은 D 드라이브(PKL_CACHE_ROOT)가 아니라
+# 로컬 프로젝트 폴더에 저장 — 입력 pkl(_4_data_hi)과 달리 이 산출물은 용량이 작고 git
+# 저장소와 함께 다루는 게 편해서 위 STEP_DIR(4_hi_analysis/) 기준으로 둔다.
+SEG_DIAGNOSE_OUT_ROOT = STEP_DIR / "outputs" / "seg_diagnose"
 
 for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
     try:
@@ -1658,7 +1668,7 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
     print(f"\n축: {axis}  |  시나리오 ({len(names)}개): {names}")
 
     ds      = args.dataset.upper()
-    root    = MIT_DIR if ds == "MIT" else HUST_DIR
+    root    = _DATASET_DIRS[ds]
     if axis == "q_frac_wide":
         dir_name = (f"q_frac_wide_n1-{int(round(seg.n1*100))}%"
                     f"_n2-{int(round(seg.n2*100))}%_N-{seg.n_samples}")
@@ -1691,7 +1701,7 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
         )
     else:
         dir_name = axis
-    out_dir = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / dir_name
+    out_dir = SEG_DIAGNOSE_OUT_ROOT / dir_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 통계 ──────────────────────────────────────────────────────────────────
@@ -1839,7 +1849,7 @@ def _run_qfracwide_survival(axis_cfg: dict, n_workers: int = 1) -> None:
             per_ds_stats[ds] = stats
             per_ds_seg[ds] = _CounterProxy(att, yld, cnp)
 
-    out_dir = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / "q_frac_wide"
+    out_dir = SEG_DIAGNOSE_OUT_ROOT / "q_frac_wide"
     tag = f"n1-{int(round(n1*100))}%_n2-{int(round(n2*100))}%_N-{n_samples}"
 
     txt_path = out_dir / f"survival_stats_{tag}.txt"
@@ -1891,7 +1901,7 @@ def _run_compare(args) -> None:
         return
 
     ds       = args.dataset.upper()
-    root     = MIT_DIR if ds == "MIT" else HUST_DIR
+    root     = _DATASET_DIRS[ds]
     cell_pkl = root / f"{args.cell}.pkl"
     if not cell_pkl.exists():
         print(f"[ERROR] {cell_pkl} 없음")
@@ -1909,7 +1919,7 @@ def _run_compare(args) -> None:
         _cfg_tag = _cfg_tag[len("compare_"):]
     _cfg_sfx = f"_{_cfg_tag}" if _cfg_tag and _cfg_tag != "conditions" else ""
 
-    out_dir  = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / "compare"
+    out_dir  = SEG_DIAGNOSE_OUT_ROOT / "compare"
     out_path = out_dir / f"{ds}_{cell_pkl.stem}_cyc{args.cycle or 'auto'}{_cfg_sfx}_compare.png"
     plot_condition_comparison(cell_pkl, conditions, args.cycle, out_path)
 
@@ -2131,7 +2141,7 @@ def _run_verify_fix(axis: str, axis_cfg: dict, args) -> None:
     print(f"max std = {max_std:.3e}  (부동소수점 오차 이내여야 정상, 0이 아니면 캡용량 재대입 로직 확인 필요)")
 
     if not args.no_plot:
-        out_dir = PKL_CACHE_ROOT / "outputs" / "seg_diagnose" / f"verify_fix_{axis}"
+        out_dir = SEG_DIAGNOSE_OUT_ROOT / f"verify_fix_{axis}"
         out_dir.mkdir(parents=True, exist_ok=True)
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.bar([str(k) for k in vc.index], vc.values, color="#3498db")
@@ -2167,7 +2177,7 @@ def _run_verify_fix(axis: str, axis_cfg: dict, args) -> None:
             cell_id, cycle_id = str(cell_id), int(cycle_id)
             print(f"  자동 선택: cell={cell_id}  cycle={cycle_id}  (zone당 {full_n}개씩 꽉 찬 사례)")
 
-        root = MIT_DIR if args.dataset.upper() == "MIT" else HUST_DIR
+        root = _DATASET_DIRS[args.dataset.upper()]
         cell_pkl = root / f"{cell_id}.pkl"
         if not cell_pkl.exists():
             print(f"  [경고] 원본 셀 pkl 없음: {cell_pkl} — Part D 스킵")
@@ -2187,7 +2197,8 @@ def main():
     parser.add_argument("--axis-config", type=str, default="{}",
                         help="축 파라미터 JSON 문자열 (예: '{\"assign\": \"none\"}')")
     parser.add_argument("--dataset",     type=str, default="MIT",
-                        choices=["MIT", "HUST", "mit", "hust"],
+                        choices=["MIT", "HUST", "TJU", "CALCE",
+                                 "mit", "hust", "tju", "calce"],
                         help="통계 스캔 대상 데이터셋 (기본: MIT)")
     parser.add_argument("--cell",        type=str, default="",
                         help="사이클 플롯 대상 셀 ID (미지정 시 첫 번째 셀 사용)")

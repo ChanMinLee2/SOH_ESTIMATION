@@ -322,6 +322,10 @@ def main():
     parser.add_argument("--lambda-l0-override", type=float, default=None, dest="lambda_l0_override",
                         help="loss.lambda_l0을 이 값으로 강제 고정(lambda_l0_auto/yaml 값 무시, "
                              "phase1_trainer_v2.py --lambda-l0-override 그대로 전달, Step 6 전용)")
+    parser.add_argument("--regression-model", default=None, dest="regression_model",
+                        choices=["mlp", "transformer", "i_transformer", "resnet_tab", "ft_transformer"],
+                        help="Phase1 cap_head 종류(기본 미지정 시 phase1_trainer_v2.py 자체 기본값 "
+                             "'mlp' 사용, Step 6 전달)")
     parser.add_argument("--seed",        type=int, default=None,
                         help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (Step 6 전달, 기본 42)")
     parser.add_argument("--split-seed",  type=int, default=None,
@@ -446,6 +450,8 @@ def main():
                 step_extra += ["--scen-k", str(args.scen_k)]
             if args.lambda_l0_override is not None:
                 step_extra += ["--lambda-l0-override", str(args.lambda_l0_override)]
+            if args.regression_model is not None:
+                step_extra += ["--regression-model", args.regression_model]
             # phase1_trainer_v2.py는 --seed/--split-seed가 required=True라 항상 값을
             # 넘겨야 한다 — 미지정 시 42로 채운다.
             _seed = args.seed if args.seed is not None else 42
@@ -520,6 +526,8 @@ def main():
                 step_extra += ["--interaction-json", args.interaction_json]
             if args.specific_group_ids_json:
                 step_extra += ["--specific-group-ids-json", args.specific_group_ids_json]
+            if args.regression_model is not None:
+                step_extra += ["--regression-model", args.regression_model]
             if args.rep_cells:
                 step_extra += ["--rep-cells", *args.rep_cells]
             if args.export_for_visualize:
