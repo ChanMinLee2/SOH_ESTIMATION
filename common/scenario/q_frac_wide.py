@@ -89,6 +89,17 @@ class QFracWideSegmenter(Segmenter):
                                          # 알려주는 시나리오 라우팅만 지운다. "시나리오 타이핑
                                          # 자체의 순수 기여도"를 재는 대조군 축 용도
                                          # (docs/260816_RESULTS.md §5 no_scen).
+        tile_scope: str | None = None,  # 2026-09-09 추가: "zone"(기본, 존 3개 안에서만
+                                         # n_samples개씩 배치) | "full"([0,1] 전체에 고르게
+                                         # 배치). assign과 완전히 독립된 축이다 — 예전엔
+                                         # assign="none"일 때 자동으로 "full"이 같이 켜져서
+                                         # "라벨 유무"와 "배치 다양성(존 안 뭉침 vs 전체
+                                         # 고른 분산)"이 한 스위치에 묶여 있었다(noscen vs
+                                         # rawonly 비교가 그래서 confound됨, docs/0909_RESULTS.md
+                                         # 참고). None(기본)이면 하위호환을 위해 예전처럼
+                                         # assign=="none"일 때만 자동으로 "full"을 쓴다 —
+                                         # 명시적으로 "zone"|"full"을 주면 assign과 무관하게
+                                         # 그 값을 그대로 쓴다(4가지 조합 전부 가능해짐).
     ):
         if not (0.35 <= n1 <= 0.45):
             raise ValueError(
@@ -104,6 +115,9 @@ class QFracWideSegmenter(Segmenter):
         if assign not in ("position_bin", "none"):
             raise ValueError(
                 f"q_frac_wide: assign은 'position_bin'|'none' 중 하나여야 합니다. 현재 assign={assign!r}")
+        if tile_scope not in (None, "zone", "full"):
+            raise ValueError(
+                f"q_frac_wide: tile_scope는 None|'zone'|'full' 중 하나여야 합니다. 현재 tile_scope={tile_scope!r}")
         self.n1 = n1
         self.n2 = n2
         self.n_samples = n_samples
@@ -114,6 +128,7 @@ class QFracWideSegmenter(Segmenter):
         self.seg_len_pts = int(seg_len_pts)
         self.random_seed = int(random_seed)
         self.assign = assign
+        self.tile_scope = tile_scope
 
         # 진단용 카운터 (min_pts 생존율 계산) — iter_segments의 공개 동작에는 영향 없음.
         # scenario_name -> count. reset_counters()로 초기화 후 여러 셀에 걸쳐 누적 가능.
@@ -168,6 +183,43 @@ class QFracWideSegmenter(Segmenter):
     # QFracRefSegmenter가 n2 범위 모드(n2_start/n2_end)에서 이 훅만 오버라이드해
     # 가변 길이 타일링을 반환한다 — _extract 본체는 건드리지 않는다.
 
+    def _zone_of_segment(self, start_qf: float, end_qf: float) -> int:
+        """세그먼트 [start_qf, end_qf]가 어느 존(latent_class)에 속하는지 판정.
+
+        tile_scope="full" + assign="position_bin"일 때 필요하다 — [0,1] 전체에
+        고르게 배치된 세그먼트 각각에 "실제 위치 기준" 라벨을 붙여야 하는데, 원래
+        코드는 zone_iter를 ("all", 0) 하나로 접으면서 latent_class를 매 세그먼트
+        0으로 고정해버렸다(2026-09-10 발견 — 라벨이 있는 척만 하고 방향별로 전부
+        같은 시나리오 하나로만 나가는 버그, assign="none"과 결과가 사실상 동일했음).
+
+        존은 겹치므로(hi/mid, mid/lo 경계 부근) 세그먼트가 두 존에 걸칠 수 있다 —
+        "중점이 어디 있는가"(2026-09-10 최초 구현)보다 "세그먼트 폭 전체가 어느
+        존과 더 많이 겹치는가"가 더 원칙적인 기준이라 교집합 폭 비교로 교체
+        (2026-09-10). 동률이면 _ZONES 우선순위(hi>mid>lo)로 결정론 유지. 겹침 구간을
+        이등분하거나 세그먼트를 복제하지 않는다(총 세그먼트 개수 보존, §3-2-C 원칙
+        유지) — n1=0.35/n2=0.20 조합에서는 겹침 폭(0.025)이 세그먼트 폭(0.20)의
+        12.5%뿐이라 중점 방식과 결과가 거의 항상 같다(docs/0909_RESULTS.md §3-2c)."""
+        bounds = self._zone_bounds()
+        best_latent, best_overlap = 0, -1.0
+        for zone_name, latent_class in _ZONES:
+            lo, hi = bounds[zone_name]
+            overlap = max(0.0, min(end_qf, hi) - max(start_qf, lo))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_latent = latent_class
+        return best_latent
+
+    def _full_range_tiling(self) -> bool:
+        """True면 [0,1] 전체에 고르게 세그먼트를 배치("full"), False면 존 3개 안에서만
+        배치("zone", 기존 동작). tile_scope를 명시하지 않은 경우에만 예전처럼
+        assign=="none"에 자동으로 묶는다(하위호환) — 명시하면 assign과 완전히 독립.
+        random_segment 모드는 대상 아님(§docs/260816_RESULTS.md §5는 고정폭 격자만 다룸)."""
+        if self.random_segment:
+            return False
+        if self.tile_scope is not None:
+            return self.tile_scope == "full"
+        return self.assign == "none"
+
     def _segment_plan(
         self,
         zone_start: float,
@@ -186,19 +238,20 @@ class QFracWideSegmenter(Segmenter):
         q/q_tot은 기본구현에선 안 쓰지만, 오버라이드 쪽이 "이 조각에 실제로 포인트가
         몇 개 들어가는지"를 보고 배치를 조정(min_pts 병합 등)할 수 있게 넘겨준다.
 
-        assign="none"(no_scen, docs/260816_RESULTS.md §5) + 고정폭 격자 모드(비
-        random_segment)일 때는 존 개념을 아예 없애고, 전체 충방전 구간 [0,1]을
-        n2-길이 세그먼트로 균등 타일링한다(2026-09-04). _segment_plan은 방향 하나당
-        한 번 호출되므로(_extract가 충전/방전 각각 한 번씩 부름), 호출당 개수를
+        tile_scope="full"(_full_range_tiling()==True, docs/260816_RESULTS.md §5의
+        no_scen 설계를 2026-09-09에 assign과 분리) 이면 존 개념을 아예 없애고, 전체
+        충방전 구간 [0,1]을 n2-길이 세그먼트로 균등 타일링한다. _segment_plan은 방향
+        하나당 한 번 호출되므로(_extract가 충전/방전 각각 한 번씩 부름), 호출당 개수를
         (floor(n1/n2)+1)*3으로 둬서 **충방전 합산 총 개수가 (floor(n1/n2)+1)*6**이
-        되게 한다 — position_bin의 총 세그먼트 개수(3존×방향2×n_samples와 별개로,
+        되게 한다 — tile_scope="zone"의 총 세그먼트 개수(3존×방향2×n_samples와 별개로,
         시나리오 수 6 자체를 밀도 배수로 씀)와 맞춰, "세그먼트 개수 차이"가 아니라
-        "라우팅 유무"만 두 조건의 차이가 되게 하기 위함(§3-2-C 세그먼트 수 교란
-        통제와 동일 원칙). 호출부(_extract)가 이 경우 zone_start/zone_end를
-        무시하고 단일 "all" 존으로 한 번만 호출하는 것을 전제한다(안 그러면
-        _ZONES 3회 반복 때문에 세그먼트가 3배로 중복된다 — 아래 _extract 참고).
+        "배치 방식(존 안 뭉침 vs 전체 고른 분산)"만 두 조건의 차이가 되게 하기 위함
+        (§3-2-C 세그먼트 수 교란 통제와 동일 원칙). 호출부(_extract)가 이 경우
+        zone_start/zone_end를 무시하고 단일 "all" 존으로 한 번만 호출하는 것을
+        전제한다(안 그러면 _ZONES 3회 반복 때문에 세그먼트가 3배로 중복된다 — 아래
+        _extract 참고).
         """
-        if self.assign == "none" and not self.random_segment:
+        if self._full_range_tiling():
             k = (int(np.floor(self.n1 / self.n2 + 1e-9)) + 1) * 3
             starts = self._start_positions(0.0, 1.0, n_count=k)
         else:
@@ -253,17 +306,17 @@ class QFracWideSegmenter(Segmenter):
         records: list[SegmentRecord] = []
         seg_local = seg_local_start
 
-        # assign="none"(no_scen) + 고정폭 격자 모드는 존 개념이 없어져 _segment_plan이
-        # 전체 구간 [0,1]을 한 번에 타일링한다(위 _segment_plan 참고) — 그러니 여기서도
-        # _ZONES(hi/mid/lo) 3회 대신 단일 "all" 존으로 한 번만 돌아야 한다. 안 그러면
-        # 매번 같은 [0,1] 타일링이 그대로 3번 호출돼 세그먼트가 3배로 중복된다.
-        # random_segment 모드는 이 변경 대상이 아니라(§docs/260816_RESULTS.md §5는
-        # 고정폭 격자만 다룸) 기존 존별 동작을 그대로 유지한다.
-        no_scen_whole_session = (self.assign == "none" and not self.random_segment)
-        zone_iter = [("all", 0)] if no_scen_whole_session else _ZONES
+        # tile_scope="full"(_full_range_tiling()==True)이면 존 개념이 없어져
+        # _segment_plan이 전체 구간 [0,1]을 한 번에 타일링한다(위 _segment_plan 참고)
+        # — 그러니 여기서도 _ZONES(hi/mid/lo) 3회 대신 단일 "all" 존으로 한 번만
+        # 돌아야 한다. 안 그러면 매번 같은 [0,1] 타일링이 그대로 3번 호출돼 세그먼트가
+        # 3배로 중복된다. 2026-09-09: 이 배치 방식(zone/full)은 assign(라벨 유무)과
+        # 독립이다 — 아래 _latent 계산이 라벨 쪽을 따로 담당한다.
+        full_range_tiling = self._full_range_tiling()
+        zone_iter = [("all", 0)] if full_range_tiling else _ZONES
 
         for zone_name, latent_class in zone_iter:
-            zone_start, zone_end = (0.0, 1.0) if no_scen_whole_session else bounds[zone_name]
+            zone_start, zone_end = (0.0, 1.0) if full_range_tiling else bounds[zone_name]
             # assign="none" 이면 latent_class(존)를 라우팅에 반영하지 않고 항상 0으로
             # 고정 — 모델에 노출되는 scenario_id/이름은 방향만 구분(chg/dis).
             _latent     = latent_class if self.assign == "position_bin" else 0
@@ -314,20 +367,31 @@ class QFracWideSegmenter(Segmenter):
                 covered = np.zeros(len(q), dtype=bool)
 
             for start_qf, end_qf, include_hi, extra_meta in plan:
+                # tile_scope="full" + assign="position_bin"이면 세그먼트마다 실제
+                # 위치(중점) 기준으로 존을 다시 판정한다(위 _zone_of_qfrac, 2026-09-10
+                # 버그 수정) — 그 외(zone-restricted, 또는 assign="none")는 zone_name
+                # 루프에서 이미 정해진 값을 그대로 쓴다(기존 동작 100% 유지).
+                if full_range_tiling and self.assign == "position_bin":
+                    _seg_latent = self._zone_of_segment(start_qf, end_qf)
+                    _seg_scenario_id = spec.routing[dir_idx][_seg_latent]
+                    _seg_sname = spec.scenario_names[_seg_scenario_id]
+                else:
+                    _seg_latent, _seg_scenario_id, _seg_sname = _latent, scenario_id, sname
+
                 lo_q   = start_qf * q_tot
                 hi_q   = end_qf   * q_tot
                 m      = ((q >= lo_q) & (q <= hi_q)) if include_hi else ((q >= lo_q) & (q < hi_q))
                 n_pts  = int(m.sum())
-                self.n_attempted[sname] = self.n_attempted.get(sname, 0) + 1
-                self.candidate_n_points.setdefault(sname, []).append(n_pts)
+                self.n_attempted[_seg_sname] = self.n_attempted.get(_seg_sname, 0) + 1
+                self.candidate_n_points.setdefault(_seg_sname, []).append(n_pts)
                 if n_pts < self.min_pts:
                     continue
-                self.n_yielded[sname] = self.n_yielded.get(sname, 0) + 1
+                self.n_yielded[_seg_sname] = self.n_yielded.get(_seg_sname, 0) + 1
                 if track_cov:
                     covered |= m
 
                 _meta = {
-                    "zone":      zone_name,
+                    "zone":      zone_name if not full_range_tiling else _seg_sname,
                     "q_frac_lo": start_qf,
                     "q_frac_hi": end_qf,
                     "seg_len":   float(end_qf - start_qf),
@@ -338,8 +402,8 @@ class QFracWideSegmenter(Segmenter):
                     cell_id=cell_id,
                     cycle=cycle,
                     seg_local_id=seg_local,
-                    scenario_id=scenario_id,
-                    latent_class=_latent,
+                    scenario_id=_seg_scenario_id,
+                    latent_class=_seg_latent,
                     direction=direction,
                     v=v[m], i=i[m], dt=dt[m], q=q[m],
                     meta=_meta,
@@ -347,6 +411,12 @@ class QFracWideSegmenter(Segmenter):
                 seg_local += 1
 
             if track_cov:
+                # 주의: full_range_tiling + assign="position_bin"이면 이 존별 커버리지
+                # 집계는 outer sname(항상 latent=0 기준 고정값) 하나에 다 몰린다 —
+                # n2-range 모드(_track_zone_coverage=True)는 현재 tile_scope="full"과
+                # 같이 쓰는 실험이 없어(둘 다 별개 프로젝트 단계) 지금은 영향 없지만,
+                # 나중에 두 모드를 같이 쓸 계획이면 세그먼트별(_seg_sname) 집계로
+                # 바꿔야 한다.
                 c = self.coverage.setdefault(sname, [0, 0])
                 c[0] += int((covered & zmask).sum())
                 c[1] += int(zmask.sum())

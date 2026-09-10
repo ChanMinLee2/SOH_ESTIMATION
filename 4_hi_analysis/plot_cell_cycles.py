@@ -47,8 +47,14 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # MIT_DIR  = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
 # HUST_DIR = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
-MIT_DIR  = PROJECT_ROOT / "_1_data_unified" / "MIT"
-HUST_DIR = PROJECT_ROOT / "_1_data_unified" / "HUST"
+MIT_DIR   = PROJECT_ROOT / "_1_data_unified" / "MIT"
+HUST_DIR  = PROJECT_ROOT / "_1_data_unified" / "HUST"
+CALCE_DIR = PROJECT_ROOT / "_1_data_unified" / "CALCE"
+TJU_DIR   = PROJECT_ROOT / "_1_data_unified" / "TJU"
+# 2026-09-08: TJU/CALCE(NCM/LCO) 지원 추가 — pkl 스키마(meta/cycles, phase/cycle/
+# voltage_V/current_A/time_s/capacity_Ah 컬럼)가 MIT/HUST와 동일해 이 dict 조회
+# 추가만으로 나머지 로직(load_cell/compute_qfrac/plot_overlay) 전부 무수정 재사용 가능.
+_DATASET_DIRS = {"mit": MIT_DIR, "hust": HUST_DIR, "calce": CALCE_DIR, "tju": TJU_DIR}
 STEP_DIR = Path(__file__).resolve().parent
 SHAPE_CSV = PROJECT_ROOT / "2_preprocess" / "outputs" / "shape_outlier_report.csv"
 MANUAL_CSV = PROJECT_ROOT / "2_preprocess" / "manual_outliers.csv"
@@ -205,7 +211,7 @@ def plot_overlay(ax, df, cycles, phase, cmap, norm, flagged=None):
 
 def main():
     parser = argparse.ArgumentParser(description="셀 전체 사이클 시각화")
-    parser.add_argument("--dataset", default="mit", choices=["mit", "hust"])
+    parser.add_argument("--dataset", default="mit", choices=["mit", "hust", "calce", "tju"])
     parser.add_argument("--cell",    default="b1c0")
     parser.add_argument("--z-thresh",   type=float, default=6.0,
                         help="제거 후보 z 임계값 (기본: 6.0)")
@@ -240,7 +246,7 @@ def main():
     fhigh_thresh = {"discharge": args.fhigh_thresh_discharge,
                     "charge":    args.fhigh_thresh_charge}
 
-    data_dir = MIT_DIR if args.dataset == "mit" else HUST_DIR
+    data_dir = _DATASET_DIRS[args.dataset]
     pkl_path = data_dir / f"{args.cell}.pkl"
     if not pkl_path.exists():
         raise FileNotFoundError(f"PKL 파일 없음: {pkl_path}")

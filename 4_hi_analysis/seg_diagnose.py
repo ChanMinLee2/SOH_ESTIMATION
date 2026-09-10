@@ -727,6 +727,50 @@ def plot_qfracwide_stats(
 # 2. 사이클 시각화  (--mode segment)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _replay_prior_cycles(axis: str, axis_cfg: dict | None, segmenter,
+                          df_all: "pd.DataFrame", cell_id: str, target_cycle: int):
+    """q_frac_ref류(사이클 순서에 의존하는 상태 — `_q_hist`/OU드리프트/calibration을 가진
+    세그먼터) 전용 버그 수정(2026-09-08).
+
+    `_run_for_axis`가 `collect_stats()`와 `plot_cycle_segments()`에 **같은 segmenter
+    인스턴스**를 넘기던 게 문제였다 — collect_stats가 이미 그 셀(과 다른 모든 셀)의
+    사이클을 끝까지 훑어 `_q_hist`를 그 셀의 **마지막 사이클까지** 채워놓은 상태에서,
+    plot_cycle_segments가 같은 인스턴스로 target_cycle을 "다시" 조회하면 `ref_lag=1`이
+    "target_cycle 직전"이 아니라 "그 셀의 맨 마지막 근처 사이클"을 참조해버린다(예:
+    cycle 1299를 그리려는데 실제로는 cycle 1678이 참조됨) — 배터리는 수명 후반부로
+    갈수록 용량이 줄어드므로, 이 잘못 참조된 훨씬 나중 사이클의 용량이 정규화 분모가
+    되어 q_frac이 실제 충/방전이 끝나기 한참 전에 1.0을 넘어버리고, 그 뒤 구간이
+    "어떤 존에도 안 속함"(플롯에서 색 없는 공백)으로 나타난다.
+
+    수정: 완전히 새로운 segmenter 인스턴스를 만들어 **이 셀의 target_cycle 이전
+    사이클만, 오름차순으로** 먼저 먹인다 — 그러면 target_cycle을 조회하는 시점의
+    `_q_hist`/OU 상태가 실제 학습 파이프라인(hi_correlation.py, 셀당 사이클을 순서대로
+    "단 한 번씩만" 처리)과 정확히 같아진다. `_q_hist`가 없는(상태 없는) 축은 원래
+    segmenter를 그대로 반환 — q_frac_wide 등은 이 버그의 대상이 아니다.
+    """
+    if not hasattr(segmenter, "_q_hist") or axis_cfg is None:
+        return segmenter
+
+    from common.scenario import get_segmenter
+    fresh = get_segmenter(axis, {axis: axis_cfg})
+
+    prior_cycles = sorted(c for c in df_all["cycle"].unique() if 0 < c < target_cycle)
+    _e = np.empty(0, dtype=float)
+    for cyc in prior_cycles:
+        grp = df_all[df_all["cycle"] == cyc]
+        dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
+        chg = grp[grp["phase"] == "charge"].sort_values("time_s")
+        if len(dis) >= 30:
+            v_d, i_d, _, dt_d, q_d = _build_arrays(dis)
+            for _ in fresh.iter_segments(cell_id, int(cyc), v_d, i_d, dt_d, q_d):
+                pass
+        if len(chg) >= 20:
+            v_c, i_c, _, dt_c, q_c = _build_arrays(chg)
+            for _ in fresh.iter_segments(cell_id, int(cyc), _e, _e, _e, _e, v_c, i_c, dt_c, q_c):
+                pass
+    return fresh
+
+
 def plot_cycle_segments(
     pkl_path: Path,
     segmenter,
@@ -734,6 +778,7 @@ def plot_cycle_segments(
     cycle_id: int,
     axis: str,
     out_path: Path,
+    axis_cfg: dict | None = None,
 ):
     """특정 셀 사이클을 세그먼트별 색으로 분리해 하나의 사이클로 시각화.
 
@@ -745,6 +790,9 @@ def plot_cycle_segments(
 
     iter_segments는 rcs처럼 무작위 축도 있으므로 각 방향당 1회만 호출해
     결과를 리스트로 캐싱 후 여러 패널에서 재사용한다.
+
+    axis_cfg: q_frac_ref류(사이클 순서 의존 상태)의 참조 오염 버그 수정용
+    (_replay_prior_cycles 참고) — 미지정 시 기존 동작(전달받은 segmenter 그대로 사용).
     """
     with open(pkl_path, "rb") as f:
         raw = pickle.load(f)
@@ -767,6 +815,8 @@ def plot_cycle_segments(
     if cycle_id == 0 or cycle_id not in valid_cycs:
         cycle_id = valid_cycs[0]
         print(f"  → 첫 번째 유효 사이클 {cycle_id} 사용")
+
+    segmenter = _replay_prior_cycles(axis, axis_cfg, segmenter, df_all, cell_id, cycle_id)
 
     grp = df_all[df_all["cycle"] == cycle_id]
     dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
@@ -1693,9 +1743,15 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
             "calibration_jitter": seg.calibration_jitter, "offset_amp": seg.offset_amp,
         }
         minpts_sfx = f"_minpts{seg.min_pts}" if seg.min_pts != 10 else ""
+        # assign="none"/tile_scope 는 라벨 유무·배치 방식을 바꾸는 축이라(docs/0909_RESULTS.md
+        # §3) hi_correlation.py::_qfw_tag()와 동일 규칙으로 접미사를 붙여야 한다 — 이게 없으면
+        # rawonly/rawonly_fulltile/noscen/noscen_zonetile 네 조건이 전부 같은 파일에 덮어쓴다.
+        assign_sfx = "" if getattr(seg, "assign", "position_bin") == "position_bin" else "_noscen"
+        tile_scope = getattr(seg, "tile_scope", None)
+        tile_scope_sfx = f"_tile{tile_scope}" if tile_scope is not None else ""
         dir_name = (
             f"q_frac_ref_n1-{int(round(seg.n1*100))}%_{n2_path_tag(_params)}_N-{seg.n_samples}"
-            f"{minpts_sfx}_lag-{seg.ref_lag}_noise-{int(round(seg.noise_amp*100))}%_"
+            f"{minpts_sfx}{assign_sfx}{tile_scope_sfx}_lag-{seg.ref_lag}_noise-{int(round(seg.noise_amp*100))}%_"
             f"{seg.noise_mode}-{int(round(seg.noise_period_cycles))}"
             f"{calib_path_tag(_params)}{offset_path_tag(_params)}"
         )
@@ -1731,7 +1787,7 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
             if args.mode in ("segment", "all"):
                 out_path = out_dir / f"{ds}_{cell_stem}_cyc{args.cycle or 'auto'}.png"
                 print(f"\n=== 사이클 시각화 (segment): {cell_stem}  cycle={args.cycle or 'auto'} ===")
-                plot_cycle_segments(cell_pkl, seg, names, args.cycle, axis, out_path)
+                plot_cycle_segments(cell_pkl, seg, names, args.cycle, axis, out_path, axis_cfg)
 
             if args.mode in ("ic", "all"):
                 ic_path = out_dir / f"{ds}_{cell_stem}_ic.png"
@@ -1781,7 +1837,7 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
                     cell_stem = cell_pkl.stem
                     out_path  = out_dir / f"{ds}_{cell_stem}_cyc{chosen_cyc}.png"
                     print(f"  {cell_stem}  cycle={chosen_cyc}")
-                    plot_cycle_segments(cell_pkl, seg, names, chosen_cyc, axis, out_path)
+                    plot_cycle_segments(cell_pkl, seg, names, chosen_cyc, axis, out_path, axis_cfg)
 
             if args.mode in ("ic", "all"):
                 # IC 모드: 랜덤 셀 중 첫 번째 사용

@@ -1483,7 +1483,12 @@ def _qfw_tag(axis_cfg: dict) -> str:
     # assign="none"(시나리오-only 대조군, docs/260816_RESULTS.md §5 no_scen)이면
     # 반드시 다른 경로에 저장 — position_bin(6시나리오)과 confound 방지(§4.6과 동일 원칙).
     assign_sfx = "" if axis_cfg.get("assign", "position_bin") == "position_bin" else "_noscen"
-    return f"n1-{n1}%_{n2_frag}_N-{ns}{_rand_suffix(axis_cfg)}{minpts_sfx}{assign_sfx}"
+    # 2026-09-09: tile_scope("zone"|"full")를 assign과 분리(라벨 유무 vs 배치 방식,
+    # docs/0909_RESULTS.md) — 명시적으로 준 경우만 접미사(미지정 시 기존 assign 연동
+    # 동작과 100% 동일한 경로를 써야 하므로 빈 문자열 유지, 하위호환).
+    tile_scope = axis_cfg.get("tile_scope")
+    tile_scope_sfx = f"_tile{tile_scope}" if tile_scope is not None else ""
+    return f"n1-{n1}%_{n2_frag}_N-{ns}{_rand_suffix(axis_cfg)}{minpts_sfx}{assign_sfx}{tile_scope_sfx}"
 
 
 def _qfref_tag(axis_cfg: dict) -> str:

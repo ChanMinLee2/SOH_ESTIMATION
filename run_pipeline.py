@@ -560,6 +560,20 @@ def main():
                 print("  파이프라인 중단.")
                 sys.exit(1)
 
+        # ── Step 7 완료 후: 시나리오별 raw/kernel HI 게이트 선택 매트릭스 자동 생성
+        # (2026-09-08) — plot_hi_selection_matrix.py는 파이프라인 번호가 없는 부가
+        # 스텝이라 run_step()의 --workers/--model-config 규약과 안 맞아 여기서 직접
+        # subprocess로 호출한다. 실패해도(예: gates/regression_HIs.json 없는 구버전
+        # run) 파이프라인 전체를 막지 않는다 — 순수 시각화 부산물이라 결과 자체와는
+        # 무관.
+        if num == 7 and ok and run_src:
+            plot_script = ROOT / "5_model" / "experiments" / "phase1_lab" / "plot_hi_selection_matrix.py"
+            print(f"\n  → HI 선택 매트릭스 플랏 생성: {run_src}")
+            subprocess.run(
+                [sys.executable, str(plot_script), "--run-dir", str(run_src)],
+                cwd=str(ROOT),
+            )
+
     total_elapsed = time.time() - total_t0
     print(f"\n{'='*60}")
     if failed:

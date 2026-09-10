@@ -89,9 +89,11 @@ import matplotlib.gridspec as gridspec
 plt.rcParams["font.family"] = "Malgun Gothic"
 plt.rcParams["axes.unicode_minus"] = False
 
-from utils.hi_schema import N_HI, RAW_CH, RAW_N
+from utils.hi_schema import N_HI, RAW_CH, RAW_N, get_hi_cols_for_seg
 from models.scr_model import SCRModel
 from common.scenario.base import ScenarioSpec
+from common.scenario import get_segmenter
+import train_scr as _base  # noqa: E402 (_load_synergy_group_ids 재사용 — 중복 구현 금지)
 
 OUT_ROOT = PROJECT_ROOT / "_5_data_model_scr" / "comparison"
 
@@ -110,8 +112,9 @@ def _parse_args() -> argparse.Namespace:
                    help="run별 표시 이름 (미지정 시 폴더명 사용, --runs와 개수 일치 필요)")
     p.add_argument("--with-jacobian", action="store_true",
                    help="실 데이터 기반 Jacobian(gradient) 코사인 유사도 패널 추가 (느림 — 데이터셋 재구축 필요)")
-    p.add_argument("--checkpoint-name", default="best.pt",
-                   help="run별 사용할 체크포인트 파일명 (기본 best.pt, 없으면 final.pt로 폴백)")
+    p.add_argument("--checkpoint-name", default="best_by_saturation.pt",
+                   help="run별 사용할 체크포인트 파일명 (기본 best_by_saturation.pt — "
+                        "phase1_trainer_v2.py/p1v2_runs 관례, 없으면 best.pt로 폴백)")
     p.add_argument("--infer-batch-size", type=int, default=256)
     p.add_argument("--infer-warmup", type=int, default=10)
     p.add_argument("--infer-reps", type=int, default=50)
@@ -124,6 +127,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--title", default=None,
                    help="결과 폴더명의 'result_comparison' 부분만 대체 "
                         "(<MMDD_HHMM>_<title> 형태로 생성, 타임스탬프는 유지)")
+    p.add_argument("--regression-models", nargs="+", default=None, dest="regression_models",
+                   help="run별 회귀 헤드(mlp/transformer/resnet_tab/...), --runs와 같은 개수 "
+                        "— phase1_trainer_v2.py --regression-model 오버라이드가 config.yaml에 "
+                        "반영 안 되므로(항상 'mlp'로 저장됨, test_phase1_checkpoint.py와 동일한 "
+                        "제약) mlp가 아닌 헤드를 쓴 run을 비교하려면 반드시 지정해야 한다. "
+                        "미지정 run은 config.yaml 값(보통 mlp)을 그대로 씀.")
+    p.add_argument("--interaction-json", default=None, dest="interaction_json",
+                   help="v4(shared_gate) run 전용 — p1v2_summary.json에 이 경로가 기록돼 "
+                        "있지 않아(test_phase1_checkpoint.py와 동일한 이유) 비교 대상에 v4 "
+                        "run이 있으면 학습 때 쓴 hi_scenario_interaction_*.json을 여기 직접 "
+                        "지정해야 한다. 모든 --runs에 동일하게 적용된다.")
     p.add_argument("--rep-cells", nargs="+", default=None,
                    help="SOH 예측 곡선 비교(capacity_curve_compare_*.png)에 쓸 셀 ID를 "
                         "직접 지정 (예: b1c0). 미지정 시 기존처럼 MIT/HUST 각각 최대 3개를 "
@@ -158,7 +172,7 @@ def _normalize_legacy_metrics(metrics: dict) -> None:
 class RunBundle:
     """단일 run 폴더에서 읽은 모든 정보를 담는 컨테이너."""
 
-    def __init__(self, run_dir: Path, label: str):
+    def __init__(self, run_dir: Path, label: str, interaction_json_override: str | None = None):
         self.run_dir = run_dir
         self.label = label
 
@@ -174,6 +188,28 @@ class RunBundle:
         self.pred_rows = self._load_predictions()
         self.routing_sets = self._load_routing_table()
         self.gate_probs = self._load_gate_probs()
+
+        # 2026-09-08: 커널 HI(model.scen_kernel_gates) 비교 지원 추가 — p1v2_summary.json에
+        # 기록된 kernel_features_pkl 경로로 이 run이 어떤 커널 정의를 썼는지 식별해두고
+        # (같은 pkl을 공유하는 run끼리만 커널 이름 기반 비교가 유효 — §2/§3/§6처럼 baseline
+        # 커널을 그대로 재사용하는 run들은 안전하지만, 그룹별로 새로 뽑은 커널 pkl을 쓰는
+        # run끼리는 이름이 같아도 다른 raw HI 조합을 가리킬 수 있어 비교가 무의미하다),
+        # gates/regression_kernel_HIs.json이 있으면 raw와 동일한 방식(threshold 0.9 이진
+        # 세트 + 원본 확률)으로 채운다. 파일이 없는(커널 미사용) run은 빈 dict로 남는다.
+        summary_path = run_dir / "p1v2_summary.json"
+        self.p1v2_summary: dict = (
+            json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+        )
+        self.kernel_features_pkl = self._resolve_summary_path(self.p1v2_summary.get("kernel_features_pkl"))
+        self.synergy_groups_json = self._resolve_summary_path(self.p1v2_summary.get("synergy_groups_json"))
+        # v4(shared_gate)는 interaction_json이 p1v2_summary.json에 기록되지 않는다
+        # (test_phase1_checkpoint.py와 동일한 제약) — --interaction-json CLI 오버라이드로
+        # 보충한다.
+        self.interaction_json = (
+            self._resolve_summary_path(self.p1v2_summary.get("interaction_json"))
+            or self._resolve_summary_path(interaction_json_override)
+        )
+        self.kernel_routing_sets, self.kernel_gate_probs = self._load_kernel_gates()
 
         eff_path = run_dir / "random_seg_test" / "metrics.json"
         self.random_seg: dict | None = (
@@ -247,8 +283,47 @@ class RunBundle:
                 out[sname] = vec
         return out
 
+    def _resolve_summary_path(self, v) -> "Path | None":
+        """p1v2_summary.json 값(학습 당시 cwd 기준 상대경로일 수 있음)을 PROJECT_ROOT
+        기준으로 고정한다 — test_phase1_checkpoint.py의 동명 로직과 동일 원칙(중복
+        구현이지만 그쪽은 함수 내부 클로저라 임포트 재사용이 어려움)."""
+        if not v:
+            return None
+        p = Path(v)
+        resolved = p if p.is_absolute() else PROJECT_ROOT / p
+        if resolved.exists():
+            return resolved
+        fallback = resolved.parent / "outputs" / resolved.name
+        return fallback if fallback.exists() else resolved
 
-def _load_bundles(run_dirs: list[str], labels: list[str] | None) -> list[RunBundle]:
+    def _load_kernel_gates(self) -> "tuple[dict[str, set[str]], dict[str, dict[str, float]]]":
+        """gates/regression_kernel_HIs.json → (이진 세트, 원본 확률 dict) — raw HI의
+        routing_sets/gate_probs와 같은 구조를 커널 HI에도 만든다. 커널 HI는 이름이
+        run마다 다른 커널 정의(kernel_features_pkl)에서 나올 수 있어 raw처럼 고정
+        인덱스 벡터가 아니라 이름 기반 dict로 저장 — 이름 자체가 비교 키다(같은 pkl을
+        공유하는 run끼리는 이름이 곧 같은 raw HI 조합을 가리키므로 유효, 다른 pkl이면
+        이름이 겹쳐도 우연일 뿐이니 호출부가 kernel_features_pkl 일치 여부를 따로 확인
+        해야 한다)."""
+        path = self.run_dir / "gates" / "regression_kernel_HIs.json"
+        if not path.exists():
+            return {}, {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        sets: dict[str, set[str]] = {}
+        probs: dict[str, dict[str, float]] = {}
+        n_scen = 0
+        while f"seg_{n_scen}_names" in data:
+            n_scen += 1
+        for s in range(n_scen):
+            names = data.get(f"seg_{s}_names", [])
+            p = data.get(f"seg_{s}_probs", [])
+            sname = data.get(f"seg_{s}_seg_name", f"seg_{s}")
+            sets[sname] = {n for n, v in zip(names, p) if v > 0.9}
+            probs[sname] = dict(zip(names, p))
+        return sets, probs
+
+
+def _load_bundles(run_dirs: list[str], labels: list[str] | None,
+                   interaction_json_override: str | None = None) -> list[RunBundle]:
     if labels is not None and len(labels) != len(run_dirs):
         raise ValueError(f"--labels 개수({len(labels)})가 --runs 개수({len(run_dirs)})와 다릅니다.")
     bundles = []
@@ -260,7 +335,7 @@ def _load_bundles(run_dirs: list[str], labels: list[str] | None) -> list[RunBund
             raise FileNotFoundError(f"run 폴더를 찾을 수 없습니다: {run_dir}")
         label = labels[i] if labels else run_dir.name
         print(f"[viz] loading run: {run_dir}  (label={label})")
-        bundles.append(RunBundle(run_dir, label))
+        bundles.append(RunBundle(run_dir, label, interaction_json_override))
     return bundles
 
 
@@ -357,60 +432,78 @@ def _scalar_metrics(b: RunBundle) -> dict[str, float | None]:
 # 모델 재구성 (인퍼런스 타이밍 / 파라미터 수 / Jacobian 용)
 # =============================================================================
 
-def _load_gate_masks(run_dir: Path, cfg: dict, n_scenarios: int
-                      ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    clf_cfg = cfg.get("classifier", {})
-    reg_cfg = cfg.get("regression", {})
-    charge_m = clf_cfg.get("charge_probe_m", clf_cfg.get("probe_m_count", 1))
-    discharge_m = clf_cfg.get("discharge_probe_m", clf_cfg.get("probe_m_count", 1))
-    scen_k = reg_cfg.get("scen_k_count", 5)
+def _build_model_for_run(b: RunBundle, device: torch.device, ckpt_name: str,
+                          regression_model_override: str | None = None) -> None:
+    """b.model / b.n_params 를 채운다.
 
-    probe_data = json.loads((run_dir / "gates" / "classification_HIs.json").read_text(encoding="utf-8"))
-    scen_data = json.loads((run_dir / "gates" / "regression_HIs.json").read_text(encoding="utf-8"))
-
-    ch_mask = torch.zeros(N_HI, dtype=torch.bool)
-    for i in probe_data["charge_ranked"][:charge_m]:
-        ch_mask[i] = True
-    dis_mask = torch.zeros(N_HI, dtype=torch.bool)
-    for i in probe_data["discharge_ranked"][:discharge_m]:
-        dis_mask[i] = True
-
-    scen_masks = torch.zeros(n_scenarios, N_HI, dtype=torch.bool)
-    for s in range(n_scenarios):
-        for i in scen_data[f"seg_{s}_ranked"][:scen_k]:
-            scen_masks[s, i] = True
-
-    return ch_mask, dis_mask, scen_masks
-
-
-def _build_model_for_run(b: RunBundle, device: torch.device, ckpt_name: str) -> None:
-    """b.model / b.n_params 를 채운다."""
+    2026-09-08 이전엔 charge_probe_mask/discharge_probe_mask/scen_masks(Phase 1의 옛
+    "고정폭 top-k 마스크" 방식)로 SCRModel을 재구성했는데, 이건 phase1_trainer_v2.py가
+    실제로 v4를 학습하는 방식(학습된 HardConcreteGate + shared_hi_mask(v4) +
+    n_kernel_hi(커널 피처))과 다르다 — strict=False라 죽지는 않지만 shared_gate/
+    scen_kernel_gates 가중치가 통째로 안 실리고 조용히 넘어갔다(test_phase1_checkpoint.py
+    가 test_scr.py를 그대로 못 쓰고 새로 만들어야 했던 것과 동일한 원인). 이 함수를
+    test_phase1_checkpoint.py의 재구성 로직과 동일하게 맞춘다(중복 구현이지만 그쪽은
+    데이터셋 로딩까지 포함된 훨씬 무거운 함수라 그대로 임포트해 재사용하기보다 필요한
+    부분만 여기 옮기는 게 낫다 — 이 함수는 순수 추론 벤치마크용이라 실제 데이터셋은
+    필요 없다)."""
     ckpt_path = b.run_dir / "checkpoints" / ckpt_name
     if not ckpt_path.exists():
-        fallback = "final.pt" if ckpt_name != "final.pt" else "best.pt"
+        fallback = "best_by_saturation.pt" if ckpt_name != "best_by_saturation.pt" else "best.pt"
         ckpt_path = b.run_dir / "checkpoints" / fallback
         print(f"[viz] {b.label}: {ckpt_name} 없음 → {fallback} 사용")
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
-    ch_mask, dis_mask, scen_masks = _load_gate_masks(b.run_dir, b.cfg, b.spec.n_scenarios)
+    n_kernel_hi = 0
+    if b.kernel_features_pkl:
+        import pickle
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # sklearn 버전 경고 — 이름/개수만 쓰므로 무해
+            with open(b.kernel_features_pkl, "rb") as f:
+                n_kernel_hi = len(pickle.load(f)["features"])
+
+    scen_group_ids = None
+    if b.synergy_groups_json:
+        scen_group_ids = _base._load_synergy_group_ids(
+            b.synergy_groups_json, b.spec.n_scenarios, b.spec.scenario_names,
+        )
+
+    shared_hi_mask = None
+    if b.interaction_json:
+        interaction_data = json.loads(b.interaction_json.read_text(encoding="utf-8"))
+        ref_seg_name = b.spec.scenario_names[0]
+        ref_cols = get_hi_cols_for_seg(ref_seg_name)
+        suffix = f"_{ref_seg_name}"
+        concepts_in_order = [c[: -len(suffix)] if c.endswith(suffix) else c for c in ref_cols]
+        per_hi = interaction_data["per_hi"]
+        shared_hi_mask = torch.tensor(
+            [not per_hi.get(c, {"significant": False})["significant"] for c in concepts_in_order],
+            dtype=torch.bool,
+        )
+
     m_cfg = b.cfg.get("model", {})
+    if regression_model_override:
+        m_cfg = {**m_cfg, "regression_model": regression_model_override}
+    lambda_scen = b.cfg.get("loss", {}).get("lambda_scen", 0.0)
     model = SCRModel(
         d_probe=m_cfg.get("d_probe", 64),
         d_head=m_cfg.get("d_head", 128),
         dropout=m_cfg.get("dropout", 0.1),
-        charge_probe_mask=ch_mask,
-        discharge_probe_mask=dis_mask,
-        scen_masks=scen_masks,
-        model_cfg=m_cfg,
         spec=b.spec,
+        with_probe_mlp=lambda_scen > 0,
+        model_cfg=m_cfg,
+        scen_group_ids=scen_group_ids,
+        shared_hi_mask=shared_hi_mask,
+        n_kernel_hi=n_kernel_hi,
     )
-    missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+    model.load_state_dict(ckpt["model_state"], strict=True)
     model.eval().to(device)
 
     b.model = model
     b.n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[viz] {b.label}: model built ({ckpt_path.name}), "
-          f"trainable params={b.n_params:,}, regression_model={m_cfg.get('regression_model', 'mlp')}")
+          f"trainable params={b.n_params:,}, regression_model={m_cfg.get('regression_model', 'mlp')}, "
+          f"n_kernel_hi={n_kernel_hi}")
 
 
 def _benchmark_inference(b: RunBundle, device: torch.device,
@@ -437,6 +530,12 @@ def _benchmark_inference(b: RunBundle, device: torch.device,
     if getattr(model, "raw_cnn", None) is not None or getattr(model, "with_raw_flat", False):
         x_raw = torch.randn(batch_size, RAW_CH, RAW_N, generator=g)
         batch["x_raw"] = x_raw.to(device)
+    # 커널 피처 블록(v2/v3/v4) — forward가 model.scen_kernel_gates is not None일 때
+    # batch["x_kernel"]을 무조건 읽으므로(scr_model.py) 없으면 KeyError로 죽는다.
+    if getattr(model, "scen_kernel_gates", None) is not None:
+        n_kernel_hi = model.scen_kernel_gates[0].log_alpha.numel()
+        x_kernel = torch.randn(batch_size, n_kernel_hi, generator=g)
+        batch["x_kernel"] = x_kernel.to(device)
 
     is_cuda = device.type == "cuda"
     with torch.no_grad():
@@ -601,14 +700,35 @@ def _cosine(a: np.ndarray | None, b: np.ndarray | None) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-def _sim_matrix(bundles: list[RunBundle], key: str, kind: str) -> np.ndarray:
+def _weighted_jaccard_dict(a: "dict[str, float] | None", b: "dict[str, float] | None") -> float:
+    """_weighted_jaccard의 이름-키 dict 버전 — 커널 HI는 run마다 폭/이름 집합이 달라
+    고정 인덱스 ndarray로 못 담으므로(raw HI와의 차이, RunBundle._load_kernel_gates
+    참고) 이름 기준 합집합으로 계산한다. 같은 kernel_features_pkl을 공유하는 run끼리는
+    이름 집합이 사실상 동일해 _weighted_jaccard와 값이 같다."""
+    if not a or not b:
+        return float("nan")
+    keys = set(a) | set(b)
+    num = sum(min(a.get(k, 0.0), b.get(k, 0.0)) for k in keys)
+    den = sum(max(a.get(k, 0.0), b.get(k, 0.0)) for k in keys)
+    return num / den if den > 1e-12 else 1.0
+
+
+def _routing_sets_of(b: RunBundle, source: str) -> dict[str, set[str]]:
+    return b.kernel_routing_sets if source == "kernel" else b.routing_sets
+
+
+def _gate_probs_of(b: RunBundle, source: str):
+    return b.kernel_gate_probs if source == "kernel" else b.gate_probs
+
+
+def _sim_matrix(bundles: list[RunBundle], key: str, kind: str, source: str = "raw") -> np.ndarray:
     n = len(bundles)
     m = np.full((n, n), np.nan)
     for i in range(n):
         for j in range(n):
             if kind == "jaccard":
-                ai = bundles[i].routing_sets.get(key, set())
-                aj = bundles[j].routing_sets.get(key, set())
+                ai = _routing_sets_of(bundles[i], source).get(key, set())
+                aj = _routing_sets_of(bundles[j], source).get(key, set())
                 m[i, j] = _jaccard(ai, aj)
             else:  # jacobian
                 ai = bundles[i].jacobian_profiles.get(key)
@@ -617,30 +737,31 @@ def _sim_matrix(bundles: list[RunBundle], key: str, kind: str) -> np.ndarray:
     return m
 
 
-def _scenario_sim_matrix(bundle: RunBundle, labels: list[str]) -> np.ndarray:
+def _scenario_sim_matrix(bundle: RunBundle, labels: list[str], source: str = "raw") -> np.ndarray:
     """단일 run 내부에서 라벨(probe/시나리오)끼리 선정 HI 자카드 유사도(이진, top-k 컷오프 후).
     낮을수록 그 두 라벨이 서로 다른 HI 서브셋을 쓴다는 뜻 — "시나리오별로 얼마나
-    다른 HI를 골랐는가"를 보기 위한 행렬(대각선은 항상 1.0)."""
+    다른 HI를 골랐는가"를 보기 위한 행렬(대각선은 항상 1.0). source="kernel"이면
+    커널 HI(regression_kernel_HIs.json) 기준으로 계산한다."""
     n = len(labels)
     m = np.full((n, n), np.nan)
+    sets = _routing_sets_of(bundle, source)
     for i in range(n):
         for j in range(n):
-            ai = bundle.routing_sets.get(labels[i], set())
-            aj = bundle.routing_sets.get(labels[j], set())
-            m[i, j] = _jaccard(ai, aj)
+            m[i, j] = _jaccard(sets.get(labels[i], set()), sets.get(labels[j], set()))
     return m
 
 
-def _scenario_sim_matrix_weighted(bundle: RunBundle, labels: list[str]) -> np.ndarray:
+def _scenario_sim_matrix_weighted(bundle: RunBundle, labels: list[str], source: str = "raw") -> np.ndarray:
     """_scenario_sim_matrix의 확률 가중(Ruzicka) 버전 — top-k로 자르기 전 원본 gate
-    확률(bundle.gate_probs)을 사용해 top-k 경계 근처 HI의 "부분 겹침"까지 반영한다."""
+    확률(bundle.gate_probs/kernel_gate_probs)을 사용해 top-k 경계 근처 HI의 "부분 겹침"
+    까지 반영한다."""
     n = len(labels)
     m = np.full((n, n), np.nan)
+    probs = _gate_probs_of(bundle, source)
+    fn = _weighted_jaccard_dict if source == "kernel" else _weighted_jaccard
     for i in range(n):
         for j in range(n):
-            ai = bundle.gate_probs.get(labels[i])
-            aj = bundle.gate_probs.get(labels[j])
-            m[i, j] = _weighted_jaccard(ai, aj)
+            m[i, j] = fn(probs.get(labels[i]), probs.get(labels[j]))
     return m
 
 
@@ -707,7 +828,7 @@ def _heatmap_row(fig, gs_row, col_labels: list[str], bundles: list[RunBundle],
 
 def _scenario_heatmap_row(fig, gs_row_spec, bundles: list[RunBundle],
                            labels: list[str], title_prefix: str,
-                           matrix_fn=_scenario_sim_matrix):
+                           matrix_fn=_scenario_sim_matrix, source: str = "raw"):
     """run별로 하나씩(열=run) labels×labels(probe+시나리오) 유사도 행렬을 그린다.
 
     _heatmap_row(kind="jaccard")는 "같은 시나리오를 run끼리 비교"(run×run)했지만,
@@ -716,6 +837,7 @@ def _scenario_heatmap_row(fig, gs_row_spec, bundles: list[RunBundle],
 
     matrix_fn: _scenario_sim_matrix(이진 Jaccard, 기본) 또는
                _scenario_sim_matrix_weighted(확률 가중 Ruzicka) 중 선택.
+    source: "raw"(기본) 또는 "kernel" — 커널 HI 기준으로 그리려면 "kernel".
     """
     n_runs = len(bundles)
     inner = gridspec.GridSpecFromSubplotSpec(1, n_runs, subplot_spec=gs_row_spec, wspace=0.7)
@@ -723,7 +845,7 @@ def _scenario_heatmap_row(fig, gs_row_spec, bundles: list[RunBundle],
     im = None
     for c, b in enumerate(bundles):
         ax = fig.add_subplot(inner[0, c])
-        m = matrix_fn(b, labels)
+        m = matrix_fn(b, labels, source=source)
         im = ax.imshow(m, vmin=0, vmax=1, cmap="RdYlGn")
         ax.set_xticks(range(n_lab)); ax.set_xticklabels(labels, rotation=90, fontsize=6)
         ax.set_yticks(range(n_lab)); ax.set_yticklabels(labels, fontsize=6)
@@ -768,6 +890,17 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path, cro
     metric_n_cols = len(col_labels)  # RMSE/MAE/MAPE 열 수 — cross_axis면 Overall 1개뿐
     jaccard_labels = ["probe"] + list(scen_names)
 
+    # 커널 HI(model.scen_kernel_gates) 비교 — 모든 run이 커널 피처를 쓸 때만 켠다.
+    # 2026-09-08 추가: probe 대응물이 없어 raw와 달리 시나리오명만 라벨로 쓴다.
+    have_kernel = not cross_axis and all(b.kernel_gate_probs for b in bundles)
+    if have_kernel:
+        pkls = {str(b.kernel_features_pkl) for b in bundles}
+        if len(pkls) > 1:
+            print(f"[viz] 경고: run들이 서로 다른 kernel_features_pkl을 씀({pkls}) — "
+                  f"커널 HI 이름이 같아도 다른 raw HI 조합일 수 있어 커널 Jaccard 비교가 "
+                  f"무의미할 수 있습니다.")
+        kernel_labels = list(scen_names)
+
     scalar_defs_all = [
         ("r2", "R² (overall)", "{:.4f}"),
         ("clf_acc", "분류 정확도 (hard)", "{:.4f}"),
@@ -787,6 +920,8 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path, cro
     row_plan = ["rmse", "mae", "mape"] + ["scalar"] * n_scalar_rows
     if not cross_axis:
         row_plan += ["jaccard", "jaccard_weighted"]
+    if have_kernel:
+        row_plan += ["kernel_jaccard", "kernel_jaccard_weighted"]
     if with_jacobian and not cross_axis:
         row_plan.append("jacobian")
     elif with_jacobian and cross_axis:
@@ -811,7 +946,7 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path, cro
 
     row_i = 0
     scalar_row_i = 0
-    im1 = im1b = im2 = None
+    im1 = im1b = im2 = im1k = im1bk = None
     for kind in row_plan:
         if kind in metric_row_defs:
             prefix, ylabel, fmt = metric_row_defs[kind]
@@ -827,12 +962,20 @@ def _plot_all(bundles: list[RunBundle], with_jacobian: bool, out_path: Path, cro
         elif kind == "jaccard_weighted":
             im1b = _scenario_heatmap_row(fig, gs[row_i, :], bundles, jaccard_labels, "weighted ",
                                          matrix_fn=_scenario_sim_matrix_weighted)
+        elif kind == "kernel_jaccard":
+            im1k = _scenario_heatmap_row(fig, gs[row_i, :], bundles, kernel_labels, "kernel ",
+                                         matrix_fn=_scenario_sim_matrix, source="kernel")
+        elif kind == "kernel_jaccard_weighted":
+            im1bk = _scenario_heatmap_row(fig, gs[row_i, :], bundles, kernel_labels, "kernel weighted ",
+                                          matrix_fn=_scenario_sim_matrix_weighted, source="kernel")
         elif kind == "jacobian":
             im2 = _heatmap_row(fig, [gs[row_i, c] for c in range(metric_n_cols)], col_labels, bundles,
                                 "jacobian", "Jacobian cos — ")
         row_i += 1
 
-    for im, row_key in ((im1, "jaccard"), (im1b, "jaccard_weighted"), (im2, "jacobian")):
+    for im, row_key in ((im1, "jaccard"), (im1b, "jaccard_weighted"),
+                         (im1k, "kernel_jaccard"), (im1bk, "kernel_jaccard_weighted"),
+                         (im2, "jacobian")):
         if im is not None:
             row_idx = row_plan.index(row_key)
             top = 1 - row_idx / total_rows
@@ -985,11 +1128,16 @@ def main() -> None:
     if len(args.runs) < 2:
         raise ValueError("--runs 는 2개 이상 지정해야 비교가 의미 있습니다.")
 
-    bundles = _load_bundles(args.runs, args.labels)
+    bundles = _load_bundles(args.runs, args.labels, args.interaction_json)
     cross_axis = _check_cross_axis(bundles)
 
-    for b in bundles:
-        _build_model_for_run(b, device, args.checkpoint_name)
+    if args.regression_models is not None and len(args.regression_models) != len(bundles):
+        raise ValueError(f"--regression-models 개수({len(args.regression_models)})가 "
+                          f"--runs 개수({len(bundles)})와 다릅니다.")
+    reg_overrides = args.regression_models or [None] * len(bundles)
+
+    for b, reg_override in zip(bundles, reg_overrides):
+        _build_model_for_run(b, device, args.checkpoint_name, reg_override)
         _benchmark_inference(b, device, args.infer_batch_size, args.infer_warmup, args.infer_reps)
         if args.with_jacobian and not cross_axis:
             _compute_jacobian_profiles(b, device, args.jacobian_max_samples)
