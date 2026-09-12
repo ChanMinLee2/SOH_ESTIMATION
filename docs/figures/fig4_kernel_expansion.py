@@ -1,14 +1,17 @@
-"""Figure 3 -- Information expansion via kernel fusion (D9 + D11, +D10 inset).
+"""Figure 4 -- Information expansion via kernel fusion (D9 + D11).
 
 (a) candidate-feature pool size per scenario: 64 raw + kernel-fused groups added
-(b) representative kernel groups: composition + train R^2 (top-3 by R^2)
-(c) predictive-power distribution: raw univariate r^2 vs kernel group train R^2
+(b) predictive-power distribution: raw univariate r^2 vs kernel group train R^2
+
+(2026-09-13: dropped the former panel (b) -- representative kernel-group
+composition/top-3 by R^2 -- per user feedback; kept only the two
+quantitative panels.)
 
 Real data: 5_model/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v3.pkl
 (synergy-grouped kernel features, Nystroem+Ridge) and the same HI cache used
-in Figure 2 for the raw univariate baseline.
+in Figure 3 for the raw univariate baseline.
 
-Run: python docs/figures/fig3_kernel_expansion.py
+Run: python docs/figures/fig4_kernel_expansion.py
 """
 
 from __future__ import annotations
@@ -146,15 +149,13 @@ def build_figure():
     raw_r2 = load_raw_r2()
     kernel_r2 = np.array([f["train_r2"] for f in feats])
 
-    fig = plt.figure(figsize=(11.0, 4.1))
-    gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.15, 0.9], wspace=0.5,
-                           top=0.86, bottom=0.20, left=0.07, right=0.975)
+    fig = plt.figure(figsize=(7.6, 4.1))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 0.9], wspace=0.42,
+                           top=0.86, bottom=0.20, left=0.09, right=0.97)
     ax_a = fig.add_subplot(gs[0, 0])
-    ax_b = fig.add_subplot(gs[0, 1])
-    ax_c = fig.add_subplot(gs[0, 2])
+    ax_c = fig.add_subplot(gs[0, 1])
 
     panel_pool_size(ax_a, feats)
-    panel_examples(ax_b, feats)
     panel_boxplot(ax_c, raw_r2, kernel_r2)
 
     for ax in (ax_a, ax_c):
@@ -162,7 +163,7 @@ def build_figure():
         ax.spines["right"].set_visible(False)
         ax.tick_params(direction="out", length=2.8)
 
-    for ax, letter, dx in ((ax_a, "(a)", -0.055), (ax_b, "(b)", -0.075), (ax_c, "(c)", -0.06)):
+    for ax, letter, dx in ((ax_a, "(a)", -0.065), (ax_c, "(b)", -0.075)):
         label_panel(fig, ax, letter, dx=dx, dy=0.014)
 
     return fig
@@ -170,8 +171,8 @@ def build_figure():
 
 if __name__ == "__main__":
     fig = build_figure()
-    out_png = "docs/figures/fig3_kernel_expansion.png"
-    out_pdf = "docs/figures/fig3_kernel_expansion.pdf"
+    out_png = "docs/figures/fig4_kernel_expansion.png"
+    out_pdf = "docs/figures/fig4_kernel_expansion.pdf"
     fig.savefig(out_png, dpi=600)
     fig.savefig(out_pdf)
     print(f"saved: {out_png}\nsaved: {out_pdf}")

@@ -1045,6 +1045,86 @@ def _compute_ic(
     return v_grid, dqdv
 
 
+def _compute_dva(
+    v: np.ndarray,
+    q: np.ndarray,
+    n_points: int = 600,
+    smooth_sigma: float = 4.0,
+) -> "tuple[np.ndarray, np.ndarray] | tuple[None, None]":
+    """dV/dQ vs Q (차동전압 커브) 계산 — _compute_ic와 완전히 대칭(Q/V만 뒤바뀜).
+
+    1. Q 기준 오름차순 정렬 + 중복 제거
+    2. 균등 Q 격자에 V 보간
+    3. Gaussian 스무딩 (sigma: Q 격자 포인트 단위)
+    4. 수치 미분 → dV/dQ
+
+    방전은 Q 오름차순(누적 방전량 증가) 시 V가 내림차순이므로 dV/dQ < 0.
+    호출 측에서 `-dvdq`로 부호를 반전해 피크를 양수로 표시(ICA와 동일 관례).
+    """
+    try:
+        from scipy.ndimage import gaussian_filter1d
+    except ImportError:
+        return None, None
+
+    if len(q) < 30:
+        return None, None
+
+    sort_idx = np.argsort(q)
+    q_s = q[sort_idx]
+    v_s = v[sort_idx]
+
+    _, ui = np.unique(q_s, return_index=True)
+    q_u, v_u = q_s[ui], v_s[ui]
+    if len(q_u) < 20:
+        return None, None
+
+    q_grid   = np.linspace(q_u[0], q_u[-1], n_points)
+    v_interp = np.interp(q_grid, q_u, v_u)
+    v_smooth = gaussian_filter1d(v_interp, sigma=smooth_sigma)
+    dvdq     = np.gradient(v_smooth, q_grid)
+    return q_grid, dvdq
+
+
+def _pick_cycles(valid_cycs: list[int], n_cycles: int, cycle_step: "int | None") -> list[int]:
+    """대표 사이클 선정 — plot_ic_windows/plot_dva_windows 공용(2026-09-10).
+
+    cycle_step 지정 시: 실제 사이클 번호 기준 step 간격 그라데이션(예: 10이면
+    10,20,30...), 마지막 유효 사이클이 빠지면 강제로 포함(수명 끝까지 보이게).
+    미지정 시: 기존 동작(n_cycles개를 valid_cycs 인덱스 기준 균등 선택 —
+    n_cycles=3이면 정확히 첫/중간/마지막 사이클)."""
+    if cycle_step is not None and cycle_step > 0:
+        picks = [c for c in valid_cycs if c % cycle_step == 0]
+        if not picks or picks[-1] != valid_cycs[-1]:
+            picks.append(valid_cycs[-1])
+        if picks[0] != valid_cycs[0]:
+            picks.insert(0, valid_cycs[0])
+        return sorted(set(picks))
+    n = min(n_cycles, len(valid_cycs))
+    return [valid_cycs[int(round(i))] for i in np.linspace(0, len(valid_cycs) - 1, n)]
+
+
+def _add_cycle_legend(fig, ax_anchor, picks: list[int], cyc_color: list) -> None:
+    """사이클 범례 — 개수가 많으면(>15) 개별 라인 대신 컬러바로 전환(2026-09-10,
+    10사이클 간격 그라데이션 모드에서 범례가 수십~수백 줄이 되는 걸 방지)."""
+    n = len(picks)
+    if n <= 15:
+        from matplotlib.lines import Line2D
+        handles = [Line2D([0], [0], color=cyc_color[i], lw=2.2, label=f"Cyc {picks[i]}")
+                   for i in range(n)]
+        fig.legend(handles=handles, loc="center right", fontsize=8, framealpha=0.88,
+                   bbox_to_anchor=(1.01, 0.5), title="사이클")
+    else:
+        import matplotlib.colors as mcolors
+        import matplotlib.cm as mcm
+        norm = mcolors.Normalize(vmin=picks[0], vmax=picks[-1])
+        sm = mcm.ScalarMappable(cmap=matplotlib.colormaps["RdYlGn_r"], norm=norm)
+        sm.set_array([])
+        cax = fig.add_axes((0.965, 0.30, 0.012, 0.40))
+        cbar = fig.colorbar(sm, cax=cax)
+        cbar.set_label(f"Cycle  (n={n}, step)", fontsize=8)
+        cbar.ax.tick_params(labelsize=7)
+
+
 def _win_colors(n: int) -> list[str]:
     """창 개수에 맞는 구분 가능한 색상 목록."""
     palette = [
@@ -1086,6 +1166,7 @@ def plot_ic_windows(
     axis: str,
     out_path: Path,
     n_cycles: int = 6,
+    cycle_step: "int | None" = None,
 ):
     """IC 커브 (dQ/dV vs V) + 멀티사이클 V-Q — 창 경계 오버레이.
 
@@ -1099,6 +1180,8 @@ def plot_ic_windows(
     vwindow 축: 전압 경계 밴드 표시.
     그 외 축  : IC 커브만 표시 (경계 없음).
     사이클 색상: 초록(초기) → 빨강(말기).
+    cycle_step 지정 시(2026-09-10) n_cycles 대신 실제 사이클 번호 step 간격으로
+    선택 — 셀 전체 수명에 걸친 촘촘한 그라데이션 개형을 보여준다.
     """
     with open(pkl_path, "rb") as fh:
         raw = pickle.load(fh)
@@ -1114,9 +1197,8 @@ def plot_ic_windows(
     valid_cycs = sorted(c for c in df_all["cycle"].unique() if c != 0)
     if not valid_cycs:
         print("  [경고] 유효 사이클 없음"); return
-    n     = min(n_cycles, len(valid_cycs))
-    picks = [valid_cycs[int(round(i))]
-             for i in np.linspace(0, len(valid_cycs) - 1, n)]
+    picks = _pick_cycles(valid_cycs, n_cycles, cycle_step)
+    n     = len(picks)
 
     # 사이클 나이 색상: 초록(early) → 빨강(late)
     _cmap = matplotlib.colormaps["RdYlGn_r"].resampled(256)
@@ -1187,8 +1269,9 @@ def plot_ic_windows(
 
     for ci, cyc in enumerate(picks):
         col   = cyc_color[ci]
-        lw    = 1.2 + ci * 0.15
-        alpha = 0.50 + ci * 0.07
+        frac  = ci / max(n - 1, 1)
+        lw    = 0.8 + frac * 0.8    # n에 무관하게 0.8~1.6 범위 (10사이클 간격 모드 대응)
+        alpha = 0.35 + frac * 0.45  # n에 무관하게 0.35~0.80 범위
         lbl   = f"Cyc {cyc}"
 
         grp = df_all[df_all["cycle"] == cyc]
@@ -1222,19 +1305,8 @@ def plot_ic_windows(
             ax.set_ylim(p2 - span * 0.08, p98 + span * 0.12)
         ax.axhline(0, color="#aaaaaa", lw=0.8, ls=":", zorder=0)
 
-    # ── 사이클 범례 (오른쪽에 세로 나열) ─────────────────────────────────────
-    from matplotlib.lines import Line2D
-    cyc_handles = [
-        Line2D([0], [0], color=cyc_color[ci], lw=2.2, label=f"Cyc {picks[ci]}")
-        for ci in range(n)
-    ]
-    fig.legend(
-        handles=cyc_handles,
-        loc="center right",
-        fontsize=8, framealpha=0.88,
-        bbox_to_anchor=(1.01, 0.5),
-        title="사이클",
-    )
+    # ── 사이클 범례 (15개 이하면 라인 목록, 넘으면 컬러바) ───────────────────
+    _add_cycle_legend(fig, ax_cic, picks, cyc_color)
 
     # ── 창 범례 (하단) ────────────────────────────────────────────────────────
     win_handles = []
@@ -1267,6 +1339,127 @@ def plot_ic_windows(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"  IC 플롯 저장: {out_path}")
+    plt.close(fig)
+
+
+def plot_dva_windows(
+    pkl_path: Path,
+    segmenter,
+    spec_names: list,
+    axis: str,
+    out_path: Path,
+    n_cycles: int = 6,
+    cycle_step: "int | None" = None,
+):
+    """DVA 커브 (dV/dQ vs Q) + 멀티사이클 V-Q — plot_ic_windows와 완전히 대칭
+    (V↔Q, dQ/dV↔dV/dQ만 뒤바뀜, _compute_dva 사용).
+
+    레이아웃 (2행 × 2열)
+    ┌──────────────────────┬──────────────────────┐
+    │  방전 V-Q 멀티사이클  │  충전 V-Q 멀티사이클  │
+    ├──────────────────────┼──────────────────────┤
+    │  방전 dV/dQ vs Q     │  충전 dV/dQ vs Q     │
+    └──────────────────────┴──────────────────────┘
+
+    사이클 색상: 초록(초기) → 빨강(말기). n_cycles=3이면 np.linspace가
+    첫/중간/마지막 유효 사이클을 정확히 골라 "초반/중반/후반" 비교가 된다.
+    cycle_step 지정 시(2026-09-10) 실제 사이클 번호 step 간격 그라데이션으로 전환.
+    """
+    with open(pkl_path, "rb") as fh:
+        raw = pickle.load(fh)
+
+    df_all  = raw.get("cycles")
+    cell_id = raw.get("meta", {}).get("cell_id", pkl_path.stem)
+    if df_all is None:
+        print(f"  [경고] {pkl_path.name}: cycles 없음"); return
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)
+
+    valid_cycs = sorted(c for c in df_all["cycle"].unique() if c != 0)
+    if not valid_cycs:
+        print("  [경고] 유효 사이클 없음"); return
+    picks = _pick_cycles(valid_cycs, n_cycles, cycle_step)
+    n     = len(picks)
+
+    _cmap = matplotlib.colormaps["RdYlGn_r"].resampled(256)
+    cyc_color = [_cmap(ci / max(n - 1, 1)) for ci in range(n)]
+
+    fig, axes = plt.subplots(
+        2, 2, figsize=(16, 11),
+        gridspec_kw={"hspace": 0.45, "wspace": 0.30},
+    )
+    ax_dvq, ax_cvq = axes[0, 0], axes[0, 1]
+    ax_ddva, ax_cdva = axes[1, 0], axes[1, 1]
+
+    fig.suptitle(
+        f"[{axis.upper()}]  {cell_id}  ·  DVA 커브 & V-Q 멀티사이클 분석\n"
+        f"색상: 초록(초기) → 빨강(말기)",
+        fontsize=12, fontweight="bold",
+    )
+
+    for ax, title in [
+        (ax_dvq, "방전  V-Q  (멀티사이클)"),
+        (ax_cvq, "충전  V-Q  (멀티사이클)"),
+        (ax_ddva, "방전  DVA  dV/dQ  vs  Q"),
+        (ax_cdva, "충전  DVA  dV/dQ  vs  Q"),
+    ]:
+        ax.set_facecolor("#f8f9fa")
+        ax.tick_params(labelsize=8)
+        ax.grid(True, lw=0.4, alpha=0.35)
+        ax.set_title(title, fontsize=9, fontweight="bold", pad=4)
+
+    ax_dvq.set_xlabel("Q_cum [Ah]", fontsize=8)
+    ax_dvq.set_ylabel("Voltage [V]", fontsize=8)
+    ax_cvq.set_xlabel("Q_cum [Ah]", fontsize=8)
+    ax_cvq.set_ylabel("Voltage [V]", fontsize=8)
+    ax_ddva.set_xlabel("Q_cum [Ah]", fontsize=8)
+    ax_ddva.set_ylabel("dV/dQ  [V/Ah]  (방전: 부호 반전)", fontsize=8)
+    ax_cdva.set_xlabel("Q_cum [Ah]", fontsize=8)
+    ax_cdva.set_ylabel("dV/dQ  [V/Ah]", fontsize=8)
+
+    dva_d_vals: list[float] = []
+    dva_c_vals: list[float] = []
+
+    for ci, cyc in enumerate(picks):
+        col   = cyc_color[ci]
+        frac  = ci / max(n - 1, 1)
+        lw    = 0.8 + frac * 0.8
+        alpha = 0.35 + frac * 0.45
+        lbl   = f"Cyc {cyc}"
+
+        grp = df_all[df_all["cycle"] == cyc]
+        dis = grp[grp["phase"] == "discharge"].sort_values("time_s")
+        chg = grp[grp["phase"] == "charge"].sort_values("time_s")
+
+        if len(dis) >= 30:
+            v_d, _, _, dt_d, q_d = _build_arrays(dis)
+            ax_dvq.plot(q_d, v_d, color=col, lw=lw, alpha=alpha, label=lbl)
+            q_dva, dvdq = _compute_dva(v_d, q_d)
+            if q_dva is not None:
+                # 방전 DVA: 부호 반전 → 피크를 양수로 (ICA와 동일 관례)
+                ax_ddva.plot(q_dva, -dvdq, color=col, lw=lw, alpha=alpha)
+                dva_d_vals.extend((-dvdq).tolist())
+
+        if len(chg) >= 20:
+            v_c, _, _, dt_c, q_c = _build_arrays(chg)
+            ax_cvq.plot(q_c, v_c, color=col, lw=lw, alpha=alpha, label=lbl)
+            q_dva, dvdq = _compute_dva(v_c, q_c)
+            if q_dva is not None:
+                ax_cdva.plot(q_dva, dvdq, color=col, lw=lw, alpha=alpha)
+                dva_c_vals.extend(dvdq.tolist())
+
+    for ax, vals in [(ax_ddva, dva_d_vals), (ax_cdva, dva_c_vals)]:
+        if len(vals) > 10:
+            p2, p98 = np.percentile(vals, 2), np.percentile(vals, 98)
+            span = max(p98 - p2, 1e-6)
+            ax.set_ylim(p2 - span * 0.08, p98 + span * 0.12)
+        ax.axhline(0, color="#aaaaaa", lw=0.8, ls=":", zorder=0)
+
+    _add_cycle_legend(fig, ax_cdva, picks, cyc_color)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"  DVA 플롯 저장: {out_path}")
     plt.close(fig)
 
 
@@ -1793,7 +1986,13 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
                 ic_path = out_dir / f"{ds}_{cell_stem}_ic.png"
                 print(f"\n=== IC 커브 시각화: {cell_stem}  n_cycles={args.n_cycles} ===")
                 plot_ic_windows(cell_pkl, seg, names, axis, ic_path,
-                                n_cycles=args.n_cycles)
+                                n_cycles=args.n_cycles, cycle_step=args.cycle_step)
+
+            if args.mode in ("dva", "all"):
+                dva_path = out_dir / f"{ds}_{cell_stem}_dva.png"
+                print(f"\n=== DVA 커브 시각화: {cell_stem}  n_cycles={args.n_cycles} ===")
+                plot_dva_windows(cell_pkl, seg, names, axis, dva_path,
+                                 n_cycles=args.n_cycles, cycle_step=args.cycle_step)
 
             if args.mode in ("vqzone", "all"):
                 if axis != "vqslope":
@@ -1846,7 +2045,16 @@ def _run_for_axis(axis: str, axis_cfg: dict, args) -> None:
                 ic_path   = out_dir / f"{ds}_{cell_stem}_ic.png"
                 print(f"\n=== IC 커브 시각화: {cell_stem}  n_cycles={args.n_cycles} ===")
                 plot_ic_windows(cell_pkl, seg, names, axis, ic_path,
-                                n_cycles=args.n_cycles)
+                                n_cycles=args.n_cycles, cycle_step=args.cycle_step)
+
+            if args.mode in ("dva", "all"):
+                # DVA 모드: 랜덤 셀 중 첫 번째 사용
+                cell_pkl  = sampled_pkls[0]
+                cell_stem = cell_pkl.stem
+                dva_path  = out_dir / f"{ds}_{cell_stem}_dva.png"
+                print(f"\n=== DVA 커브 시각화: {cell_stem}  n_cycles={args.n_cycles} ===")
+                plot_dva_windows(cell_pkl, seg, names, axis, dva_path,
+                                 n_cycles=args.n_cycles, cycle_step=args.cycle_step)
 
             if args.mode in ("vqzone", "all"):
                 if axis != "vqslope":
@@ -2261,8 +2469,10 @@ def main():
     parser.add_argument("--cycle",       type=int, default=0,
                         help="사이클 플롯 대상 사이클 번호 (0이면 첫 번째 유효 사이클)")
     parser.add_argument("--mode",         type=str, default="segment",
-                        choices=["segment", "ic", "vqzone", "compare", "verify-fix", "all"],
-                        help="시각화 모드: segment(기본)|ic|vqzone(vqslope 존 분리 근거)|"
+                        choices=["segment", "ic", "dva", "vqzone", "compare", "verify-fix", "all"],
+                        help="시각화 모드: segment(기본)|ic(dQ/dV vs V)|dva(dV/dQ vs Q, "
+                             "2026-09-10 추가 — ic와 완전 대칭, --n-cycles 3이면 초/중/후반 "
+                             "사이클 비교)|vqzone(vqslope 존 분리 근거)|"
                              "compare(여러 축/파라미터 조건 비교, --cell 필수)|"
                              "verify-fix(2026-08-16 세그먼트별-행 수정 검증, "
                              "docs/260816_RESULTS.md §2-6 A/C/D — D는 한 사이클의 세그먼트 "
@@ -2272,7 +2482,11 @@ def main():
                              "(기본: 4_hi_analysis/compare_conditions.json). "
                              "형식: [{\"axis\":\"q_frac_wide\",\"axis_config\":{...},\"label\":\"(선택)\"}, ...]")
     parser.add_argument("--n-cycles",    type=int, default=6,
-                        help="IC 모드에서 표시할 대표 사이클 수 (기본: 6)")
+                        help="ic/dva 모드에서 표시할 대표 사이클 수 (기본: 6, --cycle-step 미지정 시)")
+    parser.add_argument("--cycle-step",  type=int, default=None, dest="cycle_step",
+                        help="ic/dva 모드 전용(2026-09-10): 지정 시 --n-cycles 대신 실제 사이클 "
+                             "번호 step 간격으로 그라데이션(예: 10 → 10,20,30,...). 셀 전체 수명에 "
+                             "걸친 개형을 보고 싶을 때 사용, 곡선 수가 많으면 범례가 컬러바로 전환됨.")
     parser.add_argument("--n-random",    type=int, default=10,
                         help="--cell 미지정 시 segment 시각화에 사용할 랜덤 셀 수 (기본: 10)")
     parser.add_argument("--seed",        type=int, default=42,

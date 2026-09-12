@@ -43,6 +43,32 @@ _DEFAULT_SPEC: ScenarioSpec = spec_from_qfrac()
 
 
 # ---------------------------------------------------------------------------
+# Cycle-level TRAIN-only subsampling (diagnostic, docs/260909_RESULTS.md §6-5)
+# ---------------------------------------------------------------------------
+
+def subsample_cycles_per_cell(df: pd.DataFrame, frac: float, seed: int) -> pd.DataFrame:
+    """Keep a random `frac` fraction of each cell's distinct *cycles* --
+    every segment/zone from a kept cycle is kept, none dropped within it.
+
+    This reduces per-gate training sample COUNT while leaving positional
+    (zone) diversity within the retained cycles fully intact, so it isolates
+    "sample count" from "positional diversity" when comparing assign="none"
+    (pooled, more samples/gate) against assign="position_bin" (split 6 ways,
+    fewer samples/gate) -- see docs/260909_RESULTS.md §6-5(e)/(diagnostic
+    requested 2026-09-12). Segment-level (row) subsampling would not isolate
+    this cleanly, since it could by chance also thin out specific zones.
+    """
+    rng = np.random.default_rng(seed)
+    keep_idx: list[int] = []
+    for _cell_id, group in df.groupby("cell_id", sort=True):
+        cycles = np.sort(group["cycle"].unique())
+        n_keep = max(1, int(round(len(cycles) * frac)))
+        kept_cycles = set(rng.choice(cycles, size=n_keep, replace=False).tolist())
+        keep_idx.extend(group.index[group["cycle"].isin(kept_cycles)].tolist())
+    return df.loc[sorted(keep_idx)].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Cell-level train / val / test split
 # ---------------------------------------------------------------------------
 
@@ -688,6 +714,16 @@ def build_datasets(
         train_df = df[df["cell_id"].isin(train_cells)].reset_index(drop=True)
         val_df   = df[df["cell_id"].isin(val_cells)].reset_index(drop=True)
         test_df  = df[df["cell_id"].isin(test_cells)].reset_index(drop=True)
+
+    # train_cycle_frac<1.0: 진단용 cycle 단위 서브샘플링, train split에만 적용
+    # (val/test는 그대로 둬서 기존 run들과 평가가 비교 가능하게 유지).
+    train_cycle_frac = data_cfg.get("train_cycle_frac", 1.0)
+    if train_cycle_frac < 1.0:
+        n_before = len(train_df)
+        train_df = subsample_cycles_per_cell(train_df, frac=train_cycle_frac, seed=seed)
+        print(f"[dataset] train_cycle_frac={train_cycle_frac} 적용 — "
+              f"train 세그먼트 {n_before:,} -> {len(train_df):,}개로 축소 (cycle 단위, "
+              f"zone 다양성은 유지)")
 
     # ------------------------------------------------------------------
     # Build datasets (normalizer는 train 기준 fit)

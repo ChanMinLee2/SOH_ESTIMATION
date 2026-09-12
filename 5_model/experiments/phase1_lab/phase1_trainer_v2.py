@@ -110,6 +110,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--scen-k", type=int, default=None)
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--split-seed", type=int, required=True)
+    p.add_argument("--train-cycle-frac", type=float, default=1.0,
+                   help="진단용 — train split만 cell당 cycle 단위로 이 비율만큼 "
+                        "서브샘플링(zone 다양성은 유지, val/test는 그대로). "
+                        "docs/260909_RESULTS.md §6-5(e) 진단 실험. 기본 1.0=미적용.")
     p.add_argument("--data-dir", default=None,
                    help="cycle pkl 경로. 미지정 시 yaml의 data.data_dir, 그마저 없으면 "
                         "DEFAULT_DATA_DIR(캐논 경로)로 폴백 — 예전엔 CLI 기본값이 항상 "
@@ -295,6 +299,7 @@ def main() -> None:
     cfg.setdefault("scenario", {})["axis"] = seg_axis
     cfg["scenario"]["axis_config"] = axis_cfg
     cfg.setdefault("data", {})["split_seed"] = args.split_seed
+    cfg["data"]["train_cycle_frac"] = args.train_cycle_frac
     if args.data_dir is not None:
         cfg["data"]["data_dir"] = args.data_dir
     elif not cfg["data"].get("data_dir"):

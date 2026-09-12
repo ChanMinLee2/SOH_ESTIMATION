@@ -462,16 +462,28 @@ def _export_for_visualize(run_dir: Path, evaluator: SCREvaluator, test_modes: di
 
     predictions_dir = run_dir / "predictions"
     predictions_dir.mkdir(parents=True, exist_ok=True)
-    with open(predictions_dir / "test_predictions.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["cell_id", "cycle", "seg_name", "soh_true", "soh_pred",
-                    "cap_true_Ah", "cap_pred_Ah"])
-        for i in range(len(pred["cell_ids"])):
-            cap_init = float(pred["cap_init_raw"][i])
-            soh_true = float(pred["cap_true_raw"][i])
-            soh_pred = float(pred["cap_pred_raw"][i])
-            w.writerow([pred["cell_ids"][i], int(pred["cycles"][i]), pred["seg_names"][i],
-                        soh_true, soh_pred, soh_true * cap_init, soh_pred * cap_init])
+
+    def _write_predictions_csv(path: Path, p: dict) -> None:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["cell_id", "cycle", "seg_name", "soh_true", "soh_pred",
+                        "cap_true_Ah", "cap_pred_Ah"])
+            for i in range(len(p["cell_ids"])):
+                cap_init = float(p["cap_init_raw"][i])
+                soh_true = float(p["cap_true_raw"][i])
+                soh_pred = float(p["cap_pred_raw"][i])
+                w.writerow([p["cell_ids"][i], int(p["cycles"][i]), p["seg_names"][i],
+                            soh_true, soh_pred, soh_true * cap_init, soh_pred * cap_init])
+
+    _write_predictions_csv(predictions_dir / "test_predictions.csv", pred)
+    # 2026-09-13: oracle 외 모드(hard/soft)도 별도 CSV로 저장 -- 지금까지 hard/soft
+    # per-segment 예측은 그 자리에서 PNG(error_heatmap/capacity_curve)만 그리고
+    # 값 자체는 저장 안 해서, 나중에(Fig5/6 재구성 때) 스타일을 다시 맞추려 해도
+    # 원본 수치에 접근할 방법이 없었다 -- 이후 실험은 재평가 없이 바로 재사용 가능.
+    for m in test_modes:
+        if m == "oracle":
+            continue
+        _write_predictions_csv(predictions_dir / f"test_predictions_{m}.csv", test_modes[m]["_pred"])
 
     routing_dir = run_dir / "routing"
     routing_dir.mkdir(parents=True, exist_ok=True)

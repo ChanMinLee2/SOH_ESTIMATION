@@ -7,7 +7,9 @@ Phase 1은 항상 MLPHead (build_cap_head 호출 시 model_cfg 미전달).
 지원 모델:
   mlp            : 기본 MLP 2-hidden-layer (기존 동작과 완전 동일)
   transformer    : Transformer Encoder — probe/scen/meta 3 semantic 토큰
-  i_transformer  : Inverted Transformer — 130개 피처 각각이 토큰 (feature-wise attention)
+  i_transformer  : Inverted Transformer — 130개 피처(+n_kernel_hi>0이면 커널 융합 HI도
+                   각각 개별 토큰으로 추가) 전부가 독립 토큰 (feature-wise attention,
+                   2026-09-10 커널 지원 추가)
   resnet_tab     : ResNet for tabular (Gorishniy et al., NeurIPS 2021) — skip-connection blocks
   ft_transformer : FT-Transformer + CLS 토큰 + Sparse Attention Mask (Gorishniy et al., NeurIPS 2021)
 """
@@ -168,7 +170,13 @@ class TransformerHead(nn.Module):
 class ITransformerHead(nn.Module):
     """
     Inverted Transformer (Liu et al., ICLR 2024 스타일 적용):
-    130개 피처 각각을 독립 토큰으로 처리해 feature-wise self-attention을 수행한다.
+    130개 피처(probe 64 + scen 64 + direction/cap_init 2) 각각을, n_kernel_hi>0이면
+    커널 융합 HI(build_kernel_group_features.py 산출물) n_kernel_hi개도 똑같이 개별
+    스칼라로 취급해 전부를 독립 토큰으로 처리한다(feature-wise self-attention).
+    커널 HI를 raw HI와 구분 없이 "그냥 피처 하나 더"로 넣는 설계(2026-09-10, 옵션1 —
+    "59개를 하나로 뭉친 토큰" 대신 "59개를 각각 개별 토큰"으로 선택) — probe/scen/kernel
+    구분 없이 attention이 자유롭게 어떤 조합이든 볼 수 있어, ITransformer 본래 취지
+    (어떤 HI 조합이 중요한지 attention map으로 해석)와 가장 잘 맞는다.
 
     각 토큰 = scalar value projection (1→d_model) + 피처 ID embedding (learnable).
     → 어떤 HI 조합이 용량 예측에 중요한지 attention map으로 해석 가능.
@@ -182,6 +190,7 @@ class ITransformerHead(nn.Module):
         d_ff: int = 256,
         dropout: float = 0.1,
         with_raw_cnn: bool = False,
+        n_kernel_hi: int = 0,
     ):
         super().__init__()
         if with_raw_cnn:
@@ -191,9 +200,9 @@ class ITransformerHead(nn.Module):
                 "(REGRESSION_UPGRADE.md §5 표 참조). 현재는 mlp/transformer/resnet_tab만 "
                 "with_raw_cnn을 지원합니다."
             )
-        self.n_feat     = _HEAD_IN                          # 130
+        self.n_feat     = _HEAD_IN + n_kernel_hi            # 130 (+커널 있으면 n_kernel_hi)
         self.value_proj = nn.Linear(1, d_model)             # scalar → d_model
-        self.feat_emb   = nn.Embedding(_HEAD_IN, d_model)   # 피처 ID positional emb
+        self.feat_emb   = nn.Embedding(self.n_feat, d_model)  # 피처 ID positional emb
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -207,12 +216,12 @@ class ITransformerHead(nn.Module):
         self.output  = nn.Linear(d_model, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 130)
-        vals   = self.value_proj(x.unsqueeze(-1))                          # (B, 130, d)
-        pos    = self.feat_emb(torch.arange(self.n_feat, device=x.device)) # (130, d)
-        tokens = vals + pos.unsqueeze(0)                                    # (B, 130, d)
+        # x: (B, n_feat) — n_feat = 130 (+n_kernel_hi, 있으면)
+        vals   = self.value_proj(x.unsqueeze(-1))                          # (B, n_feat, d)
+        pos    = self.feat_emb(torch.arange(self.n_feat, device=x.device)) # (n_feat, d)
+        tokens = vals + pos.unsqueeze(0)                                    # (B, n_feat, d)
 
-        out    = self.encoder(tokens)   # (B, 130, d)
+        out    = self.encoder(tokens)   # (B, n_feat, d)
         pooled = out.mean(dim=1)        # (B, d)
         return self.output(pooled).squeeze(-1)  # (B,)
 
@@ -384,8 +393,9 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
         d_head      : MLP hidden dim 또는 Transformer d_model / ResNet block width
         dropout     : dropout rate (yaml model.dropout)
         n_kernel_hi : build_kernel_group_features.py의 커널 융합 HI 블록 폭(0=없음).
-                      mlp/transformer/resnet_tab 지원(2026-09-08). i_transformer/
-                      ft_transformer는 아직 미지원 — 에러(설계 미정, 위 NotImplementedError 참고).
+                      mlp/transformer/resnet_tab/i_transformer 지원(i_transformer는
+                      2026-09-10 추가 — 커널 HI를 개별 토큰으로 넣음, 옵션1). ft_transformer는
+                      아직 미지원 — 에러(설계 미정, 위 NotImplementedError 참고).
     """
     rtype = model_cfg.get("regression_model", "mlp").lower().replace("-", "_")
 
@@ -403,10 +413,11 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
             "i_transformer/ft_transformer는 96개 raw 스칼라의 개별 토큰화 설계가 필요합니다 "
             "(REGRESSION_UPGRADE.md §3.2)."
         )
-    if n_kernel_hi > 0 and rtype not in ("mlp", "transformer", "resnet_tab"):
+    if n_kernel_hi > 0 and rtype not in ("mlp", "transformer", "resnet_tab",
+                                          "i_transformer", "itransformer"):
         raise NotImplementedError(
-            f"n_kernel_hi(커널 융합 HI 블록)는 아직 mlp/transformer/resnet_tab만 지원합니다 "
-            f"(rtype={rtype}). i_transformer/ft_transformer는 전체 피처를 개별 스칼라 토큰으로 "
+            f"n_kernel_hi(커널 융합 HI 블록)는 아직 mlp/transformer/resnet_tab/i_transformer만 "
+            f"지원합니다 (rtype={rtype}). ft_transformer는 전체 피처를 개별 스칼라 토큰으로 "
             "다루는 구조라(feature-wise attention) 커널 블록을 같은 방식(n_kernel_hi개 토큰 "
             "추가 vs 1개 토큰으로 뭉치기)으로 넣을지 설계가 더 필요합니다."
         )
@@ -433,7 +444,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
         return ITransformerHead(
             d_model=d_head, n_heads=n_heads,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
-            with_raw_cnn=with_raw_cnn,
+            with_raw_cnn=with_raw_cnn, n_kernel_hi=n_kernel_hi,
         )
 
     if rtype == "resnet_tab":

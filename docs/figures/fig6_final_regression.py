@@ -21,9 +21,9 @@ from _style import (INK, SUBINK, FAINT, GRID, SCEN_NAMES, SCEN_POS_COLOR, setup_
 
 setup_rcparams()
 
-RUN_DIR = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs/0827_1705_p1v2_p1v4_full_seed42"
+RUN_DIR = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs/0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42"
 PRED_CSV = RUN_DIR / "predictions" / "test_predictions.csv"
-EXAMPLE_CELL = "b1c0"
+EXAMPLE_CELL = "1-7"
 
 SEQ_CMAP = LinearSegmentedColormap.from_list("err", ["#F4F1E8", "#B14A3C"])
 RNG = np.random.default_rng(20260910)
