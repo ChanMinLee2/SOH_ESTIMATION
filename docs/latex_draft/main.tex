@@ -1,0 +1,305 @@
+\documentclass[preprint,12pt]{elsarticle}
+
+% ---------------------------------------------------------------------------
+% Structural draft for Journal of Power Sources.
+% Content is intentionally outline/bullet-form (per docs/DRAFT.md) -- this
+% file exists to check section layout + figure placement in Overleaf, not to
+% read as finished prose. Fill in / convert bullets to prose in a later pass.
+% ---------------------------------------------------------------------------
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{lineno}
+\usepackage{hyperref}
+
+\journal{Journal of Power Sources}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Scenario-Conditioned Subset Learning for Battery State-of-Health Estimation}
+
+% TODO: replace with real author list / affiliations / corresponding-author email.
+\author[label1]{Author Name}
+\address[label1]{Affiliation, Address}
+
+\begin{abstract}
+% Bullet form for now -- convert to a single flowing paragraph before submission.
+\begin{itemize}
+  \item Problem: SOH estimation from partial (not full) charge/discharge segments, since real deployment rarely provides a complete cycle.
+  \item Approach: 64 physically-motivated health indicators (HIs) across four categories (stat / diff / LFP-specific / morphology), expanded via kernel fusion, selected per SOC-window ``scenario'' by an L0 HardConcrete gate, with a scenario-routing classifier for deployment.
+  \item Data: MIT + HUST (LFP, different manufacturers), TJU (NCM), CALCE (LCO) -- four public datasets.
+  \item Headline results (\emph{placeholder numbers, confirm against latest run before submission}):
+  \begin{itemize}
+    \item Oracle-routing $R^2 \approx 0.94$--$0.95$ on the pooled MIT+HUST setting.
+    \item Hard-routing degradation limited to $\sim$2\% RMSE relative to oracle.
+    \item Cross-chemistry raw-HI selection Jaccard similarity 0.12--0.43 -- the gate genuinely selects different subsets per chemistry.
+  \end{itemize}
+  \item Honest negative result reported as a core finding: naive scenario-label conditioning (independent per-scenario gates) is consistently harmful; the mechanism (per-gate training-sample fragmentation, not information leakage) is confirmed at the code level, and kernel fusion recovers most of the loss.
+\end{itemize}
+\end{abstract}
+
+\begin{keyword}
+battery state-of-health \sep health indicator \sep feature selection \sep L0 regularization \sep scenario-conditioned gating \sep cross-chemistry generalization
+\end{keyword}
+
+\end{frontmatter}
+
+\linenumbers
+
+% =============================================================================
+\section{Introduction}
+% =============================================================================
+
+\subsection{Problem definition}
+\label{sec:problem-definition}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig1_problem_scenario_definition.pdf}
+  \caption{(a) V--$q_\text{frac}$ overlay for three real cells (MIT/HUST: LFP, TJU: NCM). (b) dV/dq for the same three cells -- peak location/height differs by chemistry and manufacturer.}
+  \label{fig:fig1}
+\end{figure}
+
+\begin{itemize}
+  \item SOH estimation is a core BMS task, but real operating data arrives as arbitrary partial SOC-window segments, not full 0--100\% cycles.
+  \item Figure~\ref{fig:fig1} establishes the premise: segment shape genuinely differs by chemistry/manufacturer -- a precondition for any claim of a ``chemistry-agnostic'' method.
+  \item Two consequences of this difference: (i) without knowing which SOC window a segment came from, it is hard to judge which features are informative; (ii) the same feature can behave differently across chemistries.
+  \item This motivates the paper's central idea: select a different feature subset per SOC-window (``scenario'').
+\end{itemize}
+
+\subsection{Scenario (SOC-window) definition}
+\label{sec:scenario-definition}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig2_scenario_spec.pdf}
+  \caption{A single real cycle (HUST cell 1-1, cycle 2) colored by its 6 scenarios (chg\_lo/mid/hi, dis\_hi/mid/lo). Top: full-cycle V--t. Bottom: the same cycle reconstructed as discharge/charge V--Q.}
+  \label{fig:fig2}
+\end{figure}
+
+\begin{itemize}
+  \item Formal definition of ``scenario'' (text): 6 SOC buckets, $n_1=0.35$, $n_2=0.20$, with a maximum-overlap tie-break rule for boundary segments.
+  \item Figure~\ref{fig:fig2} grounds the definition in a single real-data example rather than an abstract schematic.
+  \item Whether these 6 buckets are themselves useful for subset selection is tested in Section~\ref{sec:discussion-negative} -- spoiler: not without qualification (Section~\ref{sec:discussion-negative}).
+\end{itemize}
+
+\subsection{Contributions}
+\label{sec:contributions}
+
+\begin{enumerate}
+  \item A scenario-conditioned subset-learning framework: 64 raw HIs + kernel-fused features selected per scenario by a differentiable, discrete (L0) gate.
+  \item 64 raw HIs across 4 physically motivated categories, grounded in degradation mechanisms (Section~\ref{sec:hi-design}).
+  \item Kernel fusion that expands raw-HI synergy into explicit features (Section~\ref{sec:kernel-fusion}).
+  \item A rigorous falsification experiment and code-level mechanism analysis of \emph{when} scenario conditioning helps vs.\ hurts (Sections~\ref{sec:results}, \ref{sec:discussion-negative}) -- a finding we argue generalizes to other conditional-gating designs.
+  \item Robustness across four chemistries (MIT/HUST = LFP, TJU = NCM, CALCE = LCO) (Section~\ref{sec:results-crosschem}).
+\end{enumerate}
+
+% =============================================================================
+\section{Related work}
+% =============================================================================
+
+\begin{itemize}
+  \item SOH estimation: full-cycle (direct capacity measurement) vs.\ partial-segment (HI-based surrogate) approaches -- this work is the latter.
+  \item HI design: statistical vs.\ differential-voltage (DVA/ICA) vs.\ chemistry-specific morphological features -- prior work typically uses one category; this work integrates four.
+  \item Conditional feature selection / gating: prior work using per-domain or per-condition parameters rarely addresses the trade-off that more groups means less data per group -- Section~\ref{sec:discussion-negative} treats this directly.
+  \item Cross-chemistry generalization: most prior validation is single-chemistry; this work compares four (LFP $\times$2, NCM, LCO).
+\end{itemize}
+
+% =============================================================================
+\section{Methodology}
+% =============================================================================
+
+\subsection{Health-indicator design rationale}
+\label{sec:hi-design}
+
+\begin{table}[htbp]
+  \centering
+  \caption{HI category definitions.}
+  \label{tab:hi-categories}
+  \begin{tabular}{@{}llll@{}}
+    \toprule
+    Category & $n$ & Physical quantity captured & Representative HI \\
+    \midrule
+    stat & 18 & Voltage/current distribution statistics (mean, entropy, skew) & \texttt{stat\_i\_q\_slope} \\
+    diff (dQ/dV) & 20 & Differential-voltage curve peaks/curvature & \texttt{diff\_dqdv\_area} \\
+    LFP-specific & 20 & LFP two-phase-transition plateau geometry & \texttt{lfp\_v\_ent\_plateau} \\
+    morphology & 6 & Whole-curve shape similarity to a reference (DTW/Fr\'{e}chet) & \texttt{morph\_ve\_dtw} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig3_hi_design_rationale.pdf}
+  \caption{(a) Redundancy structure among 64 HIs ($|$Pearson $r|$, dis\_lo segment, axes ordered by category; open circles mark $|r| \geq 0.95$). (b)/(c) Per-category representative HI vs.\ SOH $\times$ scenario ($z$-scored, translucent surfaces), split into the top-2 (b, scenario-sensitive) and bottom-2 (c, scenario-invariant) categories by cross-scenario standard deviation.}
+  \label{fig:fig3}
+\end{figure}
+
+\begin{itemize}
+  \item Table~\ref{tab:hi-categories} carries the physical definitions; Figure~\ref{fig:fig3} is evidence, not exposition.
+  \item Panel (a) motivates kernel fusion: extreme-redundancy pairs cluster \emph{within} categories (multicollinearity).
+  \item Panels (b)/(c): not all categories are equally scenario-sensitive -- this is independent, HI-level evidence for why scenario conditioning has limited average benefit (cross-reference Section~\ref{sec:discussion-negative}).
+  \item Category ranking is data-driven: standard deviation, across scenarios, of the representative HI's per-SOH-bin mean.
+\end{itemize}
+
+\subsection{Kernel fusion for information expansion}
+\label{sec:kernel-fusion}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig4_kernel_expansion.pdf}
+  \caption{(a) Per-scenario candidate feature count, raw (64, fixed) vs.\ after kernel fusion (71--76). (b) Predictive power distribution: raw HI alone (median $R^2=0.033$) vs.\ kernel group (median $R^2=0.339$).}
+  \label{fig:fig4}
+\end{figure}
+
+\begin{itemize}
+  \item Two-stage pipeline: partial-correlation-based grouping, then Nystr\"{o}m + ridge kernel fitting per group.
+  \item One or two representative groups cited in text (not as a figure panel).
+  \item Panel (b) is this paper's most directly defensible quantitative claim: kernel fusion yields $\sim$10$\times$ the predictive signal of an individual raw HI.
+\end{itemize}
+
+\subsection{Routing and gating architecture (scenario-conditioned subset selection)}
+\label{sec:architecture}
+
+\begin{itemize}
+  \item A probe classifier routes an unknown segment to one of 6 scenarios (hard) or a probability distribution over scenarios (soft).
+  \item Raw-HI gate: hybrid structure -- HIs with a significant HI $\times$ scenario interaction keep per-scenario gates; the rest route through one shared gate.
+  \item Kernel-HI gate: fully per-scenario (no shared-gate option) -- a candidate partial explanation for an asymmetry discussed in Section~\ref{sec:discussion-negative}.
+  \item L0 HardConcrete gates for discrete selection, with a $\lambda_{L0}$ warm-up/ramp schedule.
+  \item Regression head: MLP by default; transformer / ResNet-tabular / iTransformer as drop-in alternatives (robustness check, Section~\ref{sec:results-robustness}).
+  \item \emph{In progress, not yet validated for inclusion}: a partial-pooling (``shrinkage'') gate variant, $\text{logit}_s = \text{shared} + \Delta_s$ with $\Delta_s$ regularized toward zero, targeting the per-gate sample-fragmentation problem directly.
+\end{itemize}
+
+% =============================================================================
+\section{Experimental setup}
+% =============================================================================
+
+\begin{itemize}
+  \item Datasets: MIT (123 cells, LFP, 1.1\,Ah), HUST (77 cells, LFP, 1.2\,Ah), TJU (NCM), CALCE (LCO).
+  \item Split: cell-level 6:2:2 (train:val:test), fixed split seed; cross-chemistry comparison (Section~\ref{sec:results-crosschem}) trains each chemistry independently.
+  \item Metrics: RMSE / MAE / $R^2$ / MAPE, evaluated under oracle (ground-truth routing) / hard (classifier routing) / soft (probability-weighted routing).
+  \item Significance screening threshold: $\Delta R^2 \geq 0.0055$ or $\Delta \text{RMSE} \geq 0.000795$ to count as a ``real'' difference (applied consistently across experiments; derivation in the appendix/supplementary).
+  \item $N_\text{HI}=64$ (a ``possible leakage'' toggle excludes 2 statistical features) used as the default; the $N_\text{HI}=66$ variant is reported only in the appendix.
+\end{itemize}
+
+% =============================================================================
+\section{Results}
+\label{sec:results}
+% =============================================================================
+
+\begin{itemize}
+  \item Narrative order: cross-chemistry generalization first, then pooled MIT+HUST behavior, robustness, and ablation.
+  \item Note: an earlier routing/gate-interpretability figure and an earlier aggregate-regression figure were dropped from the main 8-figure budget; see Section~\ref{sec:limitations} on whether to relocate them to supplementary material.
+\end{itemize}
+
+\subsection{Cross-chemistry generalization: single-dataset performance}
+\label{sec:results-crosschem}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig5_single_dataset.pdf}
+  \caption{MIT/HUST/TJU trained and evaluated independently, hard routing (deployment condition). Top row: true-vs-predicted SOH scatter ($R^2$/RMSE: MIT 0.901/0.0145, HUST 0.941/0.0180, TJU 0.968/0.0106). Bottom row: mean $|$error$|$ (\%) heatmap over scenario $\times$ observed capacity (Gaussian-smoothed); color scale shared across the three panels to make the absolute error-magnitude gap between chemistries directly comparable.}
+  \label{fig:fig5}
+\end{figure}
+
+\begin{itemize}
+  \item MIT/HUST (both LFP, different manufacturers) vs.\ TJU (NCM) compared without chemistry-specific tuning, under the realistic hard-routing condition.
+  \item Panel (b): error concentrates in different scenario/capacity regions per dataset -- reconnects to the Section~\ref{sec:problem-definition} premise that manufacturer/chemistry characteristics genuinely differ.
+\end{itemize}
+
+\subsection{Representative behavior on the pooled MIT+HUST (LFP) setting}
+\label{sec:results-v4example}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig6_v4_example.pdf}
+  \caption{Canonical run on pooled MIT+HUST, two representative cells (MIT b1c5, HUST 1-7) to show this is not a single-cell cherry-pick, hard routing. Rows: MIT charge / MIT discharge / HUST charge / HUST discharge. Columns: capacity trajectory (true vs.\ per-scenario-level prediction) / relative error (\%) vs.\ cycle.}
+  \label{fig:fig6}
+\end{figure}
+
+\begin{itemize}
+  \item Predicted capacity trajectories track the true trajectory closely across the aging range.
+  \item Relative error grows at low SOH -- a scenario-level view of the same error-heterogeneity pattern as Figure~\ref{fig:fig5}(b).
+\end{itemize}
+
+\subsection{Robustness: segment length $\times$ regression head}
+\label{sec:results-robustness}
+
+% NOTE: blocked -- no figure yet. Keep this subsection as a placeholder until
+% the missing runs are decided/executed (see docs/260909_RESULTS.md, docs/DRAFT.md).
+\begin{itemize}
+  \item \textbf{Status: blocked, no figure.} Existing ``n2-range'' runs mix multiple segment-length ($n_2$) values within one training run (as augmentation), so per-value performance cannot be isolated.
+  \item iTransformer regression head has no trained run at all (only MLP / transformer / ResNet-tabular exist).
+  \item Decision needed: (a) run the missing $n_2 \in \{5,10,15,20\%\}$ sweep + iTransformer, (b) narrow the scope to reuse existing runs, or (c) drop this figure slot and submit as a 7-figure paper.
+\end{itemize}
+
+\subsection{Ablation against the full model}
+\label{sec:results-ablation}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig8_ablation.pdf}
+  \caption{Four conditions, pooled MIT+HUST, zone tiling, oracle routing: no-scenario-label (kernel on), full model without hybrid grouping, full model without kernel fusion (also lacks hybrid grouping -- see caveat below), and the full model. (a) per-cell RMSE distribution, (b) per-cell MAPE distribution.}
+  \label{fig:fig8}
+\end{figure}
+
+\begin{itemize}
+  \item Full model and no-scenario-label are close to tied and lowest; removing hybrid grouping costs a little; removing kernel fusion costs the most.
+  \item \textbf{Caveat (must stay in the caption):} the ``without kernel fusion'' condition also lacks hybrid grouping (a confound) -- no clean kernel-only-removed run exists yet.
+\end{itemize}
+
+% =============================================================================
+\section{Discussion}
+% =============================================================================
+
+\subsection{Industrial problems addressed}
+
+\begin{enumerate}
+  \item Partial-charge data $\rightarrow$ Figures~\ref{fig:fig1}, \ref{fig:fig6}.
+  \item Cross-chemistry generalization $\rightarrow$ Figure~\ref{fig:fig5}.
+  \item Black-box / interpretability concerns $\rightarrow$ cross-chemistry gate-selection Jaccard similarity (currently in a figure outside the 8-figure budget; cite from supplementary if relocated).
+  \item Embedded/real-time compute constraints $\rightarrow$ head-size-vs-accuracy trade-off (Section~\ref{sec:results-robustness}, currently blocked).
+\end{enumerate}
+
+\subsection{Why did scenario conditioning fail, and when does it not?}
+\label{sec:discussion-negative}
+
+\begin{itemize}
+  \item H2 (naive scenario-label conditioning helps) is rejected: summarize the $2\times2\times2$ (label $\times$ tiling $\times$ kernel) matrix and the confirmed mechanism -- per-gate training-sample fragmentation (not information leakage).
+  \item Kernel fusion reduces this harm to roughly 1/4--1/5 of its no-kernel magnitude -- reframed as: conditioning itself is not the problem, the conditioning axis needs enough information content.
+  \item Contrast with chemistry conditioning (a strong signal, Figure~\ref{fig:fig5}): the general principle is that conditioning quality depends on the information carried by the conditioning axis, not on conditioning \emph{per se}.
+  \item Generalizable takeaway for other conditional-gating designs: before increasing the number of groups, check (i) effective samples per group and (ii) information content of the grouping axis.
+\end{itemize}
+
+\subsection{Limitations}
+\label{sec:limitations}
+
+\begin{itemize}
+  \item No multi-seed validation (standard gap).
+  \item No validation on real-vehicle field data (explored but not integrated).
+  \item Segment-length ($n_2$) robustness result runs counter to intuition; reported honestly, but the quantitative figure (Section~\ref{sec:results-robustness}) is still blocked.
+  \item The pure ``gate selection vs.\ use-everything'' control (H1) has not yet been run.
+\end{itemize}
+
+% =============================================================================
+\section{Conclusion}
+% =============================================================================
+
+\begin{itemize}
+  \item HI + kernel fusion provides both quantitative and qualitative evidence of genuine information expansion (Figures~\ref{fig:fig3}, \ref{fig:fig4}).
+  \item Cross-chemistry generalization (Figure~\ref{fig:fig5}) and a representative operating example (Figure~\ref{fig:fig6}) show the framework works in practice.
+  \item Scenario conditioning was rigorously falsified and root-caused; the ablation (Figure~\ref{fig:fig8}) decomposes the contribution of kernel fusion, grouping, and labeling.
+  \item Remaining work: fill the robustness-figure data gap, run the pure gate-selection control (H1), validate the shrinkage-gate variant, and add multi-seed / field-data validation.
+\end{itemize}
+
+% =============================================================================
+% \section*{References}
+% TODO: add a .bib file and \bibliographystyle{elsarticle-num} + \bibliography{refs}
+% once citations are filled in. Left empty intentionally for this structural draft.
+% =============================================================================
+
+\end{document}

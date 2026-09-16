@@ -1480,9 +1480,13 @@ def _qfw_tag(axis_cfg: dict) -> str:
     # 달라지면 완전히 다른 데이터이므로 반드시 다른 경로에 저장(confound 방지, §4.6).
     min_pts = int(axis_cfg.get("min_pts", 10))
     minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
-    # assign="none"(시나리오-only 대조군, docs/260816_RESULTS.md §5 no_scen)이면
-    # 반드시 다른 경로에 저장 — position_bin(6시나리오)과 confound 방지(§4.6과 동일 원칙).
-    assign_sfx = "" if axis_cfg.get("assign", "position_bin") == "position_bin" else "_noscen"
+    # assign="none"(시나리오-only 대조군, docs/260816_RESULTS.md §5 no_scen)이나
+    # "mid_nmid"(4시나리오, 게이트 파편화 dose-response 중간점, 2026-09-16 추가)면
+    # 반드시 다른 경로에 저장 — position_bin(6시나리오)과 confound 방지(§4.6과 동일
+    # 원칙). 예전엔 position_bin이 아닌 값을 전부 "_noscen"으로 뭉뚱그려서, mid_nmid를
+    # 추가하면 assign="none" 캐시와 충돌했을 것 — 값별로 별도 접미사를 쓴다.
+    _assign = axis_cfg.get("assign", "position_bin")
+    assign_sfx = {"position_bin": "", "none": "_noscen", "mid_nmid": "_midnmid"}.get(_assign, f"_{_assign}")
     # 2026-09-09: tile_scope("zone"|"full")를 assign과 분리(라벨 유무 vs 배치 방식,
     # docs/0909_RESULTS.md) — 명시적으로 준 경우만 접미사(미지정 시 기존 assign 연동
     # 동작과 100% 동일한 경로를 써야 하므로 빈 문자열 유지, 하위호환).
@@ -1522,10 +1526,18 @@ def _qabs_tag(axis_cfg: dict) -> str:
 
 
 def _vqslope_tag(axis_cfg: dict) -> str:
-    """vqslope 파라미터 → 파일/디렉터리 식별 태그. (train_scr._axis_dir_from_spec 와 동일 규칙)"""
-    mode = str(axis_cfg.get("mode", "dva")).lower()
-    ns   = int(axis_cfg.get("n_samples", 1))
-    return f"{mode}_N-{ns}{_rand_suffix(axis_cfg)}"
+    """vqslope 파라미터 → 파일/디렉터리 식별 태그. (train_scr._axis_dir_from_spec 와 동일 규칙)
+
+    2026-09-16: assign이 태그에 안 반영되던 버그 수정 — assign="none"(H2 대조군)을
+    돌리면 기존 assign="position_bin" 캐시(예: dva_N-1)를 그대로 재사용하거나
+    덮어써버렸다. q_frac_wide의 tile_scope 접미사와 동일 원칙(기본값이면 접미사
+    없음 → 기존 캐시 100% 하위호환, 명시적으로 다르면 접미사 추가)으로 고침.
+    """
+    mode   = str(axis_cfg.get("mode", "dva")).lower()
+    ns     = int(axis_cfg.get("n_samples", 1))
+    assign = str(axis_cfg.get("assign", "position_bin"))
+    _assign_suffix = "" if assign == "position_bin" else f"_{assign}"
+    return f"{mode}_N-{ns}{_assign_suffix}{_rand_suffix(axis_cfg)}"
 
 
 def _save_coverage_stats(path: Path, per_ds_cov: dict, axis: str, axis_cfg: dict) -> None:

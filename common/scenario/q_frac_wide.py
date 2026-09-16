@@ -57,6 +57,15 @@ _SCENARIO_NAMES = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
 # 방전: 존 시작(latent2)→dis_hi(3, SOC 높음) ... 존 끝(latent0)→dis_lo(5, SOC 낮음).
 _ROUTING = [[2, 1, 0], [5, 4, 3]]
 
+# assign="mid_nmid" (2026-09-16 추가, 게이트 파편화 dose-response용) — lo/hi를
+# "nmid" 하나로 합쳐 존 3개(6시나리오) 대신 2개(4시나리오)로 라우팅. 존 경계(n1)·
+# 세그먼트 길이/개수(n2/n_samples)·분모는 전혀 안 바뀜 — position_bin과 물리적으로
+# 동일한 세그먼트, 라벨(scenario_id)만 lo/hi를 하나로 묶는다. none(2)→mid_nmid(4)→
+# position_bin(6) 세 점으로, "게이트 수가 늘수록 성능이 나빠지는가"를 직접 잰다.
+_SCENARIO_NAMES_MID_NMID = ["chg_mid", "chg_nmid", "dis_mid", "dis_nmid"]
+_ROUTING_MID_NMID = [[1, 0], [3, 2]]  # routing[dir_idx][collapsed_latent(0=nmid,1=mid)]
+_COLLAPSE_TO_MID_NMID = {0: 0, 1: 1, 2: 0}  # raw latent(lo=0,mid=1,hi=2) -> collapsed(nmid=0,mid=1)
+
 # (zone_name, latent_class) — lo=0, mid=1, hi=2
 _ZONES: list[tuple[str, int]] = [
     ("hi",  2),
@@ -82,12 +91,14 @@ class QFracWideSegmenter(Segmenter):
         seg_len_pts: int = 20,          # 랜덤 창의 고정 관측 포인트 수 (q_tot 무관)
         random_seed: int = 42,          # 랜덤 재현성 시드
         assign: str = "position_bin",   # "position_bin"(기본, 존별 6시나리오 라우팅) |
+                                         # "mid_nmid"(lo/hi를 합쳐 4시나리오, 게이트 파편화
+                                         # dose-response 중간점 — 모듈 상단 주석 참고) |
                                          # "none"(시나리오 라우팅 없음, 방향만 구분해 2개) —
                                          # rcs.py와 동일 컨벤션. 존 경계(n1)·세그먼트 길이/개수
                                          # (n2/n_samples)·분모(q_tot, q_frac_ref면 q_ref+노이즈)는
                                          # 전혀 안 바뀜 — "이 세그먼트가 어느 존인지"를 모델에
-                                         # 알려주는 시나리오 라우팅만 지운다. "시나리오 타이핑
-                                         # 자체의 순수 기여도"를 재는 대조군 축 용도
+                                         # 알려주는 시나리오 라우팅만 지운다/뭉갠다. "시나리오
+                                         # 타이핑 자체의 순수 기여도"를 재는 대조군 축 용도
                                          # (docs/260816_RESULTS.md §5 no_scen).
         tile_scope: str | None = None,  # 2026-09-09 추가: "zone"(기본, 존 3개 안에서만
                                          # n_samples개씩 배치) | "full"([0,1] 전체에 고르게
@@ -112,9 +123,10 @@ class QFracWideSegmenter(Segmenter):
         if random_segment and seg_len_pts < min_pts:
             raise ValueError(
                 f"q_frac_wide: random_segment 시 seg_len_pts({seg_len_pts}) >= min_pts({min_pts}) 필요.")
-        if assign not in ("position_bin", "none"):
+        if assign not in ("position_bin", "mid_nmid", "none"):
             raise ValueError(
-                f"q_frac_wide: assign은 'position_bin'|'none' 중 하나여야 합니다. 현재 assign={assign!r}")
+                f"q_frac_wide: assign은 'position_bin'|'mid_nmid'|'none' 중 하나여야 합니다. "
+                f"현재 assign={assign!r}")
         if tile_scope not in (None, "zone", "full"):
             raise ValueError(
                 f"q_frac_wide: tile_scope는 None|'zone'|'full' 중 하나여야 합니다. 현재 tile_scope={tile_scope!r}")
@@ -319,7 +331,13 @@ class QFracWideSegmenter(Segmenter):
             zone_start, zone_end = (0.0, 1.0) if full_range_tiling else bounds[zone_name]
             # assign="none" 이면 latent_class(존)를 라우팅에 반영하지 않고 항상 0으로
             # 고정 — 모델에 노출되는 scenario_id/이름은 방향만 구분(chg/dis).
-            _latent     = latent_class if self.assign == "position_bin" else 0
+            # assign="mid_nmid" 이면 lo/hi를 "nmid" 하나로 합친 collapsed latent 사용.
+            if self.assign == "position_bin":
+                _latent = latent_class
+            elif self.assign == "mid_nmid":
+                _latent = _COLLAPSE_TO_MID_NMID[latent_class]
+            else:  # "none"
+                _latent = 0
             scenario_id = spec.routing[dir_idx][_latent]
             sname       = spec.scenario_names[scenario_id]
 
@@ -367,12 +385,15 @@ class QFracWideSegmenter(Segmenter):
                 covered = np.zeros(len(q), dtype=bool)
 
             for start_qf, end_qf, include_hi, extra_meta in plan:
-                # tile_scope="full" + assign="position_bin"이면 세그먼트마다 실제
-                # 위치(중점) 기준으로 존을 다시 판정한다(위 _zone_of_qfrac, 2026-09-10
-                # 버그 수정) — 그 외(zone-restricted, 또는 assign="none")는 zone_name
-                # 루프에서 이미 정해진 값을 그대로 쓴다(기존 동작 100% 유지).
-                if full_range_tiling and self.assign == "position_bin":
-                    _seg_latent = self._zone_of_segment(start_qf, end_qf)
+                # tile_scope="full" + assign in ("position_bin","mid_nmid")이면 세그먼트마다
+                # 실제 위치(중점) 기준으로 존을 다시 판정한다(위 _zone_of_qfrac, 2026-09-10
+                # 버그 수정, 2026-09-16 mid_nmid로 확장) — 그 외(zone-restricted, 또는
+                # assign="none")는 zone_name 루프에서 이미 정해진 값을 그대로 쓴다(기존
+                # 동작 100% 유지).
+                if full_range_tiling and self.assign in ("position_bin", "mid_nmid"):
+                    _raw_seg_latent = self._zone_of_segment(start_qf, end_qf)
+                    _seg_latent = (_raw_seg_latent if self.assign == "position_bin"
+                                   else _COLLAPSE_TO_MID_NMID[_raw_seg_latent])
                     _seg_scenario_id = spec.routing[dir_idx][_seg_latent]
                     _seg_sname = spec.scenario_names[_seg_scenario_id]
                 else:
@@ -440,6 +461,19 @@ class QFracWideSegmenter(Segmenter):
                 class_names=["all"],
                 routing=[[0], [1]],
                 classifier_default="none",
+                params=params,
+            )
+        if self.assign == "mid_nmid":
+            # 게이트 파편화 dose-response 중간점: lo/hi를 "nmid" 하나로 합쳐 4시나리오.
+            # none(2)/position_bin(6)과 물리적으로 동일한 세그먼트, 라벨만 다름.
+            return ScenarioSpec(
+                axis="q_frac_wide",
+                n_scenarios=4,
+                scenario_names=_SCENARIO_NAMES_MID_NMID,
+                n_classes=2,
+                class_names=["mid", "nmid"],
+                routing=_ROUTING_MID_NMID,
+                classifier_default="mlp_probe",
                 params=params,
             )
         return ScenarioSpec(

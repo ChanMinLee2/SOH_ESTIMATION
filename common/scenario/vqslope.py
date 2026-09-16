@@ -51,9 +51,22 @@ common/scenario/vqslope.py — 축: 기울기(dV/dQ · dQ/dV) 형상 기반 세�
   q_frac_wide 의 min_pts 절벽과 형태만 다른 같은 성격의 표본 손실이므로,
   seg_diagnose 로 플래토 검출 실패율과 존별 생존율을 먼저 측정해야 한다.
 
+[assign — q_frac_wide와 동일한 라벨 유무 대조축, 2026-09-16 추가]
+  "position_bin"(기본): head/plateau/tail 3존을 그대로 라우팅(n_scenarios=6).
+  "none": 존 구분(플래토 진입/이탈 위치)은 세그먼트 경계로서는 그대로 쓰되,
+    시나리오 라벨만 방향별로 하나로 합친다(n_scenarios=2, chg/dis) —
+    q_frac_wide._extract()의 `_latent = latent_class if assign=="position_bin"
+    else 0`과 정확히 같은 패턴. docs/260909_RESULTS.md §6의 H2(시나리오 라벨
+    유무) 매트릭스를 vqslope 축에서도 재현하기 위함 — q_frac_wide는 라벨이
+    q_tot(≈SOH)의 함수라는 순환성 문제가 있었는데(위 [문제] 절 참고), vqslope는
+    경계 자체가 형상 랜드마크라 이 문제가 없다. 세그먼트 물리적 경계는
+    assign과 무관하게 완전히 동일(라벨만 다름) — H2 재현의 필수 조건.
+
 사용 예:
   python 4_hi_analysis/hi_correlation.py --seg-axis vqslope \\
-      --axis-config '{"vqslope": {"mode": "dva", "n_samples": 1}}'
+      --axis-config '{"mode": "dva", "n_samples": 1}'
+  python 4_hi_analysis/hi_correlation.py --seg-axis vqslope \\
+      --axis-config '{"mode": "dva", "n_samples": 1, "assign": "none"}'
 """
 
 from __future__ import annotations
@@ -92,6 +105,7 @@ class VQSlopeSegmenter(Segmenter):
         random_segment: bool = False,     # True: 존 내부 고정길이 랜덤 창 (설계 A)
         seg_len_pts: int = 20,            # 랜덤 창의 고정 관측 포인트 수 (q_tot 무관)
         random_seed: int = 42,            # 랜덤 재현성 시드
+        assign: str = "position_bin",     # "position_bin"(기본, 6시나리오) | "none"(2시나리오, H2 대조군)
     ):
         mode = str(mode).lower()
         if mode not in ("dva", "ica"):
@@ -101,6 +115,9 @@ class VQSlopeSegmenter(Segmenter):
         if random_segment and seg_len_pts < min_pts:
             raise ValueError(
                 f"vqslope: random_segment 시 seg_len_pts({seg_len_pts}) >= min_pts({min_pts}) 필요.")
+        if assign not in ("position_bin", "none"):
+            raise ValueError(
+                f"vqslope: assign은 'position_bin'|'none' 중 하나여야 합니다. 현재 assign={assign!r}")
         self.mode = mode
         self.n_samples = int(n_samples)
         self.theta_flat = float(theta_flat)
@@ -109,6 +126,7 @@ class VQSlopeSegmenter(Segmenter):
         self.random_segment = bool(random_segment)
         self.seg_len_pts = int(seg_len_pts)
         self.random_seed = int(random_seed)
+        self.assign = assign
 
         # 진단용 카운터 (q_frac_wide 와 동일 인터페이스) — seg_diagnose 재사용.
         self.n_attempted: dict[str, int] = {}
@@ -217,8 +235,12 @@ class VQSlopeSegmenter(Segmenter):
 
         for zone_name, latent_class in _ZONES:
             z_lo, z_hi = zone_qbounds[zone_name]
-            scenario_id = spec.routing[dir_idx][latent_class]
-            sname       = _SCENARIO_NAMES[scenario_id]
+            # assign="none"이면 존(head/plateau/tail) 구분과 무관하게 방향별로
+            # latent를 0으로 고정 -- 세그먼트 경계(q_entry/q_exit)는 그대로 두고
+            # 라벨만 죽인다. q_frac_wide._extract()와 동일 패턴.
+            _latent     = latent_class if self.assign == "position_bin" else 0
+            scenario_id = spec.routing[dir_idx][_latent]
+            sname       = spec.scenario_names[scenario_id]
 
             if self.random_segment:
                 # ── 랜덤 모드: 존 안에서 고정길이(seg_len_pts) 랜덤 창 (설계 A) ──
@@ -241,7 +263,7 @@ class VQSlopeSegmenter(Segmenter):
                     self.n_yielded[sname] = self.n_yielded.get(sname, 0) + 1
                     records.append(SegmentRecord(
                         cell_id=cell_id, cycle=cycle, seg_local_id=seg_local,
-                        scenario_id=scenario_id, latent_class=latent_class,
+                        scenario_id=scenario_id, latent_class=_latent,
                         direction=direction,
                         v=v[w], i=i[w], dt=dt[w], q=q[w],
                         meta={"zone": zone_name, "mode": self.mode, "random": True,
@@ -272,7 +294,7 @@ class VQSlopeSegmenter(Segmenter):
                     cycle=cycle,
                     seg_local_id=seg_local,
                     scenario_id=scenario_id,
-                    latent_class=latent_class,
+                    latent_class=_latent,
                     direction=direction,
                     v=v[m], i=i[m], dt=dt[m], q=q[m],
                     meta={
@@ -291,6 +313,27 @@ class VQSlopeSegmenter(Segmenter):
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
     def get_spec(self) -> ScenarioSpec:
+        params = {
+            "mode":       self.mode,
+            "n_samples":  self.n_samples,
+            "theta_flat": self.theta_flat,
+            "random_segment": self.random_segment,
+            "seg_len_pts":    self.seg_len_pts,
+            "assign":     self.assign,
+        }
+        if self.assign == "none":
+            # H2 대조군: 존(head/plateau/tail) 라우팅을 감춘다 -- 방향만 2개.
+            # q_frac_wide.get_spec()의 assign="none" 분기와 동일 패턴.
+            return ScenarioSpec(
+                axis="vqslope",
+                n_scenarios=2,
+                scenario_names=["chg", "dis"],
+                n_classes=1,
+                class_names=["all"],
+                routing=[[0], [1]],
+                classifier_default="none",
+                params=params,
+            )
         return ScenarioSpec(
             axis="vqslope",
             n_scenarios=6,
@@ -299,13 +342,7 @@ class VQSlopeSegmenter(Segmenter):
             class_names=["lo", "mid", "hi"],
             routing=_ROUTING,
             classifier_default="mlp_probe",
-            params={
-                "mode":       self.mode,
-                "n_samples":  self.n_samples,
-                "theta_flat": self.theta_flat,
-                "random_segment": self.random_segment,
-                "seg_len_pts":    self.seg_len_pts,
-            },
+            params=params,
         )
 
     def _rng_for(self, cell_id: str, cycle: int, direction: int) -> "np.random.Generator | None":

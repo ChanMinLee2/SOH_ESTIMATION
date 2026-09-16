@@ -1,11 +1,21 @@
-"""Figure 6 -- v4 example on a real cell (MIT+HUST pooled, LFP-only from here on).
+"""Figure 10 -- v4 example on two real cells (MIT+HUST pooled, LFP-only from here on).
 
 From Figure 6 onward the paper's remaining results focus on the pooled
 MIT+HUST (LFP) setting -- the canonical v4 configuration -- rather than
-cross-chemistry comparison (that lives in Figure 5 now).
+cross-chemistry comparison (that lives in Figure 5 now). TJU/NCM is
+deliberately excluded here even though it appears elsewhere in the paper:
+this run's checkpoint is MIT+HUST-only (Fig5 already owns the cross-chemistry
+comparison with a visualization suited to independently-trained per-chemistry
+models -- folding TJU into this pooled-LFP figure would contradict its own
+caption/scope).
 
-Representative cell: HUST 1-7, hard routing (realistic/deployment condition).
-Layout: 2 rows (Charge / Discharge) x 2 columns:
+Representative cells: MIT b1c5, HUST 1-7 (both in this run's held-out test
+split), hard routing (realistic/deployment condition). Two cells instead of
+one strengthens the "representative behavior" claim (not a single-cell
+cherry-pick) while staying inside the figure's stated pooled-MIT+HUST scope.
+
+Layout: 4 rows (MIT charge / MIT discharge / HUST charge / HUST discharge)
+x 2 columns:
   col 1: capacity curve, true vs per-scenario-level predicted
   col 2: relative error (%) per scenario level, vs cycle
 (columns 2 and 3 of the original 2x3 diagnostic layout --
@@ -30,7 +40,7 @@ from _style import INK, SUBINK, setup_rcparams, label_panel, PROJECT_ROOT
 setup_rcparams()
 
 RUN_DIR = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs/0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42"
-EXAMPLE_CELL = "1-7"
+EXAMPLE_CELLS = ["b1c5", "1-7"]   # (MIT, HUST) -- both confirmed present in this run's test split
 
 CHG_LEVELS = [("chg_lo", "lo"), ("chg_mid", "mid"), ("chg_hi", "hi")]
 DIS_LEVELS = [("dis_hi", "hi"), ("dis_mid", "mid"), ("dis_lo", "lo")]
@@ -91,33 +101,36 @@ def panel_rel_error(ax, df, seg_levels, cycles, true_line, title):
 
 
 def build_figure():
-    df = load_cell(RUN_DIR, EXAMPLE_CELL)
-    cycles = np.sort(df.cycle.unique())
+    fig = plt.figure(figsize=(8.0, 13.0))
+    gs = fig.add_gridspec(4, 2, hspace=0.55, wspace=0.34,
+                           top=0.96, bottom=0.045, left=0.10, right=0.97)
 
-    fig = plt.figure(figsize=(8.0, 6.6))
-    gs = fig.add_gridspec(2, 2, hspace=0.5, wspace=0.34,
-                           top=0.92, bottom=0.09, left=0.10, right=0.97)
-    ax_cc, ax_ce = fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])
-    ax_dc, ax_de = fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1])
+    letters = iter(["(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "(g)", "(h)"])
+    for row_pair, cell in enumerate(EXAMPLE_CELLS):
+        df = load_cell(RUN_DIR, cell)
+        cycles = np.sort(df.cycle.unique())
+        chg_true = _true_line(df[df.seg_name.isin([s for s, _ in CHG_LEVELS])], cycles)
+        dis_true = _true_line(df[df.seg_name.isin([s for s, _ in DIS_LEVELS])], cycles)
 
-    chg_true = _true_line(df[df.seg_name.isin([s for s, _ in CHG_LEVELS])], cycles)
-    dis_true = _true_line(df[df.seg_name.isin([s for s, _ in DIS_LEVELS])], cycles)
+        r_chg, r_dis = 2 * row_pair, 2 * row_pair + 1
+        ax_cc, ax_ce = fig.add_subplot(gs[r_chg, 0]), fig.add_subplot(gs[r_chg, 1])
+        ax_dc, ax_de = fig.add_subplot(gs[r_dis, 0]), fig.add_subplot(gs[r_dis, 1])
 
-    panel_curve(ax_cc, df, CHG_LEVELS, cycles, chg_true, f"Charge -- capacity, cell {EXAMPLE_CELL} (hard)")
-    panel_rel_error(ax_ce, df, CHG_LEVELS, cycles, chg_true, "Charge -- relative error (%)")
-    panel_curve(ax_dc, df, DIS_LEVELS, cycles, dis_true, f"Discharge -- capacity, cell {EXAMPLE_CELL} (hard)")
-    panel_rel_error(ax_de, df, DIS_LEVELS, cycles, dis_true, "Discharge -- relative error (%)")
+        panel_curve(ax_cc, df, CHG_LEVELS, cycles, chg_true, f"Charge -- capacity, cell {cell} (hard)")
+        panel_rel_error(ax_ce, df, CHG_LEVELS, cycles, chg_true, f"Charge -- relative error (%), cell {cell}")
+        panel_curve(ax_dc, df, DIS_LEVELS, cycles, dis_true, f"Discharge -- capacity, cell {cell} (hard)")
+        panel_rel_error(ax_de, df, DIS_LEVELS, cycles, dis_true, f"Discharge -- relative error (%), cell {cell}")
 
-    for ax, letter in ((ax_cc, "(a)"), (ax_ce, "(b)"), (ax_dc, "(c)"), (ax_de, "(d)")):
-        label_panel(fig, ax, letter, dx=-0.06, dy=0.014)
+        for ax in (ax_cc, ax_ce, ax_dc, ax_de):
+            label_panel(fig, ax, next(letters), dx=-0.06, dy=0.014)
 
     return fig
 
 
 if __name__ == "__main__":
     fig = build_figure()
-    out_png = "docs/figures/fig6_v4_example.png"
-    out_pdf = "docs/figures/fig6_v4_example.pdf"
+    out_png = "docs/figures/fig10_v4_example.png"
+    out_pdf = "docs/figures/fig10_v4_example.pdf"
     fig.savefig(out_png, dpi=600)
     fig.savefig(out_pdf)
     print(f"saved: {out_png}\nsaved: {out_pdf}")

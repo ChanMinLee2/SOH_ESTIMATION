@@ -131,6 +131,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--specific-group-ids-json", default=None, dest="specific_group_ids_json",
                    help="v5(그룹 게이팅) checkpoint 전용 — p1v2_summary.json에 기록돼 있으면 "
                         "자동 적용됨. build_specific_component_groups.py 산출물")
+    p.add_argument("--shrinkage-gate", action="store_true", dest="shrinkage_gate_flag",
+                   help="scen_gates가 ShrinkageHardConcreteGate(shared_log_alpha + "
+                        "delta_log_alpha[s])로 저장된 checkpoint용 — p1v2_summary.json의 "
+                        "shrinkage_gate:true를 자동으로 읽어 보통은 안 줘도 되지만, summary.json이 "
+                        "없거나 오래된 run이면 명시적으로 필요. 안 맞으면 load_state_dict에서 "
+                        "scen_gates.{shared_log_alpha,delta_log_alpha} vs scen_gates.{0..5}.log_alpha "
+                        "키 불일치로 실패한다.")
     p.add_argument("--regression-model", default="mlp", dest="regression_model",
                    choices=["mlp", "transformer", "i_transformer", "resnet_tab", "ft_transformer"],
                    help="학습 때 --regression-model을 오버라이드했다면 동일하게 지정 "
@@ -274,12 +281,18 @@ def main() -> None:
     p1_model_cfg = {**cfg["model"], "regression_model": args.regression_model,
                      "with_raw_cnn": False, "with_raw_flat": False}
 
+    shrinkage_gate = args.shrinkage_gate_flag or bool(summary.get("shrinkage_gate", False))
+    if shrinkage_gate:
+        print(f"[test_p1] shrinkage_gate 적용(scen_gates -> ShrinkageHardConcreteGate)"
+              f"{' [p1v2_summary.json 자동감지]' if not args.shrinkage_gate_flag else ' [--shrinkage-gate]'}")
+
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
         scen_group_ids=scen_group_ids,
         shared_hi_mask=shared_hi_mask,
         n_kernel_hi=len(kernel_hi_names) if kernel_hi_names else 0,
+        shrinkage_gate=shrinkage_gate,
     ).to(device)
     model.load_state_dict(ckpt["model_state"], strict=True)
     model.eval()

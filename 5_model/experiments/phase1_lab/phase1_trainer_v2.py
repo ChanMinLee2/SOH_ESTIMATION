@@ -177,6 +177,28 @@ def _parse_args() -> argparse.Namespace:
                         "warmup epoch 스위핑 실험(docs/260825_RESULTS.md) 전용 — 평소 실행에서는 "
                         "주지 않으면 기존 동작(yaml 값, 기본 50)과 100% 동일. training.warmup_epochs"
                         "(learning rate warmup, 별개 값)에는 영향 없음.")
+    p.add_argument("--shrinkage-gate", action="store_true", dest="shrinkage_gate",
+                   help="docs/260909_RESULTS.md §6-5(e) 파편화 대응책 ① — scen_gates를 "
+                        "시나리오별 독립 HardConcreteGate 대신 ShrinkageHardConcreteGate 뱅크로 "
+                        "학습(shared_log_alpha + delta_log_alpha[s], 전자는 전체 N, 후자는 "
+                        "자기 시나리오만으로 학습되고 --lambda-shrink로 0쪽 정칙화됨). "
+                        "--synergy-groups-json/--specific-group-ids-json(그룹 계층 게이팅, HI 축 "
+                        "DOF 축소)과는 동시 사용 불가(scr_model.py에서 검증) — --shared-hi-mask 값을 "
+                        "만드는 --interaction-json과는 함께 쓸 수 있음. 기본 False면 기존과 동일.")
+    p.add_argument("--lambda-shrink", type=float, default=0.0, dest="lambda_shrink",
+                   help="--shrinkage-gate 전용: delta_log_alpha 정칙화 강도. 0(기본)이면 "
+                        "--shrinkage-gate를 켜도 시나리오별 편차에 아무 벌점이 없어 사실상 "
+                        "기존 독립 게이트와 동등(shared_log_alpha가 있으나 마나 한 재매개변수화만 "
+                        "됨) — 실질적인 shrinkage 효과를 보려면 양수 값 필요. --shrinkage-gate "
+                        "없이 주면 무시됨(경고만 출력).")
+    p.add_argument("--l0-norm-constant", type=int, default=None, dest="l0_norm_constant",
+                   help="docs/260915_RESULTS.md — scr_loss.py의 _l0_penalty가 시나리오별 "
+                        "페널티 합을 n_scenarios로 나누는 것을, n_scenarios 대신 이 고정값으로 "
+                        "나누게 바꿈. 라벨ON(n_scenarios=6)/라벨OFF(n_scenarios=2) 조건 간 "
+                        "정규화 강도 confound를 분리하는 대조군 전용 — 예: rawonly(라벨ON, "
+                        "원래 6으로 나눔)에 --l0-norm-constant 2를 주면 noscen(라벨OFF, "
+                        "원래 2로 나눔)과 동일한 정규화 강도로 맞출 수 있음. 미지정(기본)이면 "
+                        "기존과 100% 동일 동작.")
     args = p.parse_args()
     if args.synergy_groups_json and args.kernel_features_pkl:
         p.error("--synergy-groups-json과 --kernel-features-pkl은 동시에 줄 수 없습니다 "
@@ -191,6 +213,12 @@ def _parse_args() -> argparse.Namespace:
     if args.specific_group_ids_json and args.synergy_groups_json:
         p.error("--specific-group-ids-json과 --synergy-groups-json은 동시에 줄 수 없습니다 "
                 "(둘 다 scen_group_ids를 채우는 서로 다른 메커니즘 — 하나만 선택)")
+    if args.shrinkage_gate and (args.synergy_groups_json or args.specific_group_ids_json):
+        p.error("--shrinkage-gate와 --synergy-groups-json/--specific-group-ids-json은 "
+                "동시에 줄 수 없습니다 (scr_model.py의 shrinkage_gate/scen_group_ids "
+                "상호배타 검증과 동일)")
+    if args.lambda_shrink > 0 and not args.shrinkage_gate:
+        print("[p1v2] 경고: --lambda-shrink가 주어졌지만 --shrinkage-gate가 꺼져 있어 무시됩니다.")
     return args
 
 
@@ -407,10 +435,19 @@ def main() -> None:
         scen_group_ids=scen_group_ids,
         shared_hi_mask=shared_hi_mask,
         n_kernel_hi=len(kernel_hi_names) if kernel_hi_names else 0,
+        shrinkage_gate=args.shrinkage_gate,
     ).to(device)
+    if args.shrinkage_gate:
+        print(f"[p1v2] shrinkage-gate 적용: scen_gates -> ShrinkageHardConcreteGate "
+              f"(lambda_shrink={args.lambda_shrink})")
 
     loss_cfg = cfg["loss"]
-    loss_fn = SCRLoss(lambda_scen=lambda_scen, lambda_l0=loss_cfg["lambda_l0"]).to(device)
+    loss_fn = SCRLoss(lambda_scen=lambda_scen, lambda_l0=loss_cfg["lambda_l0"],
+                       lambda_shrink=args.lambda_shrink,
+                       l0_norm_constant=args.l0_norm_constant).to(device)
+    if args.l0_norm_constant is not None:
+        print(f"[p1v2] l0-norm-constant 적용: _l0_penalty를 n_scenarios 대신 "
+              f"{args.l0_norm_constant}로 나눔")
 
     if args.lambda_l0_override is not None:
         loss_cfg["lambda_l0"] = args.lambda_l0_override
@@ -538,8 +575,12 @@ def main() -> None:
                     f"{val_rmse_v:.6f},{val_r2_v:.6f},{sat:.6f},{int(is_selected)}\n")
 
         if (epoch + 1) % 10 == 0 or is_selected:
-            tqdm_write(f"epoch {epoch+1:4d}  lambda_l0={eff_l0:.4f}  beta={beta_now:.3f}  "
-                       f"tr_r2={tr_r2_v:.4f}  val_r2={val_r2_v:.4f}  sat={sat:.3f}" + (" *selected*" if is_selected else ""))
+            _msg = (f"epoch {epoch+1:4d}  lambda_l0={eff_l0:.4f}  beta={beta_now:.3f}  "
+                    f"tr_r2={tr_r2_v:.4f}  val_r2={val_r2_v:.4f}  sat={sat:.3f}")
+            if args.shrinkage_gate:
+                with torch.no_grad():
+                    _msg += f"  shrink_penalty={model.scen_gates.shrinkage_penalty().item():.4f}"
+            tqdm_write(_msg + (" *selected*" if is_selected else ""))
 
         # 조기종료: best_sat 갱신 없이 --patience 에폭이 지나면 중단. 이후 남은 에폭을
         # 더 돌아도 이미 저장된 best_sat 체크포인트가 바뀌지 않으므로(항상 진짜 best만
@@ -599,6 +640,13 @@ def main() -> None:
         "kernel_features_pkl": args.kernel_features_pkl,
         "interaction_json": args.interaction_json,
         "specific_group_ids_json": args.specific_group_ids_json,
+        "shrinkage_gate": args.shrinkage_gate,
+        "lambda_shrink": args.lambda_shrink if args.shrinkage_gate else None,
+        "l0_norm_constant": args.l0_norm_constant,
+        "regression_model_used": args.regression_model,  # config.yaml에는 CLI 오버라이드 전
+            # 원본 yaml 값이 저장돼 실제 학습된 아키텍처와 다를 수 있음이 확인됨
+            # (docs/260909_RESULTS.md §7-4) — p1v2_summary.json에 실제 사용값을 남겨
+            # 앞으로 같은 함정을 피한다.
     }
     (output_dir / "p1v2_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[p1v2] 선택된 epoch={best_epoch} (gate_saturation={best_sat:.4f})")

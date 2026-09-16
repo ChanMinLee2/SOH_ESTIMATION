@@ -1,4 +1,4 @@
-"""Figure 4 -- Information expansion via kernel fusion (D9 + D11).
+"""Figure 5 -- Information expansion via kernel fusion (D9 + D11).
 
 (a) candidate-feature pool size per scenario: 64 raw + kernel-fused groups added
 (b) predictive-power distribution: raw univariate r^2 vs kernel group train R^2
@@ -171,8 +171,8 @@ def build_figure():
 
 if __name__ == "__main__":
     fig = build_figure()
-    out_png = "docs/figures/fig4_kernel_expansion.png"
-    out_pdf = "docs/figures/fig4_kernel_expansion.pdf"
+    out_png = "docs/figures/fig5_kernel_expansion.png"
+    out_pdf = "docs/figures/fig5_kernel_expansion.pdf"
     fig.savefig(out_png, dpi=600)
     fig.savefig(out_pdf)
     print(f"saved: {out_png}\nsaved: {out_pdf}")

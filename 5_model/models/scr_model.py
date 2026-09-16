@@ -13,6 +13,9 @@ Stage A — direction-aware probe gate (dual objective)
 Stage B — scenario-conditioned regression
   2. Per-scenario HardConcreteGate (n_scenarios × N_HI) selects k HIs per scenario
      MSE gradient only — regression-specialised subset per scenario
+     shrinkage_gate=True (docs/260909_RESULTS.md §6-5(e) 대응책 ①): 독립 게이트 대신
+     ShrinkageHardConcreteGate 뱅크(hard_concrete.py) — shared_log_alpha(전체 N) +
+     delta_log_alpha[s](자기 시나리오만, lambda_shrink로 0쪽 정칙화)로 분해.
 
   3. Capacity head: [probe_x || scen_x || direction || cap_init] → SOH ratio
 
@@ -72,6 +75,16 @@ class SCRModel(nn.Module):
             # 있으면 scen_gate_width가 specific 폭으로 좁아지고, scen_group_ids[s]도 그 좁은
             # 폭(len(specific_idx)) 기준 로컬 인덱스여야 한다 —
             # build_specific_component_groups.py가 정확히 이 형태로 만들어준다.
+        shrinkage_gate: bool = False,  # Phase 1: docs/260909_RESULTS.md §6-5(e)의 파편화
+            # 대응책 ① — scen_gates를 시나리오별 독립 HardConcreteGate 대신
+            # ShrinkageHardConcreteGate(hard_concrete.py) 뱅크로 만든다. 시나리오 공통
+            # shared_log_alpha(전체 N으로 학습)와 시나리오별 delta_log_alpha(자기
+            # 시나리오만으로 학습, scr_loss.py의 lambda_shrink로 0쪽으로 정칙화)로
+            # log_alpha를 분해 — "공유할지 전용으로 할지"를 HI마다 데이터가 결정하게
+            # 한다. scen_group_ids(그룹 계층 게이팅)와는 동시 사용 불가(아래 assert).
+            # shared_hi_mask(v4 hybrid)와는 함께 쓸 수 있음 — 그 경우 shrinkage는
+            # specific_idx 폭에만 적용됨(scen_gate_width가 이미 그렇게 좁혀지므로
+            # 별도 처리 불필요). False(기본)면 기존과 100% 동일 동작.
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -84,7 +97,15 @@ class SCRModel(nn.Module):
         self.n_scenarios = spec.n_scenarios
         self.n_classes   = spec.n_classes
 
-        from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate
+        from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate, ShrinkageHardConcreteGate
+
+        if shrinkage_gate and scen_group_ids:
+            raise ValueError(
+                "shrinkage_gate와 scen_group_ids(그룹 계층 게이팅)는 동시에 쓸 수 없습니다 "
+                "— 전자는 시나리오 축, 후자는 HI 축의 서로 다른 DOF 축소 방법이라 "
+                "지금은 둘 중 하나만 지원합니다."
+            )
+        self.shrinkage_gate = shrinkage_gate
 
         # ----------------------------------------------------------------
         # Stage A — direction-aware probe gates
@@ -120,12 +141,15 @@ class SCRModel(nn.Module):
             scen_gate_width = N_HI
 
         if scen_masks is None:
-            scen_group_ids = scen_group_ids or {}
-            self.scen_gates = nn.ModuleList([
-                GroupedHardConcreteGate(scen_gate_width, scen_group_ids[s]) if s in scen_group_ids
-                else HardConcreteGate(scen_gate_width)
-                for s in range(self.n_scenarios)
-            ])
+            if shrinkage_gate:
+                self.scen_gates = ShrinkageHardConcreteGate(self.n_scenarios, scen_gate_width)
+            else:
+                scen_group_ids = scen_group_ids or {}
+                self.scen_gates = nn.ModuleList([
+                    GroupedHardConcreteGate(scen_gate_width, scen_group_ids[s]) if s in scen_group_ids
+                    else HardConcreteGate(scen_gate_width)
+                    for s in range(self.n_scenarios)
+                ])
             self._fixed_scen = False
         else:
             self.register_buffer("_scen_masks_buf", scen_masks.float())
@@ -292,11 +316,14 @@ class SCRModel(nn.Module):
 
     @staticmethod
     def _apply_gate_list(
-        gates: nn.ModuleList, x: torch.Tensor, scen_idx: torch.Tensor
+        gates, x: torch.Tensor, scen_idx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """시나리오별 독립 게이트 리스트(scen_gates 또는 scen_kernel_gates) 공통 라우팅 로직.
+        """시나리오별 게이트 컬렉션(scen_gates 또는 scen_kernel_gates) 공통 라우팅 로직.
         각 세그먼트를 자기 시나리오(scen_idx)에 해당하는 gates[s]로만 통과시킨다.
         x: (B, width) — width는 게이트 종류에 따라 다름(raw HI면 N_HI, 커널 HI면 n_kernel_hi).
+        gates: nn.ModuleList(독립 HardConcreteGate/GroupedHardConcreteGate) 또는
+        ShrinkageHardConcreteGate 뱅크 — 둘 다 enumerate()/len()/gates[s](x)를 지원해서
+        여기서는 구분할 필요가 없다.
         Returns (masked_x, z): 둘 다 x와 같은 shape."""
         masked = torch.zeros_like(x)
         z_out  = torch.zeros_like(x)

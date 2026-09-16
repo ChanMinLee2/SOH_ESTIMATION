@@ -61,6 +61,17 @@ import sys
 import time
 from pathlib import Path
 
+# Windows 콘솔이 cp949일 때(특히 파이프/리다이렉트로 stdout이 콘솔이 아니게 되는 경우,
+# 예: `| Tee-Object -FilePath ...`) em-dash 등 특수문자 print가 UnicodeEncodeError로
+# 죽는 문제 방지(phase1_trainer_v2.py/lambda_sweep.py와 동일 패턴, 2026-09-13 —
+# `--include-stat-leak` 안내문 직전 배너 print에서 실제로 이 문제로 죽는 걸 확인해서 추가).
+for _stream in (sys.stdout, sys.stderr):
+    if getattr(_stream, "encoding", "").lower() not in ("utf-8", "utf8"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 ROOT = Path(__file__).resolve().parent
 
 # phase1_trainer_v2.py는 "{MMDD_HHMM}_p1v2_{tag}_seed{seed}" 형식으로 저장한다.

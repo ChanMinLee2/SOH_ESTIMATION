@@ -1,4 +1,4 @@
-"""Figure 5 -- Single-dataset performance (MIT-only / HUST-only / TJU-only).
+"""Figure 8 -- Single-dataset performance (MIT-only / HUST-only / TJU-only).
 
 Each of MIT, HUST, TJU trained and evaluated independently (own split, own
 gates) -- the cross-chemistry generalization check (hard routing, the
@@ -27,8 +27,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.ndimage import gaussian_filter
 
-from _style import (INK, SUBINK, GRID, SCEN_NAMES, SCEN_POS_COLOR, setup_rcparams,
-                     label_panel, PROJECT_ROOT)
+from _style import INK, SUBINK, GRID, SCEN_NAMES, setup_rcparams, label_panel, PROJECT_ROOT
 
 setup_rcparams()
 
@@ -39,8 +38,14 @@ DATASETS = [
     ("TJU", RUNS_DIR / "0910_1533_p1v2_p1v4_tju_only_seed42"),
 ]
 
-SEQ_CMAP = LinearSegmentedColormap.from_list("err", ["#F4F1E8", "#8A3F2E"])
-SCEN_COLOR = dict(zip(SCEN_NAMES, SCEN_POS_COLOR))
+# Fig5-only dataset palette (per user request, 2026-09-13) -- deliberately
+# distinct hues (orange/blue/green) rather than the paper-wide DATASET_COLOR
+# (navy/slate/rust, _style.py) used in Fig1, so this is scoped to this figure.
+FIG5_DATASET_COLOR = {"MIT": "#D08A2E", "HUST": "#2F6690", "TJU": "#4C7A3D"}
+SEQ_CMAP_BY_DATASET = {
+    name: LinearSegmentedColormap.from_list(f"err_{name}", ["#F5F3EE", color])
+    for name, color in FIG5_DATASET_COLOR.items()
+}
 
 
 def load_hard(run_dir):
@@ -62,14 +67,10 @@ def panel_scatter(ax, df, name):
     pad = 0.02 * (hi - lo)
     ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color=SUBINK, lw=0.9,
             ls=(0, (5, 3)), zorder=1)
-    for s in SCEN_NAMES:
-        sub = df[df.seg_name == s]
-        if len(sub) == 0:
-            continue
-        idx = rng.choice(len(sub), size=min(1500, len(sub)), replace=False)
-        ss = sub.iloc[idx]
-        ax.scatter(ss.soh_true, ss.soh_pred, s=3.5, color=SCEN_COLOR[s], alpha=0.18,
-                   linewidths=0, zorder=2, rasterized=True)
+    idx = rng.choice(len(df), size=min(4500, len(df)), replace=False)
+    ss = df.iloc[idx]
+    ax.scatter(ss.soh_true, ss.soh_pred, s=3.5, color=FIG5_DATASET_COLOR[name], alpha=0.18,
+               linewidths=0, zorder=2, rasterized=True)
 
     r2, rmse = r2_rmse(df.soh_true.values, df.soh_pred.values)
     ax.text(0.04, 0.96, f"$R^2$={r2:.3f}\nRMSE={rmse:.4f}", transform=ax.transAxes,
@@ -100,15 +101,16 @@ def _smoothed_grid(y_idx, x, err, n_x=40, sigma=(0.9, 2.2)):
     return grid, x_edges
 
 
-def panel_error_heatmap(ax, df, name):
+def _error_grid(df):
     scen_to_idx = {s: i for i, s in enumerate(SCEN_NAMES)}
     y_idx = df.seg_name.map(scen_to_idx).values
     x = df.cap_true_Ah.values
     err = df.abs_err_pct.values
-    grid, x_edges = _smoothed_grid(y_idx, x, err)
+    return _smoothed_grid(y_idx, x, err)
 
-    im = ax.imshow(grid, aspect="auto", cmap=SEQ_CMAP, vmin=0,
-                    vmax=np.nanpercentile(grid, 97),
+
+def panel_error_heatmap(ax, name, grid, x_edges, vmax):
+    im = ax.imshow(grid, aspect="auto", cmap=SEQ_CMAP_BY_DATASET[name], vmin=0, vmax=vmax,
                     extent=[x_edges[0], x_edges[-1], 5.5, -0.5], interpolation="bilinear")
     ax.set_yticks(range(6))
     ax.set_yticklabels(SCEN_NAMES, fontsize=6.6)
@@ -124,16 +126,21 @@ def build_figure():
     gs = fig.add_gridspec(2, 3, hspace=0.55, wspace=0.42,
                            top=0.92, bottom=0.09, left=0.055, right=0.965)
 
-    for j, (name, run_dir) in enumerate(DATASETS):
-        df = load_hard(run_dir)
+    dfs = [(name, load_hard(run_dir)) for name, run_dir in DATASETS]
+    grids = [_error_grid(df) for _, df in dfs]
+    # 2026-09-13 (user request): unify the error-% scale across all three
+    # datasets instead of a per-panel vmax -- makes MIT/HUST/TJU's error
+    # magnitudes directly comparable at a glance (previously MIT~5%/HUST~4.2%/
+    # TJU~1.5% each had their own scale, which was truer to each panel's own
+    # dynamic range but hid how much noisier MIT/HUST are than TJU overall).
+    shared_vmax = max(np.nanpercentile(grid, 97) for grid, _ in grids)
+
+    for j, ((name, _), (grid, x_edges)) in enumerate(zip(dfs, grids)):
+        df = dfs[j][1]
         ax_top = fig.add_subplot(gs[0, j])
         ax_bot = fig.add_subplot(gs[1, j])
         panel_scatter(ax_top, df, name)
-        im = panel_error_heatmap(ax_bot, df, name)
-        # each dataset gets its own vmax (error MAGNITUDE differs a lot across
-        # datasets -- MIT/HUST are noisier than TJU) -- a single shared
-        # colorbar would misrepresent whichever panel it wasn't scaled to,
-        # so give each column its own colorbar rather than one shared bar.
+        im = panel_error_heatmap(ax_bot, name, grid, x_edges, shared_vmax)
         cbar = fig.colorbar(im, ax=ax_bot, fraction=0.055, pad=0.03)
         cbar.ax.tick_params(labelsize=5.8, length=2)
         cbar.outline.set_visible(False)
@@ -146,8 +153,8 @@ def build_figure():
 
 if __name__ == "__main__":
     fig = build_figure()
-    out_png = "docs/figures/fig5_single_dataset.png"
-    out_pdf = "docs/figures/fig5_single_dataset.pdf"
+    out_png = "docs/figures/fig8_single_dataset.png"
+    out_pdf = "docs/figures/fig8_single_dataset.pdf"
     fig.savefig(out_png, dpi=600)
     fig.savefig(out_pdf)
     print(f"saved: {out_png}\nsaved: {out_pdf}")

@@ -1,4 +1,4 @@
-"""Figure 8 -- Ablation vs. the final v4 model (H23-style contribution check).
+"""Figure 12 -- Ablation vs. the final v4 model (H23-style contribution check).
 
 Four conditions, all oracle test-set, MIT+HUST pooled, zone tiling:
   no scen       -- assign="none" (no scenario label), kernel ON      (noscen_kernel_zonetile)
@@ -110,8 +110,8 @@ def build_figure():
 
 if __name__ == "__main__":
     fig = build_figure()
-    out_png = "docs/figures/fig8_ablation.png"
-    out_pdf = "docs/figures/fig8_ablation.pdf"
+    out_png = "docs/figures/fig12_ablation.png"
+    out_pdf = "docs/figures/fig12_ablation.pdf"
     fig.savefig(out_png, dpi=600)
     fig.savefig(out_pdf)
     print(f"saved: {out_png}\nsaved: {out_pdf}")

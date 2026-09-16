@@ -53,10 +53,13 @@ HUST_COLOR = "#5B7C93"   # LFP, lighter slate-blue tint of the same family
 TJU_COLOR = "#8A3F2E"    # NCM, rust (== NCM_COLOR)
 DATASET_COLOR = {"MIT": MIT_COLOR, "HUST": HUST_COLOR, "TJU": TJU_COLOR}
 
-# model / regression-head triad
+# model / regression-head quartet (MLP/transformer/ResNet-tabular established;
+# iTransformer added 2026-09-16 for the fig7 robustness sweep -- same desaturated
+# family, olive-green keeps it distinct from the zone triad's ochre (Z_MID))
 MLP_COLOR = "#3A6178"
 TRANSFORMER_COLOR = "#96473A"
 RESNET_COLOR = "#644E70"
+ITRANSFORMER_COLOR = "#5C7A52"
 
 # routing-mode triad (oracle/hard/soft), used across classification+regression figs
 ORACLE_COLOR = "#3A6178"
