@@ -9,15 +9,26 @@ raw HI는 대체하지 않고 그대로 둔 채 별도 블록으로 "추가"한�
 scr_model.py의 독립 게이트 scen_kernel_gates에 연결 — 설계 배경/이력은
 docs/260820_RESULTS.md 참고).
 
-이 스크립트가 하는 다중공선성 관리는 2단계뿐이다:
+이 스크립트가 하는 다중공선성 관리는 이제 3단계다(2026-09-18에 3차 추가):
   1. (build_synergy_groups.py가 이미 함) 그룹 *내부* raw HI 중복 배제.
   2. 이 스크립트: 커널 HI *끼리*(시나리오 다른 그룹끼리도 원본 HI가 겹치면 커널값이
      비슷할 수 있어 전체 train pooled로 재검사) 다중공선성 배제(--redundancy-threshold).
-  raw HI와 그걸로 만든 커널 HI 사이의 다중공선성은 검사하지 않는다(알려진 한계,
-  docs/260820_RESULTS.md 참고) — scen_gates(raw)/scen_kernel_gates(kernel)가 별개
-  게이트라 원칙적으로는 각자 걸러낼 여지가 있지만 명시적 보장은 아니다.
+  3. (신규) raw HI(64) + 이 시나리오가 만든 커널 HI를 합쳐서, **시나리오별로**(2차와 달리
+     pooled 아님) |r|>=0.95인 각 쌍의 "패자"를 정해 제거한다 — degree(다른 HI와도
+     0.95를 넘는 관계 개수)가 더 많은 쪽 우선 제거, 동일하면 타깃(SOH) 상관계수가 더
+     낮은 쪽 제거 — `kernel_group_features_{tag}_combined_redundancy.json`으로 저장,
+     phase1_trainer_v2.py --combined-redundancy-json이 실제 배제를 적용한다.
+  raw HI와 그걸로 만든 커널 HI 사이의 다중공선성은 이제 3차에서 검사한다(과거엔 검사하지
+  않던 알려진 한계였음, docs/260820_RESULTS.md 참고).
 
-출력(pickle, JSON이 아닌 이유: sklearn 파이프라인 객체를 그대로 저장해 재적용해야 함):
+  또한 2026-09-18부터 x_kernel 소비 방식이 바뀌었다(phase1_trainer_v2.py의
+  _apply_kernel_features, 요구사항1) — 커널 HI 컬럼은 이제 "그 컬럼을 만든 시나리오"의
+  행에만 값이 채워지고 다른 시나리오 행에서는 항상 0이다(전에는 모든 행에 모든 커널
+  모델을 적용해 다른 시나리오용 모델을 분포 밖(OOD) 입력에 적용한 의미 없는 값이 섞여
+  있었다). 이 pkl의 mean/std(정규화 통계)도 그에 맞춰 own-scenario 행만으로 계산한다
+  (2차 다중공선성 배제 판단 자체는 여전히 pooled kernel_vals를 씀 — 그 부분은 변경 없음).
+
+출력 1(pickle, JSON이 아닌 이유: sklearn 파이프라인 객체를 그대로 저장해 재적용해야 함):
   {
     "tag": str, "n_features": int,
     "alpha": float, "gamma": float|None, "n_components": int,
@@ -27,6 +38,16 @@ docs/260820_RESULTS.md 참고).
        "member_names": [...], "train_r2": float, "model": Pipeline,
        "mean": float, "std": float}, ...
     ],
+  }
+
+출력 2(신규, JSON) kernel_group_features_{tag}_combined_redundancy.json:
+  {
+    "tag": str, "threshold": 0.95,
+    "by_scenario": {
+      seg_name: {"removed_raw_idx": [...], "removed_raw_names": [...],
+                 "removed_kernel_names": [...], "n_total_checked": int,
+                 "n_edges": int}, ...
+    },
   }
 
 사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir은 표준 조합이면 생략 가능 —
@@ -227,8 +248,14 @@ def _round_robin_select(
 
 
 def main() -> None:
+    from utils.hi_schema import get_hi_cost_vector
+
     args = _parse_args()
     x_all, y_all, scen_idx_all, spec, names_by_seg = _load_train_split(args)
+    # raw HI 카테고리 비용(stat/diff/lfp/morph) — seg 이름과 무관하게 순서/값이 동일하므로
+    # 하나만 구해서 재사용(get_hi_cost_vector는 접두 seg별로 컬럼 "이름"만 다르고 카테고리
+    # 순서/비용값 자체는 고정).
+    _raw_hi_costs = get_hi_cost_vector("dis_hi")
 
     groups_data = json.loads(Path(args.synergy_groups_json).read_text(encoding="utf-8"))
 
@@ -280,6 +307,7 @@ def main() -> None:
                                   "(자기 그룹 raw 멤버로 이미 설명됨, 커널이 새 정보를 거의 안 줌)",
                     })
                     continue
+            member_cost = float(np.mean([_raw_hi_costs[m] for m in members]))
             candidates.append({
                 "name": f"kernel_{seg_name}_g{gi}",
                 "scenario": seg_name,
@@ -288,6 +316,7 @@ def main() -> None:
                 "member_names": [names_by_seg[s][i] for i in members],
                 "model": model,
                 "train_r2": r2,
+                "cost": member_cost,  # L0 페널티용: 멤버 raw HI 카테고리 비용의 평균(scr_loss.py)
             })
             n_fit += 1
         extra = f", raw-중복 {n_skipped_raw_dup}개 탈락" if args.min_raw_partial_corr is not None else ""
@@ -348,11 +377,21 @@ def main() -> None:
     # 에서 (v - mean) / std로 표준화한다(val/test엔 이 train 통계를 그대로 적용, fit은 안 함
     # — 누수 없음).
     # ------------------------------------------------------------------
+    # 2026-09-18(v4 로직 수정, 요구사항1 "각 시나리오에서 만든 커널만 그 시나리오에서
+    # 사용"과 일관성): mean/std는 이 커널이 *실제로 쓰이는* own-scenario 행만으로 계산한다.
+    # kernel_vals는 전체 x_all(모든 시나리오 pooled)에 predict()한 값이라 -- 위 2차
+    # 다중공선성 배제(커널끼리, pooled 비교) 판단에는 그대로 쓰지만, 정규화는 own-scenario
+    # 분포를 반영해야 한다. 안 그러면 "전혀 다른 시나리오들이 뒤섞인 분포" 기준으로
+    # z-score해서 실제 사용될 own-scenario 값이 이상하게 치우친 스케일로 들어간다.
     final_idx_arr = np.array([candidates.index(f) for f in final])
     final_vals = kernel_vals[:, final_idx_arr]
-    means = final_vals.mean(axis=0)
-    stds = final_vals.std(axis=0)
-    stds = np.where(stds < 1e-8, 1.0, stds)  # 상수에 가까운 피처 0-division 방지
+    means = np.zeros(len(final))
+    stds = np.ones(len(final))
+    for k, f in enumerate(final):
+        own_vals = final_vals[scen_idx_all == f["scenario_idx"], k]
+        means[k] = float(own_vals.mean())
+        sd = float(own_vals.std())
+        stds[k] = sd if sd > 1e-8 else 1.0  # 상수에 가까운 피처 0-division 방지
     for f, m, sd in zip(final, means, stds):
         f["mean"] = float(m)
         f["std"] = float(sd)
@@ -361,6 +400,91 @@ def main() -> None:
         spec.scenario_names[s]: sum(1 for f in final if f["scenario_idx"] == s)
         for s in range(spec.n_scenarios)
     }
+
+    # ------------------------------------------------------------------
+    # 3차(신규, 2026-09-18, 요구사항2): raw HI(64) + 이 시나리오가 만든 커널 HI를 합쳐서
+    # 시나리오별로(2차와 달리 pooled 아님 -- 그 시나리오 데이터에서만) 다중공선성을 다시
+    # 검사한다. |r|>=0.95인 각 쌍에 대해 "패자"를 정해 제거한다(사용자 피드백, 2026-09-18
+    # 정정 — 처음엔 "쌍이 있으면 둘 다 제거"였는데, 그러면 서로 얽힌 쌍이 많을수록 무차별로
+    # 다 날아가 버려서 아래 규칙으로 변경):
+    #   1) 다른 HI와도 |r|>=0.95인 관계 개수(= 이 컴포넌트 안에서의 degree)가 더 많은 쪽을
+    #      제거(더 많이 겹치는 쪽이 더 중복도가 높다고 보고 우선 정리).
+    #   2) degree가 같으면, 타깃(SOH)과의 단순상관 |target_corr|가 더 낮은 쪽을 제거
+    #      ("자체 상관계수가 더 높은 HI를 살려").
+    #   3) 그래도 같으면(초저확률) 인덱스가 더 큰 쪽을 제거(결정성 확보용 임의 규칙).
+    # 실제 반영(raw는 nan_mask, kernel은 x_kernel 0-강제)은 phase1_trainer_v2.py
+    # --combined-redundancy-json이 담당 — scr_model.py는 무변경.
+    # ------------------------------------------------------------------
+    COMBINED_REDUNDANCY_THRESHOLD = 0.95  # fig3(hi_design_rationale)/redundancy_gate_resolution.py와 동일 관례
+    n_raw = x_all.shape[1]
+    combined_redundancy: dict[str, dict] = {}
+    for s, seg_name in enumerate(spec.scenario_names):
+        sel = scen_idx_all == s
+        if sel.sum() < 20:
+            continue
+        own_feats = [f for f in final if f["scenario_idx"] == s]
+        x_raw_scen = x_all[sel]
+        y_scen = y_all[sel]
+        if own_feats:
+            x_kernel_scen = np.column_stack([
+                f["model"].predict(x_raw_scen[:, f["members"]]) for f in own_feats
+            ])
+            combined = np.column_stack([x_raw_scen, x_kernel_scen])
+        else:
+            combined = x_raw_scen
+        combined_names = list(names_by_seg[s]) + [f["name"] for f in own_feats]
+
+        corr = np.corrcoef(combined, rowvar=False)
+        corr = np.nan_to_num(corr, nan=0.0)
+        np.fill_diagonal(corr, 0.0)
+
+        target_corr = np.array([
+            np.corrcoef(combined[:, k], y_scen)[0, 1] for k in range(combined.shape[1])
+        ])
+        target_corr = np.nan_to_num(target_corr, nan=0.0)
+
+        n = combined.shape[1]
+        edges = [(i, j) for i in range(n) for j in range(i + 1, n)
+                 if abs(corr[i, j]) >= COMBINED_REDUNDANCY_THRESHOLD]
+        degree = np.zeros(n, dtype=int)
+        for i, j in edges:
+            degree[i] += 1
+            degree[j] += 1
+
+        removed_set: set[int] = set()
+        for i, j in edges:
+            if degree[i] != degree[j]:
+                loser = i if degree[i] > degree[j] else j
+            elif abs(target_corr[i]) != abs(target_corr[j]):
+                loser = i if abs(target_corr[i]) < abs(target_corr[j]) else j
+            else:
+                loser = max(i, j)
+            removed_set.add(loser)
+        removed = sorted(removed_set)
+
+        removed_raw_idx = [i for i in removed if i < n_raw]
+        removed_kernel_names = [combined_names[i] for i in removed if i >= n_raw]
+        combined_redundancy[seg_name] = {
+            "removed_raw_idx": removed_raw_idx,
+            "removed_raw_names": [combined_names[i] for i in removed_raw_idx],
+            "removed_kernel_names": removed_kernel_names,
+            "n_total_checked": combined.shape[1],
+            "n_edges": len(edges),
+        }
+
+    combined_redundancy_out_path = (
+        RESULTS_DIR / f"kernel_group_features_{args.tag}_combined_redundancy.json"
+    )
+    combined_redundancy_out_path.write_text(
+        json.dumps({"tag": args.tag, "threshold": COMBINED_REDUNDANCY_THRESHOLD,
+                    "by_scenario": combined_redundancy}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    n_removed_raw_total = sum(len(v["removed_raw_idx"]) for v in combined_redundancy.values())
+    n_removed_kernel_total = sum(len(v["removed_kernel_names"]) for v in combined_redundancy.values())
+    print(f"[kernel] 결합(raw+kernel) 다중공선성 배제(시나리오별, |r|>={COMBINED_REDUNDANCY_THRESHOLD}): "
+          f"raw {n_removed_raw_total}개/kernel {n_removed_kernel_total}개 제거 대상 "
+          f"-> {combined_redundancy_out_path}")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"kernel_group_features_{args.tag}.pkl"
@@ -402,16 +526,20 @@ def main() -> None:
     append_log_entry(
         tag=f"kernel_group_features_{args.tag}",
         purpose="시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) "
-                "+ 2차 다중공선성 배제 + 정규화 통계 저장",
+                "+ 2차 다중공선성 배제 + 정규화 통계 저장 + 3차 결합(raw+kernel) 다중공선성 "
+                "배제(시나리오별, 2026-09-18 신규)",
         command=current_command_str(),
-        result_files=[str(out_path), str(rejected_out_path)],
+        result_files=[str(out_path), str(rejected_out_path), str(combined_redundancy_out_path)],
         key_metrics=(f"후보 {len(candidates)}개 -> 최종 {len(final)}개, "
-                     f"평균 train R^2={avg_r2:.4f}, 시나리오별 개수={n_final_by_scenario}"),
+                     f"평균 train R^2={avg_r2:.4f}, 시나리오별 개수={n_final_by_scenario}, "
+                     f"결합 다중공선성 배제: raw {n_removed_raw_total}개/kernel {n_removed_kernel_total}개"),
         interpretation=(
             "이 pkl은 phase1_trainer_v2.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 "
             "두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 "
             "— raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 "
-            "상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호."
+            "상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. "
+            "_combined_redundancy.json은 phase1_trainer_v2.py --combined-redundancy-json으로 "
+            "넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다."
         ),
     )
 

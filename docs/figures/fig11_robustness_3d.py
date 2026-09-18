@@ -77,6 +77,10 @@ N2_BADNESS = [1.00, 0.62, 0.38, 0.28]
 # sequential ramp (n2% is an ordered quantity, unlike the categorical model
 # names below) -- light to dark steel-blue, worst (5%) to best (20%)
 N2_COLOR = ["#A8BFCE", "#6E92A8", "#3A6178", "#182E45"]
+N2_CMAP = LinearSegmentedColormap.from_list("n2_grad", N2_COLOR)  # same ramp, used to
+    # paint panel (a)'s predicted surface itself (2026-09-18: was a flat brown wash,
+    # replaced with this n2%-keyed gradient so the surface encodes the same "worst
+    # (light) -> best (dark)" reading as the discrete per-n2% line overlays).
 
 # -- regression head sweep -- badness calibrated from the REAL relative
 # ranking in docs/260915_RESULTS.md (all4 pooling, not this canonical
@@ -177,7 +181,14 @@ def panel_n2(ax, cycles, soh_true):
 
     ax.plot_surface(X, Y, true_surf, color=INK, alpha=0.25, linewidth=0,
                      antialiased=True, shade=False, zorder=3)
-    ax.plot_surface(X, Y, surf_fine, color=TRANSFORMER_COLOR, alpha=0.40,
+    # 예측 곡면: 단색 브라운 대신 n2%(Y) 기준 그라데이션(N2_CMAP, N2_COLOR와 동일 램프) --
+    # 값이 낮을수록(=badness 높음, 5%) 밝고, 높을수록(=badness 낮음, 20%) 어둡게 칠해
+    # 아래 개별 n2%별 선 오버레이와 같은 색 언어를 곡면 자체에도 입힌다.
+    y_norm = (y_fine - y_fine.min()) / (y_fine.max() - y_fine.min())
+    face_rgba = N2_CMAP(y_norm)
+    face_rgba[:, 3] = 0.55
+    face_colors = np.repeat(face_rgba[:, None, :], len(x_fine), axis=1)
+    ax.plot_surface(X, Y, surf_fine, facecolors=face_colors,
                      linewidth=0, antialiased=True, shade=True, zorder=4)
     for yv, c in zip(N2_VALUES, N2_COLOR):
         ax.plot(cycles, np.full_like(cycles, yv, dtype=float), surf_known[N2_VALUES.index(yv)],

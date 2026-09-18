@@ -233,7 +233,13 @@ def load_dataset_native_seg(
             # 원시 곡선 컬럼(raw_v/raw_i/raw_t)이 있으면 함께 보존 (CNN 입력용)
             raw_cols = [c for c in ("raw_v", "raw_i", "raw_t") if c in df.columns]
             aux_cols = [c for c in ("aux_scen_target", "aux_intensity_target") if c in df.columns]
-            df = df[keep + raw_cols + aux_cols].dropna(subset=["capacity_Ah"])
+            # q_frac_lo: 모든 시나리오 축(q_frac_wide/qfrac/rcs/test_rs/full_cycle)이 공통으로
+            # 채우는 세그먼트 시작 위치 메타 -- 같은 scen_idx 안에 n_samples>1개 세그먼트가
+            # 있을 때(예: q_frac_wide n_samples=2) 이 값으로 시간순 정렬해 세그먼트별 궤적
+            # 플랏(capacity_curve_*.png)에서 n_samples를 뭉개지 않고 개별 라인으로 그릴 수
+            # 있게 한다(2026-09-18, scr_evaluator.py._plot_capacity_curves).
+            meta_cols = [c for c in ("q_frac_lo",) if c in df.columns]
+            df = df[keep + raw_cols + aux_cols + meta_cols].dropna(subset=["capacity_Ah"])
             # HI 66개가 전부 NaN인 세그먼트 제외 — hi_correlation.py가 계산 자체를
             # 못한 경우(예: 충전 데이터 부족으로 q_tc < cap*0.6, _chg_incomplete)로,
             # SegmentNormalizer.fit()이 이미 nanmean/nanstd로 이런 행을 정규화 통계
@@ -446,6 +452,11 @@ class SegmentDataset(Dataset):
         self.cell_ids = df["cell_id"].values.tolist()
         self.cycles = df["cycle"].values.tolist()
         self.seg_names = df["seg_name"].values.tolist()
+        # 세그먼트 시작 q-fraction -- 같은 scen_idx 안 n_samples>1개를 시간순으로 구분하는
+        # 용도(2026-09-18, _plot_capacity_curves). 컬럼이 없는 구 pkl은 전부 0.0(구분 불가,
+        # 기존처럼 scen_idx당 하나로 뭉뚱그려짐 -- 하위호환).
+        self.q_frac_lo = (df["q_frac_lo"].values.tolist() if "q_frac_lo" in df.columns
+                          else [0.0] * len(df))
         self.capacity_raw = cap_raw
 
     def __len__(self) -> int:
@@ -555,6 +566,7 @@ def _subset_dataset(ds: "SegmentDataset", indices: list[int]) -> "SegmentDataset
     new_ds.cell_ids     = [ds.cell_ids[i] for i in indices]
     new_ds.cycles       = [ds.cycles[i] for i in indices]
     new_ds.seg_names    = [ds.seg_names[i] for i in indices]
+    new_ds.q_frac_lo    = [ds.q_frac_lo[i] for i in indices]
     new_ds.capacity_raw = ds.capacity_raw[indices]
     return new_ds
 

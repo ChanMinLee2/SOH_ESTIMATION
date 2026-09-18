@@ -14,6 +14,11 @@ L0_penalty: for each scenario, computes E[cost of active HIs].
   Charging scenarios: use charge_probe_gate + scen_gate[s]
   Discharging scenarios: use discharge_probe_gate + scen_gate[s]
   P(HI_i active in scenario s) = 1 - (1 - p_probe_i)(1 - p_scen_i)
+  2026-09-18부터 scen_kernel_gates(커널 HI, Stage B' 단독 — probe 단계 없음)도 동일
+  lambda_l0로 패널티에 합산됨 — 예전엔 raw HI만 계산해 커널 게이트에 희소화 압력이
+  전혀 없었음(docs/260917_RESULTS.md). 커널별 비용은 model.kernel_hi_costs가 있으면
+  그 커널을 만든 멤버 raw HI 카테고리(stat/diff/lfp/morph) 비용의 평균을 쓰고,
+  없으면(구 pkl/미지정) 균일 비용 1.0으로 하위호환.
 
 shrinkage_penalty (docs/260909_RESULTS.md §6-5(e) 대응책 ①): model.scen_gates가
 ShrinkageHardConcreteGate 뱅크(scr_model.py의 shrinkage_gate=True)일 때만 존재하는
@@ -88,49 +93,78 @@ class SCRLoss(nn.Module):
         L0 penalty summed across all 6 scenarios.
         Charging scenarios use charge_probe; discharging use discharge_probe.
         P(z_i != 0) = 1 - (1-p_probe_i)(1-p_scen_i)
+
+        2026-09-18(v4 로직 수정): 커널 HI 게이트(model.scen_kernel_gates)도 이제 같은
+        lambda_l0로 패널티를 받는다 — 이전엔 raw HI(probe+scen)만 계산하고 커널 게이트는
+        전혀 계산에 안 들어가서, 커널 쪽엔 희소화 압력이 원천적으로 없었다(실측:
+        hi_selection_matrix.png에서 커널 HI가 시나리오당 16~24개씩 거의 다 gate_prob≥0.9로
+        선택됨 — docs/260917_RESULTS.md). 커널은 probe 단계가 없는 Stage B' 단독 게이트라
+        raw처럼 곱셈 결합(1-(1-p_probe)(1-p_scen)) 없이 게이트 확률 자체가 활성 확률이다.
+        2026-09-18(비용 가중치 추가): 커널 HI는 raw HI처럼 고정된 카테고리 하나가 아니라
+        여러 raw HI(멤버)의 RBF 융합값이라, model.kernel_hi_costs[s]에 그 커널을 만든
+        멤버들의 카테고리 비용(stat/diff/lfp/morph) 평균을 미리 계산해 저장해두고
+        (build_kernel_group_features.py의 f["cost"]) 그 값으로 gate_prob()을 가중합산한다
+        — kernel_hi_costs가 없으면(구 pkl 등) 균일 비용 1.0으로 하위호환.
+        raw HI 조기반환(probe/scen 둘 다 고정인 Phase2 케이스)과 무관하게 항상 계산한다
+        — 커널 게이트는 고정 마스크 개념이 아예 없는 Phase1 전용 학습 가능 게이트라서.
         """
         device = self.cost_vec.device
         penalty = torch.zeros(1, device=device)
 
-        if model._fixed_probe and model._fixed_scen:
-            return penalty.squeeze()
+        if not (model._fixed_probe and model._fixed_scen):
+            ones = torch.ones_like(self.cost_vec)
 
-        ones = torch.ones_like(self.cost_vec)
+            # Probe gate probs per direction
+            if not model._fixed_probe:
+                p_probe_ch  = model.charge_probe_gate.gate_prob()
+                p_probe_dis = model.discharge_probe_gate.gate_prob()
+            else:
+                p_probe_ch  = ones
+                p_probe_dis = ones
 
-        # Probe gate probs per direction
-        if not model._fixed_probe:
-            p_probe_ch  = model.charge_probe_gate.gate_prob()
-            p_probe_dis = model.discharge_probe_gate.gate_prob()
-        else:
-            p_probe_ch  = ones
-            p_probe_dis = ones
+            if not model._fixed_scen:
+                _charge_ids = frozenset(model.spec.charge_scenario_ids)
+                _n_scen     = model.n_scenarios
+                shared_gate = getattr(model, "shared_gate", None)  # v4: HI 일부가 scen_gates
+                    # 대신 시나리오 무관 shared_gate로 라우팅됨 — 있으면 scen_gates[s]는
+                    # N_HI보다 좁은 폭(specific 몫만)이라, cost_vec(N_HI)과 맞추려면 원래
+                    # 컬럼 순서로 재조립해야 함. None이면(shared_hi_mask 미지정) 기존과
+                    # 100% 동일 동작.
+                raw_penalty = torch.zeros(1, device=device)
+                for s, gate in enumerate(model.scen_gates):
+                    p_probe  = p_probe_ch if s in _charge_ids else p_probe_dis
+                    if shared_gate is not None:
+                        p_scen = torch.zeros_like(self.cost_vec)
+                        p_scen[model._shared_idx] = shared_gate.gate_prob()
+                        if len(model._specific_idx) > 0:
+                            p_scen[model._specific_idx] = gate.gate_prob()
+                    else:
+                        p_scen = gate.gate_prob()
+                    p_active = 1.0 - (1.0 - p_probe) * (1.0 - p_scen)
+                    raw_penalty = raw_penalty + (self.cost_vec * p_active).sum()
+                norm = self.l0_norm_constant if self.l0_norm_constant is not None else _n_scen
+                penalty = penalty + raw_penalty / norm
+            else:
+                # Only probe gates contribute
+                penalty = penalty + (
+                    (self.cost_vec * p_probe_ch).sum() +
+                    (self.cost_vec * p_probe_dis).sum()
+                ).unsqueeze(0) / 2
 
-        if not model._fixed_scen:
-            _charge_ids = frozenset(model.spec.charge_scenario_ids)
-            _n_scen     = model.n_scenarios
-            shared_gate = getattr(model, "shared_gate", None)  # v4: HI 일부가 scen_gates
-                # 대신 시나리오 무관 shared_gate로 라우팅됨 — 있으면 scen_gates[s]는
-                # N_HI보다 좁은 폭(specific 몫만)이라, cost_vec(N_HI)과 맞추려면 원래
-                # 컬럼 순서로 재조립해야 함. None이면(shared_hi_mask 미지정) 기존과
-                # 100% 동일 동작.
-            for s, gate in enumerate(model.scen_gates):
-                p_probe  = p_probe_ch if s in _charge_ids else p_probe_dis
-                if shared_gate is not None:
-                    p_scen = torch.zeros_like(self.cost_vec)
-                    p_scen[model._shared_idx] = shared_gate.gate_prob()
-                    if len(model._specific_idx) > 0:
-                        p_scen[model._specific_idx] = gate.gate_prob()
+        kernel_gates = getattr(model, "scen_kernel_gates", None)
+        if kernel_gates is not None:
+            kernel_costs = getattr(model, "kernel_hi_costs", None)  # 2026-09-18: 커널별
+                # 멤버 raw HI 카테고리 비용 가중평균(None이면 기존처럼 균일 비용 1.0)
+            kernel_penalty = torch.zeros(1, device=device)
+            for s, gate in enumerate(kernel_gates):
+                p = gate.gate_prob()
+                if kernel_costs is not None:
+                    c = torch.tensor(kernel_costs[s], dtype=p.dtype, device=p.device)
+                    kernel_penalty = kernel_penalty + (c * p).sum()
                 else:
-                    p_scen = gate.gate_prob()
-                p_active = 1.0 - (1.0 - p_probe) * (1.0 - p_scen)
-                penalty  = penalty + (self.cost_vec * p_active).sum()
+                    kernel_penalty = kernel_penalty + p.sum()
+            _n_scen = model.n_scenarios
             norm = self.l0_norm_constant if self.l0_norm_constant is not None else _n_scen
-            penalty = penalty / norm
-        else:
-            # Only probe gates contribute
-            penalty = (
-                (self.cost_vec * p_probe_ch).sum() +
-                (self.cost_vec * p_probe_dis).sum()
-            ).unsqueeze(0) / 2
+            penalty = penalty + kernel_penalty / norm
 
         return penalty.squeeze()

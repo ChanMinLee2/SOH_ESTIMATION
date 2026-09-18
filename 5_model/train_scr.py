@@ -334,8 +334,11 @@ def _save_scen_masks_to_json(
     gates = gates if gates is not None else model.scen_gates
     out = {}
     seg_names = model.spec.scenario_names
+    gate_group_map = getattr(model, "_gate_group_map", None)  # n_gate_groups(2026-09-17 안건2):
+        # scenario_idx -> 축소된 게이트 뱅크 인덱스. None(기본)이면 s 그대로(기존과 동일).
     for s in range(model.n_scenarios):
-        ranked, probs = _ranked_indices(gates[s])
+        g = int(gate_group_map[s]) if gate_group_map is not None else s
+        ranked, probs = _ranked_indices(gates[g])
         out[f"seg_{s}_ranked"]   = ranked
         out[f"seg_{s}_names"]    = [hi_cols_by_seg[s][i] for i in ranked]
         out[f"seg_{s}_probs"]    = probs
@@ -376,8 +379,10 @@ def _plot_gate_probs(
         ("Discharge Probe", model.discharge_probe_gate, discharge_m, "darkorange"),
     ]
     seg_names = model.spec.scenario_names
+    gate_group_map = getattr(model, "_gate_group_map", None)  # n_gate_groups(2026-09-17 안건2)
     for s in range(model.n_scenarios):
-        gates_info.append((f"Scen: {seg_names[s]}", model.scen_gates[s], scen_k, "seagreen"))
+        g = int(gate_group_map[s]) if gate_group_map is not None else s
+        gates_info.append((f"Scen: {seg_names[s]}", model.scen_gates[g], scen_k, "seagreen"))
 
     n_plots = len(gates_info)   # 8
     fig, axes = plt.subplots(2, 4, figsize=(22, 8))

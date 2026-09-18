@@ -238,6 +238,7 @@ class SCREvaluator:
             "cell_ids":      ds.cell_ids,
             "cycles":        ds.cycles,
             "seg_names":     ds.seg_names,
+            "q_frac_lo":     ds.q_frac_lo,
             "cap_raw":       ds.capacity_raw,
         }
 
@@ -828,6 +829,13 @@ class SCREvaluator:
     # than averaged, so misrouted predictions are visible as separate lines.
     # ------------------------------------------------------------------
     def _plot_capacity_curves(self, pred_dict: dict) -> None:
+        """방향(충전/방전)별로, scen_idx(zone) 카테고리로 뭉뚱그려 평균내는 대신 개별
+        세그먼트 단위로 그린다(2026-09-18). q_frac_wide 등 표준 축은 zone(3개)×n_samples
+        (예: 2)개를 한 방향에 두는데, 예전엔 같은 zone의 n_samples 예측을 평균해 zone당
+        선 하나(3개/방향)만 보여줬다 — 이제 q_frac_lo(세그먼트 시작 q-fraction, 축 설계상
+        사이클과 무관하게 고정)로 정렬한 "세그먼트 순번"(1..n_order, 보통 6=zone3×samples2)
+        별로 선을 따로 그린다. True capacity는 세그먼트와 무관하게 사이클당 하나의 값(원래도
+        전 세그먼트에 동일 라벨이 복제된 것뿐이라 평균해도 값이 안 바뀜)이라 한 줄만 그린다."""
         if not _HAS_MPL:
             return
 
@@ -837,26 +845,8 @@ class SCREvaluator:
         cap_true    = pred_dict["cap_true_raw"] * cap_init_ah   # SOH→Ah
         cap_pred    = pred_dict["cap_pred_raw"] * cap_init_ah   # SOH→Ah
         directions  = pred_dict["direction"]
-        scen_idxs    = pred_dict["scen_idx"]
-
-        # (scen_idx, level_idx, display label) — derived from spec routing
-        _spec = self.model.spec
-        _chg_ids  = _spec.charge_scenario_ids     # dir_idx=0
-        _dis_ids  = _spec.discharge_scenario_ids  # dir_idx=1
-        _DIR_SEGS = {
-            "Charge":    [(s, _spec.scenario_to_dir_class(s)[1],
-                           _spec.class_names[_spec.scenario_to_dir_class(s)[1]])
-                          for s in _chg_ids],
-            "Discharge": [(s, _spec.scenario_to_dir_class(s)[1],
-                           _spec.class_names[_spec.scenario_to_dir_class(s)[1]])
-                          for s in _dis_ids],
-        }
-        _COLORS = ["tab:red", "tab:green", "tab:orange", "tab:purple",
-                   "tab:brown", "tab:pink", "tab:cyan", "tab:olive"]
-        _STYLES = ["--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 2)),
-                   (0, (3, 5, 1, 5)), (0, (1, 1)), "-"]
-        _LV_COLOR = {i: _COLORS[i % len(_COLORS)] for i in range(_spec.n_classes)}
-        _LV_LS    = {i: _STYLES[i % len(_STYLES)] for i in range(_spec.n_classes)}
+        q_frac_lo   = np.array(pred_dict["q_frac_lo"], dtype=np.float64)
+        seg_names   = np.array(pred_dict["seg_names"])
 
         for cell in self.rep_cells:
             sel = cell_ids == cell
@@ -868,61 +858,69 @@ class SCREvaluator:
             c_true = cap_true[sel]
             c_pred = cap_pred[sel]
             c_dir  = directions[sel]
-            c_seg  = scen_idxs[sel]
+            c_qlo  = q_frac_lo[sel]
+            c_seg  = seg_names[sel]
 
             uniq_cyc = np.unique(c_cyc)
 
             fig, axes = plt.subplots(2, 3, figsize=(17, 8))
             fig.suptitle(cell, fontsize=12, y=1.01)
 
-            for row, (dir_name, seg_list) in enumerate(_DIR_SEGS.items()):
-                is_charge = (dir_name == "Charge")
-                dir_mask  = (c_dir > 0) if is_charge else (c_dir < 0)
-
+            for row, (dir_name, is_charge) in enumerate((("Charge", True), ("Discharge", False))):
+                dir_mask = (c_dir > 0) if is_charge else (c_dir < 0)
                 ax_cap, ax_err, ax_rel = axes[row, 0], axes[row, 1], axes[row, 2]
 
-                # True capacity per cycle for this direction
                 d_cyc  = c_cyc[dir_mask]
                 d_true = c_true[dir_mask]
+                d_pred = c_pred[dir_mask]
+                d_qlo  = c_qlo[dir_mask]
+                d_seg  = c_seg[dir_mask]
+
                 true_line = np.array([
                     d_true[d_cyc == cy].mean() if (d_cyc == cy).any() else np.nan
                     for cy in uniq_cyc
                 ])
-
                 ax_cap.plot(uniq_cyc, true_line, "b-", label="True", linewidth=1.5)
 
-                for scen_idx, lv_idx, lv_name in seg_list:
-                    s_mask = dir_mask & (c_seg == scen_idx)
-                    if s_mask.sum() == 0:
+                # 세그먼트 순번: 이 방향의 고유 q_frac_lo를 오름차순 정렬 -- 축 설계상
+                # 사이클 간 완전히 고정이므로 첫 사이클에서 뽑은 목록이 전체 대표값이다.
+                first_cyc = uniq_cyc[0]
+                order_qlo = np.sort(np.unique(d_qlo[d_cyc == first_cyc]))
+                if len(order_qlo) == 0:
+                    order_qlo = np.sort(np.unique(d_qlo))
+                n_order = max(len(order_qlo), 1)
+                colors = plt.cm.viridis(np.linspace(0.05, 0.90, n_order))
+
+                for k, qlo_val in enumerate(order_qlo):
+                    seg_mask = np.isclose(d_qlo, qlo_val, atol=1e-6)
+                    if seg_mask.sum() == 0:
                         continue
-                    s_cyc  = c_cyc[s_mask]
-                    s_pred = c_pred[s_mask]
+                    s_cyc  = d_cyc[seg_mask]
+                    s_pred = d_pred[seg_mask]
                     pred_line = np.array([
                         s_pred[s_cyc == cy].mean() if (s_cyc == cy).any() else np.nan
                         for cy in uniq_cyc
                     ])
+                    zone_name = d_seg[seg_mask][0] if seg_mask.any() else "?"
+                    label = f"seg{k + 1} ({zone_name})"
+                    color = colors[k]
 
-                    color = _LV_COLOR[lv_idx]
-                    ls    = _LV_LS[lv_idx]
-                    ax_cap.plot(uniq_cyc, pred_line, color=color, linestyle=ls,
-                                label=f"Pred-{lv_name}", linewidth=1.2)
+                    ax_cap.plot(uniq_cyc, pred_line, color=color, linewidth=1.2, label=label)
 
                     err_abs = np.abs(pred_line - true_line)
                     err_rel = err_abs / np.where(true_line == 0, 1.0, np.abs(true_line)) * 100
-                    ax_err.plot(uniq_cyc, err_abs, color=color, linestyle=ls,
-                                label=lv_name, linewidth=1.0)
-                    ax_rel.plot(uniq_cyc, err_rel, color=color, linestyle=ls,
-                                label=lv_name, linewidth=1.0)
+                    ax_err.plot(uniq_cyc, err_abs, color=color, linewidth=1.0, label=label)
+                    ax_rel.plot(uniq_cyc, err_rel, color=color, linewidth=1.0, label=label)
 
                 ax_cap.set_xlabel("Cycle"); ax_cap.set_ylabel("Capacity (Ah)")
                 ax_cap.set_title(f"{dir_name} — capacity curve")
-                ax_cap.legend(fontsize=8)
+                ax_cap.legend(fontsize=7, ncol=2)
                 ax_err.set_xlabel("Cycle"); ax_err.set_ylabel("|Error| (Ah)")
                 ax_err.set_title(f"{dir_name} — absolute error")
-                ax_err.legend(fontsize=8)
+                ax_err.legend(fontsize=7, ncol=2)
                 ax_rel.set_xlabel("Cycle"); ax_rel.set_ylabel("Relative error (%)")
                 ax_rel.set_title(f"{dir_name} — relative error (%)")
-                ax_rel.legend(fontsize=8)
+                ax_rel.legend(fontsize=7, ncol=2)
 
             fig.tight_layout()
             safe_name = cell.replace("/", "_")

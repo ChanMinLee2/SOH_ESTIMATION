@@ -383,7 +383,7 @@ class FTTransformerHead(nn.Module):
 # ---------------------------------------------------------------------------
 
 def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
-                    n_kernel_hi: int = 0) -> nn.Module:
+                    n_kernel_hi: int = 0, n_scen_onehot: int = 0) -> nn.Module:
     """
     model_cfg 의 regression_model 값에 따라 적절한 헤드를 반환한다.
     model_cfg 가 비어 있거나 키가 없으면 MLPHead (Phase 1 기본 동작).
@@ -396,8 +396,16 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
                       mlp/transformer/resnet_tab/i_transformer 지원(i_transformer는
                       2026-09-10 추가 — 커널 HI를 개별 토큰으로 넣음, 옵션1). ft_transformer는
                       아직 미지원 — 에러(설계 미정, 위 NotImplementedError 참고).
+        n_scen_onehot : SCRModel(scenario_onehot=True)의 zone/level 원-핫 폭(=n_classes,
+                      보통 3, 0=없음). 2026-09-17 안건2 "게이트 분리 대신 원샷 입력" 실험용
+                      — with_raw_flat과 동일한 선례로 mlp만 지원(그 외 NotImplementedError).
     """
     rtype = model_cfg.get("regression_model", "mlp").lower().replace("-", "_")
+    if n_scen_onehot > 0 and rtype != "mlp":
+        raise NotImplementedError(
+            f"n_scen_onehot(scenario_onehot 원-핫 입력)은 아직 mlp만 지원합니다 (rtype={rtype}). "
+            "Phase 1(scenario_onehot 실험)은 항상 mlp 헤드를 쓰므로 다른 헤드 지원은 필요할 때 추가."
+        )
 
     n_heads  = model_cfg.get("tr_n_heads",  4)
     n_layers = model_cfg.get("tr_n_layers", 2)
@@ -425,7 +433,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
         _HEAD_IN_WITH_CNN if with_raw_cnn else
         _HEAD_IN_WITH_RAW_FLAT if with_raw_flat else
         _HEAD_IN
-    ) + n_kernel_hi
+    ) + n_kernel_hi + n_scen_onehot
 
     if rtype == "mlp":
         return MLPHead(d_head=d_head, dropout=dropout,

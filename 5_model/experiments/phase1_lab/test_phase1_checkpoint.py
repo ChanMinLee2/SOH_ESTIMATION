@@ -88,7 +88,9 @@ from common.scenario import get_segmenter  # noqa: E402
 
 import train_scr as _base  # noqa: E402 (synergy group 로더 재사용)
 import test_scr as _tbase  # noqa: E402 (_resolve_device/_pick_rep_cells 재사용)
-from phase1_trainer_v2 import _apply_kernel_features  # noqa: E402 (중복 구현 금지)
+from phase1_trainer_v2 import (  # noqa: E402 (중복 구현 금지)
+    _apply_kernel_features, _apply_combined_redundancy_raw, _build_redundancy_mask,
+)
 
 
 class _KernelAugmentedDataset(torch.utils.data.Dataset):
@@ -143,7 +145,8 @@ def _parse_args() -> argparse.Namespace:
                    help="학습 때 --regression-model을 오버라이드했다면 동일하게 지정 "
                         "(config.yaml에는 반영 안 돼 있음 — 기본값 mlp면 신경 안 써도 됨)")
     p.add_argument("--rep-cells", nargs="+", default=None, dest="rep_cells",
-                   help="비교 플랏을 그릴 셀 ID(들). 미지정 시 데이터셋별 1개 자동 선정")
+                   help="비교 플랏을 그릴 셀 ID(들). 미지정 시 데이터셋별 5개 자동 선정"
+                        "(2026-09-18, 기존 1개 -> 5개)")
     p.add_argument("--data-dir", default=None, dest="data_dir",
                    help="config.yaml의 data.data_dir 오버라이드 — run마다 학습 당시 머신의 "
                         "경로(상대경로 또는 다른 드라이브)가 그대로 박혀있어, 이 스크립트를 "
@@ -204,6 +207,7 @@ def main() -> None:
 
     synergy_groups_json = _resolve_summary_path(summary.get("synergy_groups_json"))
     kernel_features_pkl = _resolve_summary_path(summary.get("kernel_features_pkl"))
+    combined_redundancy_json = _resolve_summary_path(summary.get("combined_redundancy_json"))
 
     ckpt_path = (Path(args.checkpoint) if args.checkpoint
                  else run_dir / "checkpoints" / "best_by_saturation.pt")
@@ -220,12 +224,24 @@ def main() -> None:
     ).get_spec()
     train_ds, val_ds, test_ds, norm = build_datasets(cfg, spec=spec)
 
-    kernel_hi_names = None
+    kernel_names_by_scen = None
+    kernel_hi_counts = None
+    kernel_costs_by_scen = None
+    combined_redundancy = None
+    redundancy_mask = None
+    if combined_redundancy_json:
+        combined_redundancy = json.loads(Path(combined_redundancy_json).read_text(encoding="utf-8"))
     if kernel_features_pkl:
         print(f"[test_p1] kernel-features-pkl 자동 적용(p1v2_summary.json): {kernel_features_pkl}")
-        kernel_hi_names = _apply_kernel_features(
-            [train_ds, val_ds, test_ds], Path(kernel_features_pkl)
+        kernel_names_by_scen, kernel_hi_counts, kernel_costs_by_scen = _apply_kernel_features(
+            [train_ds, val_ds, test_ds], Path(kernel_features_pkl), spec,
+            combined_redundancy=combined_redundancy,
         )
+    if combined_redundancy is not None:
+        n_masked = _apply_combined_redundancy_raw([train_ds, val_ds, test_ds], combined_redundancy, spec)
+        redundancy_mask = _build_redundancy_mask(combined_redundancy, spec)
+        print(f"[test_p1] combined-redundancy-json 자동 적용(p1v2_summary.json): {combined_redundancy_json} "
+              f"(raw HI (scenario,HI) 조합 {n_masked}개를 nan_mask 0-강제 + 게이트 출력 0-강제)")
 
     scen_group_ids = None
     if synergy_groups_json:
@@ -286,13 +302,27 @@ def main() -> None:
         print(f"[test_p1] shrinkage_gate 적용(scen_gates -> ShrinkageHardConcreteGate)"
               f"{' [p1v2_summary.json 자동감지]' if not args.shrinkage_gate_flag else ' [--shrinkage-gate]'}")
 
+    # 2026-09-17 안건2: p1v2_summary.json 자동감지(shrinkage_gate와 동일 패턴) — 학습 때
+    # --scen-gate-direction-only/--scenario-onehot-input을 줬으면 체크포인트 재구성 시에도
+    # 반드시 같은 아키텍처(n_gate_groups/scenario_onehot)로 만들어야 load_state_dict가 맞는다.
+    scen_gate_direction_only = bool(summary.get("scen_gate_direction_only", False))
+    scenario_onehot_input = bool(summary.get("scenario_onehot_input", False))
+    if scen_gate_direction_only:
+        print("[test_p1] scen_gate_direction_only 적용 [p1v2_summary.json 자동감지]")
+    if scenario_onehot_input:
+        print("[test_p1] scenario_onehot_input 적용 [p1v2_summary.json 자동감지]")
+
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
         scen_group_ids=scen_group_ids,
         shared_hi_mask=shared_hi_mask,
-        n_kernel_hi=len(kernel_hi_names) if kernel_hi_names else 0,
+        kernel_hi_counts=kernel_hi_counts,
+        kernel_hi_costs=kernel_costs_by_scen,
+        redundancy_mask=redundancy_mask,
         shrinkage_gate=shrinkage_gate,
+        n_gate_groups=(2 if scen_gate_direction_only else None),
+        scenario_onehot=scenario_onehot_input,
     ).to(device)
     model.load_state_dict(ckpt["model_state"], strict=True)
     model.eval()
@@ -300,7 +330,7 @@ def main() -> None:
     if hasattr(test_ds, "x_kernel"):
         test_ds = _KernelAugmentedDataset(test_ds)
 
-    rep_cells = args.rep_cells or _tbase._pick_rep_cells(test_ds, cfg, 1)
+    rep_cells = args.rep_cells or _tbase._pick_rep_cells(test_ds, cfg, 5)
     print(f"[test_p1] rep_cells: {rep_cells}")
 
     figures_dir = run_dir / "figures"
