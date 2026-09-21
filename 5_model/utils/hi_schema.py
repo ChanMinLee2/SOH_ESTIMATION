@@ -36,6 +36,13 @@ import os
 # 참고, 런타임 중 변경 불가(모든 소비자가 모듈 임포트 시점 상수로 N_HI를 쓰기 때문).
 EXCLUDE_STAT_LEAK: bool = os.environ.get("SOH_EXCLUDE_STAT_LEAK", "0") == "1"
 
+# 2026-09-19: diff_dqdv_area도 stat_q_abs/stat_energy_seg와 같은 leakage 계열로 실측 확인
+# (noscen lag=1 샘플: q_abs 대비 r=0.87~0.92, capacity_Ah 직접 상관 r=0.73~0.74 — dV/dQ를 Q로
+# 적분하는 diff_dvdq_area는 이 계열이 아님, capacity_Ah 상관 r=-0.03~-0.06). SOH_EXCLUDE_DQDV_LEAK=1
+# 이면 diff_dqdv_area도 제외(N_HI: SOH_EXCLUDE_STAT_LEAK=1과 같이 켜면 64→63, 이것만 켜면 66→65).
+# EXCLUDE_STAT_LEAK와 마찬가지로 프로세스 시작 시 환경변수로만 지정 가능.
+EXCLUDE_DQDV_LEAK: bool = os.environ.get("SOH_EXCLUDE_DQDV_LEAK", "0") == "1"
+
 STAT_KEYS: list[str] = [
     "v_mean_cw", "v_std", "v_skew", "v_kurt", "v_ent",
     "i_mean", "i_std", "v_med", "corr_qi", "corr_vi",
@@ -75,12 +82,20 @@ RAW_N: int = 48       # 리샘플 포인트 수
 RAW_CH: int = 3       # 채널 수: [V, I(signed), t_rel] — docs/260803_RESULTS.md §10.1/§10.10
 
 
-# Computation cost by category (used in L0 loss)
+# Computation cost by category (used in L0 loss).
+# 2026-09-19: 4_hi_analysis/hi_profile/hi_timing_cost.json의 실측 category_mean_us
+# (세그먼트 1개당 평균 처리 시간, µs)를 morph=1.0 기준으로 정규화한 값으로 교체 —
+# 예전 값(stat=1.0/diff=1.5/lfp=2.0/morph=3.0)은 실측 없이 정한 추정치였고, 실측
+# 순서(diff < lfp < stat < morph)와 어긋났다(특히 stat이 가장 싸다고 가정했는데
+# 실제로는 morph 다음으로 비쌈 — stat_v_samp_ent/stat_v_kurt/stat_v_skew 등 고차
+# 통계량이 대부분을 차지).
+#   diff=46.39us, lfp=94.08us, stat=253.93us, morph=314.12us (Global 카테고리는
+#   cost_vec 대상 4종에 없어 제외) -> 각각을 314.12로 나눈 값.
 CATEGORY_COSTS: dict[str, float] = {
-    "stat":  1.0,
-    "diff":  1.5,
-    "lfp":   2.0,
-    "morph": 3.0,
+    "stat":  0.8084,
+    "diff":  0.1477,
+    "lfp":   0.2995,
+    "morph": 1.0,
 }
 
 
@@ -103,11 +118,14 @@ def get_hi_cols_for_seg(seg: str) -> list[str]:
     """
     cols: list[str] = []
     _STAT_EXCLUDE: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
+    _DIFF_EXCLUDE: set[str] = {"dqdv_area"} if EXCLUDE_DQDV_LEAK else set()
     for key in STAT_KEYS:
         if key in _STAT_EXCLUDE:
             continue
         cols.append(f"stat_{key}_{seg}")
     for key in DIFF_KEYS:
+        if key in _DIFF_EXCLUDE:
+            continue
         cols.append(f"diff_{key}_{seg}")
     for key in LFP_KEYS:
         cols.append(f"lfp_{key}_{seg}")
@@ -122,12 +140,15 @@ def get_hi_cost_vector(seg: str) -> list[float]:
     Used to weight the L0 penalty.
     """
     _STAT_EXCLUDE: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
+    _DIFF_EXCLUDE: set[str] = {"dqdv_area"} if EXCLUDE_DQDV_LEAK else set()
     costs: list[float] = []
     for key in STAT_KEYS:
         if key in _STAT_EXCLUDE:
             continue
         costs.append(CATEGORY_COSTS["stat"])
-    for _ in DIFF_KEYS:
+    for key in DIFF_KEYS:
+        if key in _DIFF_EXCLUDE:
+            continue
         costs.append(CATEGORY_COSTS["diff"])
     for _ in LFP_KEYS:
         costs.append(CATEGORY_COSTS["lfp"])
@@ -136,7 +157,7 @@ def get_hi_cost_vector(seg: str) -> list[float]:
     return costs
 
 
-N_HI: int = len(get_hi_cols_for_seg("dis_hi"))  # == 66 기본, SOH_EXCLUDE_STAT_LEAK=1이면 64
+N_HI: int = len(get_hi_cols_for_seg("dis_hi"))  # == 66 기본, EXCLUDE_STAT_LEAK=1->64, +EXCLUDE_DQDV_LEAK=1->63
 
 
 def spec_from_qfrac():

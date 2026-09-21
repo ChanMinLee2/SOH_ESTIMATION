@@ -5,7 +5,6 @@ Phase 1 dual-objective:
   L = MSE(cap_pred, cap_target)           ← probe_gate + scen_gates
     + lambda_scen * CE(level_logits, level) ← probe_gate only (via probe_mlp)
     + lambda_l0   * L0_penalty             ← sparsity on all gates
-    + lambda_shrink * shrinkage_penalty    ← scen_gates가 ShrinkageHardConcreteGate일 때만
 
 Phase 2 (probe_mlp=None):
   L = MSE + lambda_l0 * L0_penalty
@@ -20,11 +19,14 @@ L0_penalty: for each scenario, computes E[cost of active HIs].
   그 커널을 만든 멤버 raw HI 카테고리(stat/diff/lfp/morph) 비용의 평균을 쓰고,
   없으면(구 pkl/미지정) 균일 비용 1.0으로 하위호환.
 
-shrinkage_penalty (docs/260909_RESULTS.md §6-5(e) 대응책 ①): model.scen_gates가
-ShrinkageHardConcreteGate 뱅크(scr_model.py의 shrinkage_gate=True)일 때만 존재하는
-mean(delta_log_alpha^2) — 시나리오별 편차를 0쪽으로 눌러 shared_log_alpha가
-전체 시나리오 데이터로 학습되도록 유도한다. 그 외(기존 nn.ModuleList 게이트)에는
-이 항이 아예 0으로 꺼진다 — 기존 run과 100% 동일 동작.
+hi_cost_weighted(2026-09-19, 기본 False로 전환): True면 raw HI는 CATEGORY_COSTS
+(stat/diff/lfp/morph), 커널 HI는 멤버 카테고리 비용 평균으로 L0 페널티를 가중한다.
+False(기본)면 raw/커널 전부 균일 비용 1.0 — 순수 "활성 게이트 개수"만 페널티가 된다.
+raw HI 카테고리 비용이 `4_hi_analysis/hi_profile/hi_timing_cost.json` 실측치로
+바뀌면서(stat이 diff/lfp보다 훨씬 비싸게 나옴 — 실측 알고리즘 복잡도 때문이지 "카테고리"
+자체의 문제가 아님, 논의 진행 중) 이 항을 잠깐 끄고 검증하기 위해 하위호환 토글로
+분리했다 — 예전엔 raw HI 비용 가중치가 스위치 없이 항상 켜져 있었다(프로젝트 최초
+커밋부터, git log -S"cost_vec" 확인).
 
 l0_norm_constant (docs/260915_RESULTS.md — L0 정규화 상수 confound 분리):
 _l0_penalty가 시나리오별 페널티 합을 model.n_scenarios(라벨ON=6, 라벨OFF=2)로
@@ -49,14 +51,14 @@ class SCRLoss(nn.Module):
         self,
         lambda_scen: float = 0.0,
         lambda_l0: float = 0.01,
-        lambda_shrink: float = 0.0,
         l0_norm_constant: int | None = None,
+        hi_cost_weighted: bool = False,
     ):
         super().__init__()
         self.lambda_scen = lambda_scen  # > 0 → CE 활성 (Phase 1 with probe_mlp)
         self.lambda_l0 = lambda_l0
-        self.lambda_shrink = lambda_shrink  # > 0 → scen_gates가 ShrinkageHardConcreteGate일 때만 의미 있음
         self.l0_norm_constant = l0_norm_constant  # None(기본)이면 n_scenarios로 나눔(기존과 동일)
+        self.hi_cost_weighted = hi_cost_weighted  # False(기본, 2026-09-19부터) → 균일 비용 1.0
 
         costs = get_hi_cost_vector("dis_hi")
         self.register_buffer("cost_vec", torch.tensor(costs, dtype=torch.float32))
@@ -78,15 +80,8 @@ class SCRLoss(nn.Module):
         if self.lambda_scen > 0 and getattr(model, "probe_mlp", None) is not None:
             ce = F.cross_entropy(outputs["level_logits"], batch["level"])
 
-        # shrinkage: model.scen_gates가 ShrinkageHardConcreteGate일 때만 실제 항이 붙음
-        shrink = torch.zeros(1, device=cap_pred.device).squeeze()
-        _shrink_fn = getattr(model.scen_gates, "shrinkage_penalty", None)
-        if self.lambda_shrink > 0 and _shrink_fn is not None:
-            shrink = _shrink_fn()
-
-        total = (mse + self.lambda_scen * ce + self.lambda_l0 * l0
-                 + self.lambda_shrink * shrink)
-        return {"total": total, "mse": mse, "ce": ce, "l0": l0, "shrink": shrink}
+        total = mse + self.lambda_scen * ce + self.lambda_l0 * l0
+        return {"total": total, "mse": mse, "ce": ce, "l0": l0}
 
     def _l0_penalty(self, model: nn.Module) -> torch.Tensor:
         """
@@ -110,10 +105,10 @@ class SCRLoss(nn.Module):
         """
         device = self.cost_vec.device
         penalty = torch.zeros(1, device=device)
+        ones = torch.ones_like(self.cost_vec)
+        eff_cost_vec = self.cost_vec if self.hi_cost_weighted else ones
 
         if not (model._fixed_probe and model._fixed_scen):
-            ones = torch.ones_like(self.cost_vec)
-
             # Probe gate probs per direction
             if not model._fixed_probe:
                 p_probe_ch  = model.charge_probe_gate.gate_prob()
@@ -141,20 +136,21 @@ class SCRLoss(nn.Module):
                     else:
                         p_scen = gate.gate_prob()
                     p_active = 1.0 - (1.0 - p_probe) * (1.0 - p_scen)
-                    raw_penalty = raw_penalty + (self.cost_vec * p_active).sum()
+                    raw_penalty = raw_penalty + (eff_cost_vec * p_active).sum()
                 norm = self.l0_norm_constant if self.l0_norm_constant is not None else _n_scen
                 penalty = penalty + raw_penalty / norm
             else:
                 # Only probe gates contribute
                 penalty = penalty + (
-                    (self.cost_vec * p_probe_ch).sum() +
-                    (self.cost_vec * p_probe_dis).sum()
+                    (eff_cost_vec * p_probe_ch).sum() +
+                    (eff_cost_vec * p_probe_dis).sum()
                 ).unsqueeze(0) / 2
 
         kernel_gates = getattr(model, "scen_kernel_gates", None)
         if kernel_gates is not None:
-            kernel_costs = getattr(model, "kernel_hi_costs", None)  # 2026-09-18: 커널별
-                # 멤버 raw HI 카테고리 비용 가중평균(None이면 기존처럼 균일 비용 1.0)
+            # 2026-09-19: hi_cost_weighted=False(기본)면 kernel_hi_costs가 있어도 무시하고
+            # 균일 비용 1.0 — raw HI 쪽과 토글을 맞춘다.
+            kernel_costs = getattr(model, "kernel_hi_costs", None) if self.hi_cost_weighted else None
             kernel_penalty = torch.zeros(1, device=device)
             for s, gate in enumerate(kernel_gates):
                 p = gate.gate_prob()

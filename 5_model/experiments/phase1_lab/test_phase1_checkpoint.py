@@ -89,7 +89,7 @@ from common.scenario import get_segmenter  # noqa: E402
 import train_scr as _base  # noqa: E402 (synergy group 로더 재사용)
 import test_scr as _tbase  # noqa: E402 (_resolve_device/_pick_rep_cells 재사용)
 from phase1_trainer_v2 import (  # noqa: E402 (중복 구현 금지)
-    _apply_kernel_features, _apply_combined_redundancy_raw, _build_redundancy_mask,
+    _apply_kernel_features, _build_redundancy_mask,
 )
 
 
@@ -127,19 +127,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", default=None,
                    help="기본값: <run-dir>/checkpoints/best_by_saturation.pt")
     p.add_argument("--interaction-json", default=None, dest="interaction_json",
-                   help="v4/v5(shared_gate) checkpoint 전용 — p1v2_summary.json에 기록돼 있으면 "
-                        "자동 적용되고(v5 이후), 안 돼 있으면(v4 등 구버전) 학습 때 준 "
+                   help="v4(shared_gate) checkpoint 전용 — p1v2_summary.json에 기록돼 있으면 "
+                        "자동 적용되고, 안 돼 있으면(구버전) 학습 때 준 "
                         "test_hi_scenario_interaction.py 산출물을 다시 지정해야 함")
-    p.add_argument("--specific-group-ids-json", default=None, dest="specific_group_ids_json",
-                   help="v5(그룹 게이팅) checkpoint 전용 — p1v2_summary.json에 기록돼 있으면 "
-                        "자동 적용됨. build_specific_component_groups.py 산출물")
-    p.add_argument("--shrinkage-gate", action="store_true", dest="shrinkage_gate_flag",
-                   help="scen_gates가 ShrinkageHardConcreteGate(shared_log_alpha + "
-                        "delta_log_alpha[s])로 저장된 checkpoint용 — p1v2_summary.json의 "
-                        "shrinkage_gate:true를 자동으로 읽어 보통은 안 줘도 되지만, summary.json이 "
-                        "없거나 오래된 run이면 명시적으로 필요. 안 맞으면 load_state_dict에서 "
-                        "scen_gates.{shared_log_alpha,delta_log_alpha} vs scen_gates.{0..5}.log_alpha "
-                        "키 불일치로 실패한다.")
+    p.add_argument("--kernel-features-pkl", default=None, dest="kernel_features_pkl",
+                   help="2026-09-19 추가 — p1v2_summary.json에 기록된 경로를 무시하고 이 값을 "
+                        "쓴다. 학습 후 산출물을 옮긴 경우(예: run_dir 재구성) summary.json의 "
+                        "기록이 낡아져 FileNotFoundError가 나는데, 그럴 때 직접 지정하는 용도 "
+                        "— 보통은 자동 탐지로 충분하니 안 줘도 됨.")
+    p.add_argument("--combined-redundancy-json", default=None, dest="combined_redundancy_json",
+                   help="2026-09-19 추가 — 위와 동일 이유의 오버라이드(kernel-features-pkl과 "
+                        "짝을 이루는 파일이라 보통 같이 옮겨졌을 것).")
     p.add_argument("--regression-model", default="mlp", dest="regression_model",
                    choices=["mlp", "transformer", "i_transformer", "resnet_tab", "ft_transformer"],
                    help="학습 때 --regression-model을 오버라이드했다면 동일하게 지정 "
@@ -206,8 +204,10 @@ def main() -> None:
         return resolved
 
     synergy_groups_json = _resolve_summary_path(summary.get("synergy_groups_json"))
-    kernel_features_pkl = _resolve_summary_path(summary.get("kernel_features_pkl"))
-    combined_redundancy_json = _resolve_summary_path(summary.get("combined_redundancy_json"))
+    kernel_features_pkl = (Path(args.kernel_features_pkl) if args.kernel_features_pkl
+                            else _resolve_summary_path(summary.get("kernel_features_pkl")))
+    combined_redundancy_json = (Path(args.combined_redundancy_json) if args.combined_redundancy_json
+                                 else _resolve_summary_path(summary.get("combined_redundancy_json")))
 
     ckpt_path = (Path(args.checkpoint) if args.checkpoint
                  else run_dir / "checkpoints" / "best_by_saturation.pt")
@@ -238,10 +238,12 @@ def main() -> None:
             combined_redundancy=combined_redundancy,
         )
     if combined_redundancy is not None:
-        n_masked = _apply_combined_redundancy_raw([train_ds, val_ds, test_ds], combined_redundancy, spec)
+        # 2026-09-21: 입력 레벨 nan_mask 이중 마스킹은 제거(phase1_trainer_v2.py와 동일 이유
+        # — probe_x가 그 nan_mask를 공유해서 분류기 정확도를 붕괴시키는 버그였음). 학습 때와
+        # 똑같이 게이트 레벨 redundancy_mask만 적용해야 체크포인트와 아키텍처가 일치한다.
         redundancy_mask = _build_redundancy_mask(combined_redundancy, spec)
         print(f"[test_p1] combined-redundancy-json 자동 적용(p1v2_summary.json): {combined_redundancy_json} "
-              f"(raw HI (scenario,HI) 조합 {n_masked}개를 nan_mask 0-강제 + 게이트 출력 0-강제)")
+              f"(게이트 출력 0-강제만 적용, {int((~redundancy_mask).sum().item())}개 (시나리오,HI) 조합 배제)")
 
     scen_group_ids = None
     if synergy_groups_json:
@@ -269,40 +271,12 @@ def main() -> None:
         print(f"[test_p1] interaction-json 적용: {interaction_json} "
               f"({n_shared}/{len(shared_hi_mask)}개 HI -> shared_gate)")
 
-    specific_group_ids_json = args.specific_group_ids_json or (
-        str(_resolve_summary_path(summary.get("specific_group_ids_json")))
-        if summary.get("specific_group_ids_json") else None
-    )
-    if specific_group_ids_json:
-        # v5: build_specific_component_groups.py 산출물 — phase1_trainer_v2.py와 동일한 로직
-        # (재정렬 없이 그대로 적용, seg_{s}_specific_group_ids는 이미 _specific_idx 순서와 일치).
-        spec_data = json.loads(Path(specific_group_ids_json).read_text(encoding="utf-8"))
-        n_specific_expected = int(shared_hi_mask.numel() - shared_hi_mask.sum().item())
-        if spec_data.get("n_specific") != n_specific_expected:
-            raise ValueError(
-                f"--specific-group-ids-json의 n_specific({spec_data.get('n_specific')})이 "
-                f"interaction_json에서 나온 specific 개수({n_specific_expected})와 다릅니다."
-            )
-        scen_group_ids = {
-            s: spec_data[f"seg_{s}_specific_group_ids"]
-            for s in range(spec.n_scenarios)
-            if f"seg_{s}_specific_group_ids" in spec_data
-        }
-        n_groups_total = sum(spec_data.get(f"seg_{s}_n_groups", 0) for s in range(spec.n_scenarios))
-        print(f"[test_p1] specific-group-ids-json 적용: {specific_group_ids_json} "
-              f"({len(scen_group_ids)}/{spec.n_scenarios}개 시나리오, 총 그룹 {n_groups_total}개)")
-
     lambda_scen = cfg.get("loss", {}).get("lambda_scen", 0.0)
     with_probe_mlp = lambda_scen > 0
     p1_model_cfg = {**cfg["model"], "regression_model": args.regression_model,
                      "with_raw_cnn": False, "with_raw_flat": False}
 
-    shrinkage_gate = args.shrinkage_gate_flag or bool(summary.get("shrinkage_gate", False))
-    if shrinkage_gate:
-        print(f"[test_p1] shrinkage_gate 적용(scen_gates -> ShrinkageHardConcreteGate)"
-              f"{' [p1v2_summary.json 자동감지]' if not args.shrinkage_gate_flag else ' [--shrinkage-gate]'}")
-
-    # 2026-09-17 안건2: p1v2_summary.json 자동감지(shrinkage_gate와 동일 패턴) — 학습 때
+    # 2026-09-17 안건2: p1v2_summary.json 자동감지 — 학습 때
     # --scen-gate-direction-only/--scenario-onehot-input을 줬으면 체크포인트 재구성 시에도
     # 반드시 같은 아키텍처(n_gate_groups/scenario_onehot)로 만들어야 load_state_dict가 맞는다.
     scen_gate_direction_only = bool(summary.get("scen_gate_direction_only", False))
@@ -320,7 +294,6 @@ def main() -> None:
         kernel_hi_counts=kernel_hi_counts,
         kernel_hi_costs=kernel_costs_by_scen,
         redundancy_mask=redundancy_mask,
-        shrinkage_gate=shrinkage_gate,
         n_gate_groups=(2 if scen_gate_direction_only else None),
         scenario_onehot=scenario_onehot_input,
     ).to(device)
@@ -367,6 +340,7 @@ def main() -> None:
     # 없어 한 모드만 그릴 수 있다 — 실배포 기준(hard)이 있으면 그쪽, 없으면 oracle.
     _curve_mode = "hard" if "hard" in modes else "oracle"
     evaluator._plot_capacity_curves(test_modes[_curve_mode]["_pred"])
+    _plot_hi_importance_ranking(run_dir, figures_dir, spec)
     print(f"[test_p1] 저장: {figures_dir}")
 
     # 2026-09-06: metrics/metrics.json 등은 기본으로 항상 저장(예전엔 --export-for-visualize
@@ -483,6 +457,139 @@ def _plot_error_heatmaps(pred_dict: dict, spec, figures_dir: Path, tag: str = "t
             out_path=figures_dir / f"error_heatmap_capacity_cycle{suffix}_{tag}.png",
             vmax=vmax,
         )
+
+
+_CATEGORY_COLORS = {
+    "stat":  "#1f77b4",
+    "diff":  "#ff7f0e",
+    "lfp":   "#2ca02c",
+    "morph": "#9467bd",
+}
+
+
+def _rank_scores(names: list[str], probs: list[float]) -> dict[str, float]:
+    """이름 목록을 gate_prob 내림차순으로 정렬해 rank 1(최상위)~N(최하위)을 매기고,
+    score = (N - rank + 1) / N 로 정규화한다(1위=1.0, 꼴찌=1/N). N이 시나리오/시드마다
+    달라도(커널 HI는 K_s가 제각각) 0~1 스케일로 비교 가능하게 하는 게 목적
+    (plot_kernel_group_recipe.py의 _category_of/_strip_seg_suffix와 같은 명명 규칙 재사용)."""
+    n = len(names)
+    order = sorted(range(n), key=lambda i: -probs[i])
+    scores = {}
+    for rank, i in enumerate(order, start=1):
+        scores[names[i]] = (n - rank + 1) / n
+    return scores
+
+
+def _plot_hi_importance_ranking(run_dir: Path, figures_dir: Path, spec) -> None:
+    """gates/regression_HIs.json(raw)·regression_kernel_HIs.json(kernel)의 시나리오별
+    gate_prob 랭킹에 선형가중치(1위=1.0~꼴찌=1/N, 시나리오/커널폭 무관 0~1 정규화)를 매겨
+    "평균(raw) / 자체값(kernel) 중요도 점수"를 계산하고, HI 전체를 이 점수로 정렬한
+    가로 막대 2개(raw/kernel)를 그린다.
+
+    raw HI는 전 시나리오에 공통 카탈로그(N_HI개)로 존재하므로, 시나리오 접미사를 뗀
+    "개념 이름"(예: stat_v_mean_cw)별로 각 시나리오에서 받은 점수를 평균한다 — 결과는
+    "이 HI가 시나리오를 막론하고 평균적으로 얼마나 상위권에 뽑히는가"가 된다.
+    kernel HI는 이름 자체가 시나리오 전용(kernel_{seg}_g{gi})이라 여러 시나리오에
+    걸쳐 존재하지 않으므로 평균이 아니라 자기 시나리오 내 점수를 그대로 쓴다 —
+    막대는 색으로 소속 시나리오를 구분해 한 그림에 모아 랭킹만 매긴다.
+
+    2026-09-21 신규(사용자 요청) — 커널 게이트가 시나리오별 own-scenario 폭(K_s)으로
+    좁혀져 있어(scr_model.py _apply_scen_kernel_gate) 원본 커널 후보 수가 시나리오/시드마다
+    다른데, rank/N 정규화라 그 폭 차이와 무관하게 직접 비교 가능하다."""
+    if not _HAS_MPL:
+        return
+    for _font in ("Malgun Gothic", "AppleGothic", "NanumGothic"):
+        if _font in {f.name for f in matplotlib.font_manager.fontManager.ttflist}:
+            plt.rcParams["font.family"] = _font
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+    raw_path = run_dir / "gates" / "regression_HIs.json"
+    kernel_path = run_dir / "gates" / "regression_kernel_HIs.json"
+    if not raw_path.exists():
+        print(f"[test_p1] {raw_path} 없음 — HI 중요도 랭킹 플랏 스킵")
+        return
+    raw_json = json.loads(raw_path.read_text(encoding="utf-8"))
+
+    # raw: 시나리오 접미사를 뗀 개념 이름별로 시나리오 간 점수를 모아 평균
+    raw_scores_by_concept: dict[str, list[float]] = {}
+    raw_category: dict[str, str] = {}
+    for s in range(spec.n_scenarios):
+        seg_name = raw_json.get(f"seg_{s}_seg_name")
+        names = raw_json.get(f"seg_{s}_names")
+        probs = raw_json.get(f"seg_{s}_probs")
+        if not names:
+            continue
+        suffix = f"_{seg_name}"
+        concepts = [n[: -len(suffix)] if n.endswith(suffix) else n for n in names]
+        scores = _rank_scores(concepts, probs)
+        for c, sc in scores.items():
+            raw_scores_by_concept.setdefault(c, []).append(sc)
+            raw_category.setdefault(c, c.split("_", 1)[0] if "_" in c else c)
+    raw_avg = {c: sum(v) / len(v) for c, v in raw_scores_by_concept.items()}
+    raw_sorted = sorted(raw_avg.items(), key=lambda kv: -kv[1])
+
+    # kernel: 이름이 이미 시나리오 전용이라 시나리오별 점수를 그대로 모아 합침
+    kernel_sorted: list[tuple[str, float, str]] = []  # (name, score, seg_name)
+    if kernel_path.exists():
+        kernel_json = json.loads(kernel_path.read_text(encoding="utf-8"))
+        for s in range(spec.n_scenarios):
+            seg_name = kernel_json.get(f"seg_{s}_seg_name")
+            names = kernel_json.get(f"seg_{s}_names")
+            probs = kernel_json.get(f"seg_{s}_probs")
+            if not names:
+                continue
+            scores = _rank_scores(names, probs)
+            kernel_sorted.extend((n, scores[n], seg_name) for n in names)
+        kernel_sorted.sort(key=lambda t: -t[1])
+
+    seg_colors = {name: plt.get_cmap("tab10")(i % 10)
+                  for i, name in enumerate(spec.scenario_names)}
+
+    n_raw = len(raw_sorted)
+    n_ker = len(kernel_sorted)
+    fig, (ax_raw, ax_ker) = plt.subplots(
+        1, 2, figsize=(13, max(4.0, 0.16 * max(n_raw, n_ker, 1))),
+    )
+
+    if raw_sorted:
+        y = np.arange(n_raw)
+        vals = [v for _, v in raw_sorted]
+        colors = [_CATEGORY_COLORS.get(raw_category[c], "#888888") for c, _ in raw_sorted]
+        ax_raw.barh(y, vals, color=colors, height=0.8)
+        ax_raw.set_yticks(y)
+        ax_raw.set_yticklabels([c for c, _ in raw_sorted], fontsize=6.5)
+        ax_raw.invert_yaxis()
+        ax_raw.set_xlabel("평균 중요도 점수 (시나리오 평균, rank/N 정규화)")
+        ax_raw.set_title(f"raw HI (n={n_raw}, 시나리오 {spec.n_scenarios}개 평균)", fontsize=10.5, fontweight="bold")
+        cat_handles = [plt.Line2D([0], [0], marker="s", color="w", markerfacecolor=col, markersize=8, label=cat)
+                       for cat, col in _CATEGORY_COLORS.items()]
+        ax_raw.legend(handles=cat_handles, loc="lower right", fontsize=7.5, title="카테고리", title_fontsize=7.5)
+    else:
+        ax_raw.axis("off")
+
+    if kernel_sorted:
+        y = np.arange(n_ker)
+        vals = [v for _, v, _ in kernel_sorted]
+        colors = [seg_colors[seg] for _, _, seg in kernel_sorted]
+        ax_ker.barh(y, vals, color=colors, height=0.8)
+        ax_ker.set_yticks(y)
+        ax_ker.set_yticklabels([n for n, _, _ in kernel_sorted], fontsize=6)
+        ax_ker.invert_yaxis()
+        ax_ker.set_xlabel("중요도 점수 (자기 시나리오 내 rank/N 정규화)")
+        ax_ker.set_title(f"kernel HI (n={n_ker}, 시나리오 {spec.n_scenarios}개 전부 모음)", fontsize=10.5, fontweight="bold")
+        seg_handles = [plt.Line2D([0], [0], marker="s", color="w", markerfacecolor=col, markersize=8, label=name)
+                       for name, col in seg_colors.items()]
+        ax_ker.legend(handles=seg_handles, loc="lower right", fontsize=7.5, title="시나리오", title_fontsize=7.5)
+    else:
+        ax_ker.axis("off")
+        ax_ker.set_title("kernel HI (없음)", fontsize=10.5)
+
+    fig.suptitle(f"HI 중요도 랭킹 — {run_dir.name}", fontsize=12.5, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    out_path = figures_dir / "hi_importance_ranking.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[test_p1] 저장: {out_path}")
 
 
 def _export_for_visualize(run_dir: Path, evaluator: SCREvaluator, test_modes: dict, spec) -> None:

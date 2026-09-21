@@ -117,7 +117,7 @@ def _parse_args() -> argparse.Namespace:
                         "가장 상관 높았던 survivor에 사후 귀속). 이러면 그룹 성장 단계에 진입하는 "
                         "survivor들끼리는 서로 |corr|<threshold가 항상 보장돼 그룹 간 다중공선성이 "
                         "원리적으로 발생할 수 없다(구 버전의 순서 의존적 '브릿지 HI' 문제 해소). "
-                        "기본값 꺼짐 = 기존(v0/v1/v2) 동작과 100% 동일.")
+                        "기본값 꺼짐 = 기존(v0/v1/v2) 동작과 100%% 동일.")
     p.add_argument("--shuffle-from", default=None, dest="shuffle_from",
                    help="v-ctrl 전용: 이 경로의 synergy_groups_*.json이 가진 시나리오별 "
                         "그룹 크기 분포를 그대로 두고, 멤버만 무작위로 재배정한다 — "
@@ -127,6 +127,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--shuffle-seed", type=int, default=42, dest="shuffle_seed",
                    help="--shuffle-from 전용 무작위 배정 시드")
     p.add_argument("--tag", required=True)
+    p.add_argument("--out-dir", default=None, dest="out_dir",
+                   help="산출물 저장 위치(기본: results/) — run_pipeline.py가 Step 9 학습 "
+                        "run 폴더로 넘길 때 씀(2026-09-19).")
     return p.parse_args()
 
 
@@ -441,8 +444,9 @@ def main() -> None:
             f"(2개 이상 묶인 그룹 {n_multi}개, 최대크기 {max(sizes)}, 평균크기 {np.mean(sizes):.2f})"
         )
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"synergy_groups_{args.tag}.json"
+    out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"synergy_groups_{args.tag}.json"
     out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[groups] 저장: {out_path}")
 

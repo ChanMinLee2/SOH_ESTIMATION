@@ -144,10 +144,19 @@ def _parse_args() -> argparse.Namespace:
                     help="v3 전용: 커널 예측값을 자기 그룹의 raw 멤버로 조건화한 편상관계수가 "
                          "이 값 미만이면 그 커널 후보를 버린다(raw로 이미 설명되는 걸 "
                          "커널로 한 번 더 만든 것에 불과하다는 뜻이라 raw-커널 간 중복으로 "
-                         "간주). 기본 None=필터 비활성(기존 v1/v2 동작과 100% 동일). "
+                         "간주). 기본 None=필터 비활성(기존 v1/v2 동작과 100%% 동일). "
                          "build_synergy_groups.py의 그룹 성장 문턱(0.02)을 그대로 재사용해도 "
                          "되고 별도 값을 줘도 됨 — 이 값 자체가 별도로 튜닝된 적은 없음.")
+    p.add_argument("--combined-redundancy-threshold", type=float, default=0.95,
+                    dest="combined_redundancy_threshold",
+                    help="3차(결합 raw+kernel, 시나리오별) 다중공선성 배제 기준(v4 요구사항2, "
+                         "2026-09-18) — fig3(hi_design_rationale)/redundancy_gate_resolution.py와 "
+                         "동일 관례로 기본 0.95. 2026-09-19까지는 하드코딩된 모듈 상수였다가 "
+                         "--redundancy-threshold/--min-raw-partial-corr처럼 CLI로 노출.")
     p.add_argument("--tag", required=True)
+    p.add_argument("--out-dir", default=None, dest="out_dir",
+                    help="산출물 저장 위치(기본: results/) — run_pipeline.py가 Step 9 학습 "
+                         "run 폴더로 넘길 때 씀(2026-09-19).")
     return p.parse_args()
 
 
@@ -251,6 +260,7 @@ def main() -> None:
     from utils.hi_schema import get_hi_cost_vector
 
     args = _parse_args()
+    out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
     x_all, y_all, scen_idx_all, spec, names_by_seg = _load_train_split(args)
     # raw HI 카테고리 비용(stat/diff/lfp/morph) — seg 이름과 무관하게 순서/값이 동일하므로
     # 하나만 구해서 재사용(get_hi_cost_vector는 접두 seg별로 컬럼 "이름"만 다르고 카테고리
@@ -415,7 +425,9 @@ def main() -> None:
     # 실제 반영(raw는 nan_mask, kernel은 x_kernel 0-강제)은 phase1_trainer_v2.py
     # --combined-redundancy-json이 담당 — scr_model.py는 무변경.
     # ------------------------------------------------------------------
-    COMBINED_REDUNDANCY_THRESHOLD = 0.95  # fig3(hi_design_rationale)/redundancy_gate_resolution.py와 동일 관례
+    COMBINED_REDUNDANCY_THRESHOLD = args.combined_redundancy_threshold  # 기본 0.95,
+        # fig3(hi_design_rationale)/redundancy_gate_resolution.py와 동일 관례 —
+        # 2026-09-19부터 --combined-redundancy-threshold로 CLI 노출(예전엔 하드코딩)
     n_raw = x_all.shape[1]
     combined_redundancy: dict[str, dict] = {}
     for s, seg_name in enumerate(spec.scenario_names):
@@ -472,8 +484,9 @@ def main() -> None:
             "n_edges": len(edges),
         }
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     combined_redundancy_out_path = (
-        RESULTS_DIR / f"kernel_group_features_{args.tag}_combined_redundancy.json"
+        out_dir / f"kernel_group_features_{args.tag}_combined_redundancy.json"
     )
     combined_redundancy_out_path.write_text(
         json.dumps({"tag": args.tag, "threshold": COMBINED_REDUNDANCY_THRESHOLD,
@@ -486,8 +499,7 @@ def main() -> None:
           f"raw {n_removed_raw_total}개/kernel {n_removed_kernel_total}개 제거 대상 "
           f"-> {combined_redundancy_out_path}")
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"kernel_group_features_{args.tag}.pkl"
+    out_path = out_dir / f"kernel_group_features_{args.tag}.pkl"
     artifact = {
         "tag": args.tag,
         "n_features": len(final),
@@ -506,7 +518,7 @@ def main() -> None:
 
     # plot_kernel_rejected.py용 — 어떤 HI 조합(그룹)이 왜 최종 커널에서 빠졌는지 별도 저장
     # (raw_conditioned_filter/kernel_kernel_dedup/max_features_quota 3가지 사유).
-    rejected_out_path = RESULTS_DIR / f"kernel_group_features_{args.tag}_rejected.json"
+    rejected_out_path = out_dir / f"kernel_group_features_{args.tag}_rejected.json"
     rejected_out_path.write_text(
         json.dumps({"tag": args.tag, "n_rejected": len(rejected), "rejected": rejected},
                    indent=2, ensure_ascii=False),

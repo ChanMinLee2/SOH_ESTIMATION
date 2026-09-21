@@ -61,7 +61,7 @@ import numpy as np
 import torch
 
 from utils.io_utils import load_config, save_config  # noqa: E402
-from utils.hi_schema import N_HI, get_hi_cols_for_seg  # noqa: E402
+from utils.hi_schema import N_HI, get_hi_cols_for_seg, EXCLUDE_STAT_LEAK, EXCLUDE_DQDV_LEAK  # noqa: E402
 from utils.metrics import rmse as _rmse, r2 as _r2  # noqa: E402
 from utils.tqdm_utils import trange, write as tqdm_write  # noqa: E402
 from datasets.segment_dataset import build_datasets, FastTensorLoader  # noqa: E402
@@ -163,42 +163,27 @@ def _parse_args() -> argparse.Namespace:
                         "--kernel-features-pkl 없이는 줄 수 없음(커널 쪽 산출물이 이 파일을 만드는 "
                         "선행 단계라 raw 전용으로만 쓰는 경우는 아직 미지원).")
     p.add_argument("--tag", required=True)
+    p.add_argument("--output-dir", default=None, dest="output_dir",
+                   help="run 산출물(gates/checkpoints/logs/config.yaml 등)을 저장할 폴더를 "
+                        "직접 지정 — 주어지면 이 경로를 그대로 쓰고, RESULTS_DIR 밑에 "
+                        "{timestamp}_p1v2_{tag}_seed{seed} 폴더를 새로 만들지 않는다. "
+                        "run_pipeline.py가 Step 6~8(상호작용/시너지/커널) 산출물과 같은 "
+                        "폴더에 학습 결과를 모으려고 씀(2026-09-19) — 단독 실행 시 기본"
+                        "(미지정)이면 기존과 100% 동일하게 타임스탬프 폴더를 새로 만든다.")
     p.add_argument("--lambda-l0-override", type=float, default=None, dest="lambda_l0_override",
                    help="loss.lambda_l0을 이 값으로 강제 고정(lambda_l0_auto/yaml 값 무시, 최우선순위). "
                         "lambda_l0 정규화 경로 스윕 실험(lambda_sweep.py) 전용 — 평소 실행에서는 "
-                        "주지 않으면 기존 동작(auto 또는 yaml 값)과 100% 동일.")
+                        "주지 않으면 기존 동작(auto 또는 yaml 값)과 100%% 동일.")
     p.add_argument("--interaction-json", default=None, dest="interaction_json",
                    help="test_hi_scenario_interaction.py 산출물 경로(v4). significant=True인 "
                         "HI만 기존 scen_gates(시나리오별)로 남기고, 나머지는 새 shared_gate "
-                        "1개로 통합한다. --synergy-groups-json(v0의 64폭 그룹)과는 동시 사용"
-                        "불가 — --specific-group-ids-json(v5, 39폭 그룹)과는 함께 쓴다.")
-    p.add_argument("--specific-group-ids-json", default=None, dest="specific_group_ids_json",
-                   help="v5 전용: build_specific_component_groups.py 산출물. --interaction-json으로 "
-                        "좁혀진 특이(specific) HI 폭 안에서, scen_gates를 연결요소 기준 "
-                        "GroupedHardConcreteGate로 학습한다(docs/260901_V5_DESIGN.md). "
-                        "--interaction-json과 반드시 함께 줘야 하고, --synergy-groups-json/"
-                        "--kernel-features-pkl과는 각각의 기존 규칙을 그대로 따른다(전자는 "
-                        "상호배타, 후자는 v5도 v3 커널을 그대로 쓰므로 함께 줌).")
+                        "1개로 통합한다. --synergy-groups-json(v0의 64폭 그룹)과는 동시 사용 불가.")
     p.add_argument("--l0-warmup-epochs-override", type=int, default=None,
                    dest="l0_warmup_epochs_override",
                    help="loss.lambda_l0_warmup_epochs을 이 값으로 강제 고정(yaml 값 무시). "
                         "warmup epoch 스위핑 실험(docs/260825_RESULTS.md) 전용 — 평소 실행에서는 "
-                        "주지 않으면 기존 동작(yaml 값, 기본 50)과 100% 동일. training.warmup_epochs"
+                        "주지 않으면 기존 동작(yaml 값, 기본 50)과 100%% 동일. training.warmup_epochs"
                         "(learning rate warmup, 별개 값)에는 영향 없음.")
-    p.add_argument("--shrinkage-gate", action="store_true", dest="shrinkage_gate",
-                   help="docs/260909_RESULTS.md §6-5(e) 파편화 대응책 ① — scen_gates를 "
-                        "시나리오별 독립 HardConcreteGate 대신 ShrinkageHardConcreteGate 뱅크로 "
-                        "학습(shared_log_alpha + delta_log_alpha[s], 전자는 전체 N, 후자는 "
-                        "자기 시나리오만으로 학습되고 --lambda-shrink로 0쪽 정칙화됨). "
-                        "--synergy-groups-json/--specific-group-ids-json(그룹 계층 게이팅, HI 축 "
-                        "DOF 축소)과는 동시 사용 불가(scr_model.py에서 검증) — --shared-hi-mask 값을 "
-                        "만드는 --interaction-json과는 함께 쓸 수 있음. 기본 False면 기존과 동일.")
-    p.add_argument("--lambda-shrink", type=float, default=0.0, dest="lambda_shrink",
-                   help="--shrinkage-gate 전용: delta_log_alpha 정칙화 강도. 0(기본)이면 "
-                        "--shrinkage-gate를 켜도 시나리오별 편차에 아무 벌점이 없어 사실상 "
-                        "기존 독립 게이트와 동등(shared_log_alpha가 있으나 마나 한 재매개변수화만 "
-                        "됨) — 실질적인 shrinkage 효과를 보려면 양수 값 필요. --shrinkage-gate "
-                        "없이 주면 무시됨(경고만 출력).")
     p.add_argument("--l0-norm-constant", type=int, default=None, dest="l0_norm_constant",
                    help="docs/260915_RESULTS.md — scr_loss.py의 _l0_penalty가 시나리오별 "
                         "페널티 합을 n_scenarios로 나누는 것을, n_scenarios 대신 이 고정값으로 "
@@ -206,19 +191,28 @@ def _parse_args() -> argparse.Namespace:
                         "정규화 강도 confound를 분리하는 대조군 전용 — 예: rawonly(라벨ON, "
                         "원래 6으로 나눔)에 --l0-norm-constant 2를 주면 noscen(라벨OFF, "
                         "원래 2로 나눔)과 동일한 정규화 강도로 맞출 수 있음. 미지정(기본)이면 "
-                        "기존과 100% 동일 동작.")
+                        "기존과 100%% 동일 동작.")
+    p.add_argument("--hi-cost-weighted-l0", action="store_true", dest="hi_cost_weighted_l0",
+                   help="2026-09-19: L0 페널티에 HI 카테고리별 계산비용(stat/diff/lfp/morph, "
+                        "utils/hi_schema.py::CATEGORY_COSTS)을 가중치로 곱한다. 꺼져 있으면(기본) "
+                        "raw/커널 HI 전부 균일 비용 1.0 — 순수 '활성 게이트 개수'만 페널티가 된다. "
+                        "raw HI 카테고리 비용을 4_hi_analysis/hi_profile/hi_timing_cost.json 실측치로 "
+                        "바꾸면서(stat이 diff/lfp보다 훨씬 비싸게 나옴) 이 항의 영향을 검증하려고 "
+                        "잠깐 끄는 토글로 분리했다 — 예전엔(2026-09-19 이전) raw HI 비용 가중치가 "
+                        "스위치 없이 항상 켜져 있었다(프로젝트 최초 커밋부터).")
     p.add_argument("--val-rmse-epsilon", type=float, default=0.0005, dest="val_rmse_epsilon",
-                   help="2026-09-18(체크포인트 선택 기준 변경): val_rmse가 이 값보다 더 좋아져야 "
-                        "'유의미하게 개선'으로 보고 그 epoch을 채택한다 — 개선폭이 epsilon 이내면 "
-                        "(사실상 동률) gate_saturation(sat)이 더 낮은 쪽을 대신 택한다(예전 "
-                        "기준은 반대로 sat이 1순위, val_rmse가 동률 tie-break였음 — 2026-09-04 "
-                        "결정을 뒤집음). 기본값 0.0005는 p1v4_noscen_gatefix_l0fix_seed42 "
-                        "run의 L0 완전 램프 후 구간(epoch 107~206) val_rmse 표준편차 실측치"
-                        "(~0.000246)의 약 2배 — epoch-to-epoch 노이즈보다 뚜렷하게 큰 개선만 "
-                        "'진짜 개선'으로 인정하려는 값. 너무 작으면(예: 1e-5, 노이즈 표준편차의 "
-                        "1/25) 거의 항상 val_rmse만으로 결정돼 sat 기준이 사실상 죽은 코드가 된다"
-                        "— 실행 조건이 다르면(다른 축/lambda_l0) 노이즈 스케일도 다를 수 있으니 "
-                        "log_path의 val_rmse 표준편차를 보고 필요시 조정할 것.")
+                   help="2026-09-18(체크포인트 선택 기준 변경): val_rmse가 best보다 이 값 "
+                        "'이상' 좋아지면 그 epoch을 '진짜 개선'으로 채택한다. 그게 아니면(개선폭이 "
+                        "epsilon 미만이거나 오히려 나빠져도) gate_saturation(sat)이 best보다 "
+                        "낮은 epoch을 대신 채택한다 — sat 비교에 val_rmse 쪽 상한(동률 밴드)은 "
+                        "따로 없음, 즉 val_rmse가 다소 나빠져도 sat이 새로 낮아졌으면 채택된다"
+                        "(예전 기준은 반대로 sat이 1순위, val_rmse가 동률 tie-break였음 — "
+                        "2026-09-04 결정을 뒤집음). 기본값 0.0005는 "
+                        "p1v4_noscen_gatefix_l0fix_seed42 run의 L0 완전 램프 후 구간"
+                        "(epoch 107~206) val_rmse 표준편차 실측치(~0.000246)의 약 2배 — "
+                        "epoch-to-epoch 노이즈보다 뚜렷하게 큰 개선만 '진짜 개선'으로 "
+                        "인정하려는 값. 실행 조건이 다르면(다른 축/lambda_l0) 노이즈 스케일도 "
+                        "다를 수 있으니 log_path의 val_rmse 표준편차를 보고 필요시 조정할 것.")
     p.add_argument("--scen-gate-direction-only", action="store_true",
                    dest="scen_gate_direction_only",
                    help="docs/260917_REPORT.md 안건2 — scen_gates(+scen_kernel_gates)의 "
@@ -226,9 +220,9 @@ def _parse_args() -> argparse.Namespace:
                         "spec.scenario_to_dir_class(sid)[0]로 묶어서 라우팅한다(scr_model.py의 "
                         "n_gate_groups). rawonly(라벨 6개)를 noscen(라벨 2개)과 동일한 게이트 "
                         "파편화 프로필로 맞추면서, --scenario-onehot-input과 짝지어 라벨 정보를 "
-                        "게이트가 아니라 원샷 입력으로만 전달하는 실험에 사용. --synergy-groups-json/"
-                        "--specific-group-ids-json(전역 scenario_idx로 키된 그룹 게이팅)과는 "
-                        "동시 사용 불가(scr_model.py에서 검증). 기본 False면 기존과 동일.")
+                        "게이트가 아니라 원샷 입력으로만 전달하는 실험에 사용. --synergy-groups-json"
+                        "(전역 scenario_idx로 키된 그룹 게이팅)과는 동시 사용 불가"
+                        "(scr_model.py에서 검증). 기본 False면 기존과 동일.")
     p.add_argument("--scenario-onehot-input", action="store_true",
                    dest="scenario_onehot_input",
                    help="docs/260917_REPORT.md 안건2 — 게이트 라우팅과 완전히 별개로, "
@@ -249,10 +243,9 @@ def _parse_args() -> argparse.Namespace:
                         "상태는 그대로 이어짐) — (3) epoch>=T부터는 L0 warmup/ramp와 BETA anneal이 "
                         "'T를 새 0으로' 삼아 처음부터 다시 시작한다(체크포인트 후보 판정 기준 "
                         "epoch>=l0_fully_ramped_ep도 T만큼 밀림). --scen-gate-direction-only/"
-                        "--shrinkage-gate/--interaction-json/--synergy-groups-json/"
-                        "--specific-group-ids-json과는 동시 사용 불가(branch_scen_gates()가 "
-                        "shared_hi_mask 없는 일반 HardConcreteGate 단일 게이트를 가정). "
-                        "기본 None이면 기존과 100% 동일 동작.")
+                        "--interaction-json/--synergy-groups-json과는 동시 사용 불가"
+                        "(branch_scen_gates()가 shared_hi_mask 없는 일반 HardConcreteGate 단일 "
+                        "게이트를 가정). 기본 None이면 기존과 100%% 동일 동작.")
     args = p.parse_args()
     if args.synergy_groups_json and args.kernel_features_pkl:
         p.error("--synergy-groups-json과 --kernel-features-pkl은 동시에 줄 수 없습니다 "
@@ -263,22 +256,10 @@ def _parse_args() -> argparse.Namespace:
     if args.interaction_json and args.synergy_groups_json:
         p.error("--interaction-json과 --synergy-groups-json은 동시에 줄 수 없습니다 "
                 "(--synergy-groups-json은 64폭 전체 기준이라 --interaction-json이 좁히는 "
-                "specific 폭과 맞지 않음 — 그룹 게이팅을 같이 쓰려면 --specific-group-ids-json 사용)")
-    if args.specific_group_ids_json and not args.interaction_json:
-        p.error("--specific-group-ids-json은 --interaction-json 없이 줄 수 없습니다 "
-                "(specific 폭 자체가 --interaction-json의 shared/specific 분류로 정해짐)")
-    if args.specific_group_ids_json and args.synergy_groups_json:
-        p.error("--specific-group-ids-json과 --synergy-groups-json은 동시에 줄 수 없습니다 "
-                "(둘 다 scen_group_ids를 채우는 서로 다른 메커니즘 — 하나만 선택)")
-    if args.shrinkage_gate and (args.synergy_groups_json or args.specific_group_ids_json):
-        p.error("--shrinkage-gate와 --synergy-groups-json/--specific-group-ids-json은 "
-                "동시에 줄 수 없습니다 (scr_model.py의 shrinkage_gate/scen_group_ids "
-                "상호배타 검증과 동일)")
-    if args.lambda_shrink > 0 and not args.shrinkage_gate:
-        print("[p1v2] 경고: --lambda-shrink가 주어졌지만 --shrinkage-gate가 꺼져 있어 무시됩니다.")
-    if args.scen_gate_direction_only and (args.synergy_groups_json or args.specific_group_ids_json):
-        p.error("--scen-gate-direction-only와 --synergy-groups-json/--specific-group-ids-json은 "
-                "동시에 줄 수 없습니다 (scr_model.py의 n_gate_groups/scen_group_ids 상호배타 검증과 동일)")
+                "specific 폭과 맞지 않음)")
+    if args.scen_gate_direction_only and args.synergy_groups_json:
+        p.error("--scen-gate-direction-only와 --synergy-groups-json은 동시에 줄 수 없습니다 "
+                "(scr_model.py의 n_gate_groups/scen_group_ids 상호배타 검증과 동일)")
     if args.scen_gate_direction_only and args.kernel_features_pkl:
         p.error("--scen-gate-direction-only와 --kernel-features-pkl은 동시에 줄 수 없습니다 "
                 "(2026-09-18부터 커널 게이트가 시나리오별 K_s 폭으로 고정돼 n_gate_groups의 "
@@ -293,9 +274,9 @@ def _parse_args() -> argparse.Namespace:
         if args.scen_gate_direction_only:
             p.error("--warmstart-branch-epoch과 --scen-gate-direction-only는 동시에 줄 수 없습니다 "
                     "(전자는 n_gate_groups=1로 시작해 도중에 6으로 분기, 후자는 계속 n_gate_groups=2 고정)")
-        if args.shrinkage_gate or args.interaction_json or args.synergy_groups_json or args.specific_group_ids_json:
-            p.error("--warmstart-branch-epoch은 --shrinkage-gate/--interaction-json/"
-                    "--synergy-groups-json/--specific-group-ids-json과 동시에 줄 수 없습니다 "
+        if args.interaction_json or args.synergy_groups_json:
+            p.error("--warmstart-branch-epoch은 --interaction-json/--synergy-groups-json과 "
+                    "동시에 줄 수 없습니다 "
                     "(branch_scen_gates()가 shared_hi_mask 없는 일반 HardConcreteGate 단일 게이트를 가정)")
     return args
 
@@ -326,8 +307,9 @@ def _apply_kernel_features(
     combined_redundancy: build_kernel_group_features.py의 3차(결합 raw+kernel, 시나리오별)
     다중공선성 배제 결과 dict({seg_name: {"removed_kernel_names": [...], ...}}, 요구사항2,
     --combined-redundancy-json). 주어지면 그 시나리오의 로컬 목록에서 해당 커널을 아예
-    제외한다(그만큼 K_s가 줄어듦 — raw HI 쪽 배제는 이 함수가 아니라
-    _apply_combined_redundancy_raw()가 nan_mask에 적용).
+    제외한다(그만큼 K_s가 줄어듦 — raw HI 쪽 배제는 이 함수가 아니라 _build_redundancy_mask()가
+    만드는 게이트 레벨 redundancy_mask가 담당, 2026-09-21부터 입력 레벨 nan_mask 이중
+    마스킹은 분류기 오염 버그로 제거됨).
 
     train으로만 fit된 모델을 val/test에도 그대로 적용(predict만)하고, 정규화도 train
     mean/std를 val/test에 그대로 적용(fit 안 함)하므로 누수는 없다.
@@ -398,9 +380,14 @@ def _build_redundancy_mask(combined_redundancy: dict, spec) -> torch.Tensor:
     쪽을 SCRModel(redundancy_mask=...)용 bool 텐서 (n_scenarios, N_HI)로 만든다(2026-09-18,
     요구사항2를 raw HI에도 게이트 구조로 강제 — scr_model.py의 _apply_scen_gate가 이 마스크를
     scen_gates 출력에 곱해 False 위치는 log_alpha와 무관하게 항상 0으로 만든다). True=허용,
-    False=그 시나리오에서 배제된 raw HI. 아래 _apply_combined_redundancy_raw()의 nan_mask
-    0-마스킹(입력 자체를 상수로 만듦)과 독립적으로 함께 적용됨 — 서로 방해 없음, 둘 다 같은
-    결론(그 HI는 이 시나리오에서 안 쓰인다)을 다른 층위(입력/게이트)에서 강제하는 것뿐."""
+    False=그 시나리오에서 배제된 raw HI.
+
+    2026-09-21: 이전엔 입력 레벨에서도 nan_mask를 0으로 이중 강제하는 함수
+    (_apply_combined_redundancy_raw)를 같이 썼는데, forward()가 그 nan_mask로 마스킹한
+    x를 probe_x(분류기 입력)에도 그대로 재사용해서 분류기 정확도가 붕괴하는 버그였다
+    (실측: 이 로직 추가 전 98.65% → 추가 후 36~67%). 이 게이트 레벨 마스크 하나만으로
+    scen_x 쪽 정확성은 로그 알파와 무관하게 이미 완전히 보장되므로, 입력 레벨 이중
+    마스킹은 제거하고 이 함수만 남겼다."""
     by_scenario = combined_redundancy.get("by_scenario", combined_redundancy)
     seg_name_to_idx = {n: i for i, n in enumerate(spec.scenario_names)}
     mask = torch.ones(spec.n_scenarios, N_HI, dtype=torch.bool)
@@ -411,33 +398,6 @@ def _build_redundancy_mask(combined_redundancy: dict, spec) -> torch.Tensor:
         s = seg_name_to_idx[seg_name]
         mask[s, removed_raw_idx] = False
     return mask
-
-
-def _apply_combined_redundancy_raw(datasets: list, combined_redundancy: dict, spec) -> int:
-    """build_kernel_group_features.py의 3차 결합(raw+kernel) 다중공선성 배제 결과 중
-    raw HI 쪽을, 입력 레벨에서도 마스킹한다(요구사항2) — 그 시나리오 행의 nan_mask를 해당
-    raw HI 위치에서 0으로 강제한다(이미 forward()가 x = x_hi * nan_mask로 0-마스킹하므로,
-    "이 시나리오에서 그 HI가 존재하지 않는 것"과 회귀 관점에서 완전히 동등 — NaN 처리와
-    동일한 기존 메커니즘 재사용). 2026-09-18부터 _build_redundancy_mask()의 게이트 레벨
-    강제(로그 알파와 무관하게 출력 자체가 0)와 함께 쓴다 — 이쪽은 입력 레벨 방어.
-    반환값: 실제로 0-강제된 (scenario, raw_hi) 조합 총 개수."""
-    by_scenario = combined_redundancy.get("by_scenario", combined_redundancy)
-    seg_name_to_idx = {n: i for i, n in enumerate(spec.scenario_names)}
-    n_total = 0
-    for ds in datasets:
-        scen_idx_np = ds.scen_idx.numpy()
-        for seg_name, info in by_scenario.items():
-            removed_raw_idx = info.get("removed_raw_idx", [])
-            if not removed_raw_idx:
-                continue
-            s = seg_name_to_idx[seg_name]
-            row_idx = torch.from_numpy(np.nonzero(scen_idx_np == s)[0])
-            if row_idx.numel() == 0:
-                continue
-            for hi_idx in removed_raw_idx:
-                ds.nan_mask[row_idx, hi_idx] = 0.0
-            n_total += row_idx.numel() * len(removed_raw_idx)
-    return n_total
 
 
 def _gate_saturation_fraction(model: SCRModel) -> float:
@@ -552,13 +512,16 @@ def main() -> None:
             combined_redundancy=combined_redundancy,
         )
     if combined_redundancy is not None:
-        n_masked = _apply_combined_redundancy_raw(
-            [train_ds, val_ds, _test_ds], combined_redundancy, spec,
-        )
+        # 2026-09-21: 입력 레벨 nan_mask 이중 마스킹(_apply_combined_redundancy_raw)은
+        # 삭제 — forward()가 x = x_hi * nan_mask를 probe_x/scen_x 양쪽에 공유해서 쓰는데,
+        # 이 함수가 회귀 전용으로 만든 nan_mask 제로잉이 그대로 probe_x(분류기 입력)까지
+        # 오염시키고 있었다(실측: 이 로직 추가 전 run은 분류기 정확도 98.65%, 추가 후
+        # 36~67%로 붕괴). redundancy_mask(게이트 출력 강제)만으로 scen_x 쪽 정확성은
+        # 이미 완전히 보장되므로(로그 알파와 무관하게 항상 0), 입력 단은 건드리지 않는다.
         redundancy_mask = _build_redundancy_mask(combined_redundancy, spec)
         print(f"[p1v2] combined-redundancy-json 적용: {args.combined_redundancy_json} "
-              f"(raw HI (scenario,HI) 조합 {n_masked}개를 nan_mask 0-강제 + 게이트 출력 "
-              f"0-강제 이중 적용, {int((~redundancy_mask).sum().item())}개 (시나리오,HI) 조합 배제)")
+              f"(게이트 출력 0-강제만 적용 — 입력 레벨 마스킹은 분류기 오염 버그로 제거됨, "
+              f"{int((~redundancy_mask).sum().item())}개 (시나리오,HI) 조합 배제)")
 
     tr_cfg = cfg["training"]
     if args.batch_size is not None:
@@ -601,29 +564,6 @@ def main() -> None:
               f"({n_shared}/{len(shared_hi_mask)}개 HI -> shared_gate, "
               f"{len(shared_hi_mask) - n_shared}개 -> 기존 scen_gates)")
 
-    if args.specific_group_ids_json:
-        # v5: build_specific_component_groups.py 산출물 — seg_{s}_specific_group_ids는 이미
-        # specific 폭(len(specific_idx)) 기준 로컬 인덱스로 정렬돼 있어(그 스크립트가 concepts를
-        # 오름차순으로 순회해서 만듦) SCRModel의 _specific_idx 순서와 그대로 맞는다. 여기서
-        # 다시 재정렬/변환하지 않는다 — 하면 오히려 순서가 어긋날 위험만 생긴다.
-        spec_data = json.loads(Path(args.specific_group_ids_json).read_text(encoding="utf-8"))
-        if spec_data.get("n_specific") != int(shared_hi_mask.numel() - shared_hi_mask.sum().item()):
-            raise ValueError(
-                f"--specific-group-ids-json의 n_specific({spec_data.get('n_specific')})이 "
-                f"--interaction-json에서 나온 specific 개수"
-                f"({int(shared_hi_mask.numel() - shared_hi_mask.sum().item())})와 다릅니다 — "
-                f"같은 --interaction-json으로 만든 파일인지 확인하세요."
-            )
-        scen_group_ids = {
-            s: spec_data[f"seg_{s}_specific_group_ids"]
-            for s in range(spec.n_scenarios)
-            if f"seg_{s}_specific_group_ids" in spec_data
-        }
-        n_groups_total = sum(spec_data.get(f"seg_{s}_n_groups", 0) for s in range(spec.n_scenarios))
-        print(f"[p1v2] specific-group-ids-json 적용: {args.specific_group_ids_json} "
-              f"({len(scen_group_ids)}/{spec.n_scenarios}개 시나리오, 총 그룹 {n_groups_total}개, "
-              f"연결요소 기준 GroupedHardConcreteGate)")
-
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
@@ -632,14 +572,10 @@ def main() -> None:
         kernel_hi_counts=kernel_hi_counts,
         kernel_hi_costs=kernel_costs_by_scen,
         redundancy_mask=redundancy_mask,
-        shrinkage_gate=args.shrinkage_gate,
         n_gate_groups=(1 if args.warmstart_branch_epoch is not None else
                        2 if args.scen_gate_direction_only else None),
         scenario_onehot=args.scenario_onehot_input,
     ).to(device)
-    if args.shrinkage_gate:
-        print(f"[p1v2] shrinkage-gate 적용: scen_gates -> ShrinkageHardConcreteGate "
-              f"(lambda_shrink={args.lambda_shrink})")
     if args.scen_gate_direction_only:
         print(f"[p1v2] scen-gate-direction-only 적용: 게이트 뱅크 폭 {spec.n_scenarios} -> 2(방향)")
     if args.scenario_onehot_input:
@@ -651,11 +587,13 @@ def main() -> None:
 
     loss_cfg = cfg["loss"]
     loss_fn = SCRLoss(lambda_scen=lambda_scen, lambda_l0=loss_cfg["lambda_l0"],
-                       lambda_shrink=args.lambda_shrink,
-                       l0_norm_constant=args.l0_norm_constant).to(device)
+                       l0_norm_constant=args.l0_norm_constant,
+                       hi_cost_weighted=args.hi_cost_weighted_l0).to(device)
     if args.l0_norm_constant is not None:
         print(f"[p1v2] l0-norm-constant 적용: _l0_penalty를 n_scenarios 대신 "
               f"{args.l0_norm_constant}로 나눔")
+    print(f"[p1v2] hi-cost-weighted-l0: {args.hi_cost_weighted_l0} "
+          f"({'CATEGORY_COSTS 가중' if args.hi_cost_weighted_l0 else '균일 비용 1.0(기본)'})")
 
     if args.lambda_l0_override is not None:
         loss_cfg["lambda_l0"] = args.lambda_l0_override
@@ -687,8 +625,11 @@ def main() -> None:
     beta_min = args.beta_min
     warmstart_T = args.warmstart_branch_epoch  # None(기본)이면 아래 로직이 전부 기존과 동일
 
-    timestamp = datetime.now().strftime("%m%d_%H%M")
-    output_dir = RESULTS_DIR / f"{timestamp}_p1v2_{args.tag}_seed{args.seed}"
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        timestamp = datetime.now().strftime("%m%d_%H%M")
+        output_dir = RESULTS_DIR / f"{timestamp}_p1v2_{args.tag}_seed{args.seed}"
     (output_dir / "gates").mkdir(parents=True, exist_ok=True)
     (output_dir / "logs").mkdir(parents=True, exist_ok=True)
     ckpt_path = output_dir / "checkpoints" / "best_by_saturation.pt"
@@ -713,7 +654,8 @@ def main() -> None:
     # 저장된 시점부터는(=epoch>=l0_fully_ramped_ep_eff 도달) 언제 중단해도 바로 테스트 가능
     # — 맨 아래의 최종 write가 best_epoch/gate_saturation을 채워 그대로 덮어쓰므로 정상
     # 종료 시 동작은 100% 기존과 동일.
-    cfg.setdefault("data", {})["exclude_stat_leak"] = None  # v2 트레이너 표식용, 필요시 실값으로 교체
+    cfg.setdefault("data", {})["exclude_stat_leak"] = EXCLUDE_STAT_LEAK
+    cfg["data"]["exclude_dqdv_leak"] = EXCLUDE_DQDV_LEAK
     save_config(cfg, output_dir / "config.yaml")
     _early_summary = {
         "tag": args.tag, "seed": args.seed, "split_seed": args.split_seed,
@@ -722,16 +664,15 @@ def main() -> None:
         "selected_epoch": None, "gate_saturation": None,  # 아직 모름 -- 학습 끝나면 채워짐
         "beta_min": beta_min, "l0_fully_ramped_epoch": l0_fully_ramped_ep,
         "output_dir": str(output_dir),
+        "n_hi": N_HI, "exclude_stat_leak": EXCLUDE_STAT_LEAK, "exclude_dqdv_leak": EXCLUDE_DQDV_LEAK,
         "synergy_groups_json": args.synergy_groups_json,
         "synergy_n_groups": ({s: max(g) + 1 for s, g in scen_group_ids.items()}
                               if scen_group_ids else None),
         "kernel_features_pkl": args.kernel_features_pkl,
         "combined_redundancy_json": args.combined_redundancy_json,
         "interaction_json": args.interaction_json,
-        "specific_group_ids_json": args.specific_group_ids_json,
-        "shrinkage_gate": args.shrinkage_gate,
-        "lambda_shrink": args.lambda_shrink if args.shrinkage_gate else None,
         "l0_norm_constant": args.l0_norm_constant,
+        "hi_cost_weighted_l0": args.hi_cost_weighted_l0,
         "scen_gate_direction_only": args.scen_gate_direction_only,
         "scenario_onehot_input": args.scenario_onehot_input,
         "warmstart_branch_epoch": args.warmstart_branch_epoch,
@@ -818,17 +759,18 @@ def main() -> None:
         sat = _gate_saturation_fraction(model)
 
         # Stage1: 체크포인트 선택 = "L0가 완전히 램프된 이후" 구간에서 val_rmse 우선,
-        # sat은 동률(epsilon 이내) tie-break(2026-09-18, 기준 변경 — 기존 sat-1순위 방식은
-        # docs 2026-09-04 결정 참고). val_rmse가 --val-rmse-epsilon보다 뚜렷하게 좋아져야
-        # "진짜 개선"으로 채택하고, 그 이내(사실상 노이즈 수준 동률)면 더 이산화된(sat 낮은)
-        # 쪽을 택한다 — epoch마다 val_rmse가 수백 분의 1 수준으로 출렁이는데(실측 표준편차
-        # ~0.00025) 매번 그 노이즈만으로 best가 계속 갈아치워지는 걸 막기 위함.
+        # sat은 fallback(2026-09-18, 기준 변경 — 기존 sat-1순위 방식은 docs 2026-09-04
+        # 결정 참고). val_rmse가 best보다 --val-rmse-epsilon **이상** 좋아지면 그 epoch을
+        # "진짜 개선"으로 채택하고, 그게 아니면(개선폭이 epsilon 미만이거나 오히려 나빠져도)
+        # sat이 best보다 낮은 epoch을 채택한다 — epoch마다 val_rmse가 수백 분의 1 수준으로
+        # 출렁이는데(실측 표준편차 ~0.00025) 매번 그 노이즈만으로 best가 계속 갈아치워지는
+        # 걸 막으면서도, sat이 실제로 더 낮아진(게이트가 더 이산화된) epoch은 val_rmse가
+        # 다소 나빠도 놓치지 않기 위함.
         is_selected = False
         _l0_fully_ramped_ep_eff = (warmstart_T or 0) + l0_fully_ramped_ep
         if epoch >= _l0_fully_ramped_ep_eff:
             rmse_diff = val_rmse_v - best_val_rmse
-            is_better = (rmse_diff < -args.val_rmse_epsilon or
-                         (abs(rmse_diff) <= args.val_rmse_epsilon and sat < best_sat))
+            is_better = (rmse_diff <= -args.val_rmse_epsilon) or (sat < best_sat)
             if is_better:
                 best_sat = sat
                 best_val_rmse = val_rmse_v
@@ -847,9 +789,6 @@ def main() -> None:
         if (epoch + 1) % 10 == 0 or is_selected:
             _msg = (f"epoch {epoch+1:4d}  lambda_l0={eff_l0:.4f}  beta={beta_now:.3f}  "
                     f"tr_r2={tr_r2_v:.4f}  val_r2={val_r2_v:.4f}  sat={sat:.3f}")
-            if args.shrinkage_gate:
-                with torch.no_grad():
-                    _msg += f"  shrink_penalty={model.scen_gates.shrinkage_penalty().item():.4f}"
             tqdm_write(_msg + (" *selected*" if is_selected else ""))
 
         # 조기종료: best 갱신 없이 --patience 에폭이 지나면 중단. 이후 남은 에폭을
@@ -908,16 +847,15 @@ def main() -> None:
         "selected_epoch": best_epoch, "gate_saturation": best_sat,
         "beta_min": beta_min, "l0_fully_ramped_epoch": l0_fully_ramped_ep,
         "output_dir": str(output_dir),
+        "n_hi": N_HI, "exclude_stat_leak": EXCLUDE_STAT_LEAK, "exclude_dqdv_leak": EXCLUDE_DQDV_LEAK,
         "synergy_groups_json": args.synergy_groups_json,
         "synergy_n_groups": ({s: max(g) + 1 for s, g in scen_group_ids.items()}
                               if scen_group_ids else None),
         "kernel_features_pkl": args.kernel_features_pkl,
         "combined_redundancy_json": args.combined_redundancy_json,
         "interaction_json": args.interaction_json,
-        "specific_group_ids_json": args.specific_group_ids_json,
-        "shrinkage_gate": args.shrinkage_gate,
-        "lambda_shrink": args.lambda_shrink if args.shrinkage_gate else None,
         "l0_norm_constant": args.l0_norm_constant,
+        "hi_cost_weighted_l0": args.hi_cost_weighted_l0,
         "scen_gate_direction_only": args.scen_gate_direction_only,
         "scenario_onehot_input": args.scenario_onehot_input,
         "warmstart_branch_epoch": args.warmstart_branch_epoch,  # 정보용 — 최종 체크포인트는

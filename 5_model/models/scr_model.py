@@ -13,9 +13,6 @@ Stage A — direction-aware probe gate (dual objective)
 Stage B — scenario-conditioned regression
   2. Per-scenario HardConcreteGate (n_scenarios × N_HI) selects k HIs per scenario
      MSE gradient only — regression-specialised subset per scenario
-     shrinkage_gate=True (docs/260909_RESULTS.md §6-5(e) 대응책 ①): 독립 게이트 대신
-     ShrinkageHardConcreteGate 뱅크(hard_concrete.py) — shared_log_alpha(전체 N) +
-     delta_log_alpha[s](자기 시나리오만, lambda_shrink로 0쪽 정칙화)로 분해.
 
   3. Capacity head: [probe_x || scen_x || direction || cap_init] → SOH ratio
 
@@ -71,20 +68,9 @@ class SCRModel(nn.Module):
             # test_hi_scenario_interaction.py 산출물 기반. True인 HI는 시나리오 무관 단일
             # shared_gate로, False인 HI는 기존처럼 시나리오별 scen_gates로 라우팅한다.
             # None(기본)이면 완전히 비활성 — 기존과 100% 동일 동작(전부 scen_gates).
-            # scen_group_ids와 동시 사용 가능(v5, docs/260901_V5_DESIGN.md): shared_hi_mask가
-            # 있으면 scen_gate_width가 specific 폭으로 좁아지고, scen_group_ids[s]도 그 좁은
-            # 폭(len(specific_idx)) 기준 로컬 인덱스여야 한다 —
-            # build_specific_component_groups.py가 정확히 이 형태로 만들어준다.
-        shrinkage_gate: bool = False,  # Phase 1: docs/260909_RESULTS.md §6-5(e)의 파편화
-            # 대응책 ① — scen_gates를 시나리오별 독립 HardConcreteGate 대신
-            # ShrinkageHardConcreteGate(hard_concrete.py) 뱅크로 만든다. 시나리오 공통
-            # shared_log_alpha(전체 N으로 학습)와 시나리오별 delta_log_alpha(자기
-            # 시나리오만으로 학습, scr_loss.py의 lambda_shrink로 0쪽으로 정칙화)로
-            # log_alpha를 분해 — "공유할지 전용으로 할지"를 HI마다 데이터가 결정하게
-            # 한다. scen_group_ids(그룹 계층 게이팅)와는 동시 사용 불가(아래 assert).
-            # shared_hi_mask(v4 hybrid)와는 함께 쓸 수 있음 — 그 경우 shrinkage는
-            # specific_idx 폭에만 적용됨(scen_gate_width가 이미 그렇게 좁혀지므로
-            # 별도 처리 불필요). False(기본)면 기존과 100% 동일 동작.
+            # scen_group_ids와 동시 사용 가능: shared_hi_mask가 있으면 scen_gate_width가
+            # specific 폭으로 좁아지고, scen_group_ids[s]도 그 좁은 폭(len(specific_idx))
+            # 기준 로컬 인덱스여야 한다.
         n_gate_groups: int | None = None,  # 2026-09-17: docs/260917_REPORT.md 안건2
             # "게이트 분리 대신 시나리오를 원샷 입력으로" 실험용 — scen_gates(+
             # scen_kernel_gates)의 폭을 n_scenarios 대신 이 값으로 줄이고, 각
@@ -126,10 +112,12 @@ class SCRModel(nn.Module):
             # 공유하는 구조(다른 여러 스크립트가 이 가정에 의존)라 폭을 줄이는 대신, 학습된
             # scen_gates 출력(masked/z 둘 다)에 이 마스크를 곱해 False인 자리는 log_alpha가
             # 뭐라고 하든 항상 0으로 강제한다 — "고를 수는 있지만 기여는 0"이 아니라 "고른
-            # 결과 자체가 무조건 0"이라 커널 쪽과 동일한 강도의 보장이 된다. nan_mask
-            # 0-마스킹(phase1_trainer_v2.py _apply_combined_redundancy_raw, 입력 자체를
-            # 상수로 만듦)과는 독립적으로 함께 적용됨(둘 다 있어도 서로 방해 없음).
-            # None(기본)이면 기존과 100% 동일.
+            # 결과 자체가 무조건 0"이라 커널 쪽과 동일한 강도의 보장이 된다.
+            # 2026-09-21: 예전엔 입력 레벨에서도 nan_mask를 0으로 이중 강제했는데
+            # (phase1_trainer_v2.py의 _apply_combined_redundancy_raw, 이제 삭제됨), 그
+            # nan_mask가 probe_x(분류기 입력)에도 공유돼 분류기 정확도가 붕괴하는 버그였다
+            # — 이 게이트 레벨 마스크 하나만으로 scen_x 쪽 정확성은 이미 충분히 보장되므로
+            # 입력 레벨 이중 마스킹은 제거했다. None(기본)이면 기존과 100% 동일.
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -175,21 +163,14 @@ class SCRModel(nn.Module):
         else:
             self.redundancy_mask = None
 
-        from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate, ShrinkageHardConcreteGate
+        from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate
 
-        if shrinkage_gate and scen_group_ids:
-            raise ValueError(
-                "shrinkage_gate와 scen_group_ids(그룹 계층 게이팅)는 동시에 쓸 수 없습니다 "
-                "— 전자는 시나리오 축, 후자는 HI 축의 서로 다른 DOF 축소 방법이라 "
-                "지금은 둘 중 하나만 지원합니다."
-            )
         if n_gate_groups is not None and scen_group_ids:
             raise ValueError(
                 "n_gate_groups(게이트 뱅크 축소)와 scen_group_ids(전역 scenario_idx로 키된 "
                 "GroupedHardConcreteGate)는 동시에 쓸 수 없습니다 — scen_group_ids의 키가 "
                 "축소된 그룹 인덱스와 안 맞습니다."
             )
-        self.shrinkage_gate = shrinkage_gate
 
         # ----------------------------------------------------------------
         # Stage A — direction-aware probe gates
@@ -225,12 +206,9 @@ class SCRModel(nn.Module):
             scen_gate_width = N_HI
 
         if scen_masks is None:
-            if shrinkage_gate:
-                self.scen_gates = ShrinkageHardConcreteGate(_gate_bank_size, scen_gate_width)
-            else:
-                scen_group_ids = scen_group_ids or {}
-                self.scen_gates = nn.ModuleList([
-                    GroupedHardConcreteGate(scen_gate_width, scen_group_ids[s]) if s in scen_group_ids
+            scen_group_ids = scen_group_ids or {}
+            self.scen_gates = nn.ModuleList([
+                GroupedHardConcreteGate(scen_gate_width, scen_group_ids[s]) if s in scen_group_ids
                     else HardConcreteGate(scen_gate_width)
                     for s in range(_gate_bank_size)
                 ])
@@ -445,9 +423,7 @@ class SCRModel(nn.Module):
         """시나리오별 게이트 컬렉션(scen_gates 또는 scen_kernel_gates) 공통 라우팅 로직.
         각 세그먼트를 자기 시나리오(scen_idx)에 해당하는 gates[s]로만 통과시킨다.
         x: (B, width) — width는 게이트 종류에 따라 다름(raw HI면 N_HI, 커널 HI면 n_kernel_hi).
-        gates: nn.ModuleList(독립 HardConcreteGate/GroupedHardConcreteGate) 또는
-        ShrinkageHardConcreteGate 뱅크 — 둘 다 enumerate()/len()/gates[s](x)를 지원해서
-        여기서는 구분할 필요가 없다.
+        gates: nn.ModuleList(독립 HardConcreteGate/GroupedHardConcreteGate).
         Returns (masked_x, z): 둘 다 x와 같은 shape."""
         masked = torch.zeros_like(x)
         z_out  = torch.zeros_like(x)
@@ -681,13 +657,12 @@ class SCRModel(nn.Module):
         제거하고(momentum 폐기) new는 새로 추가(모멘텀 0부터 재시작)하는 데 쓴다
         (docs/260917_REPORT.md: "Adam 모멘텀 재시작" 결정).
 
-        shrinkage_gate/scen_group_ids(그룹 계층 게이팅)와는 아직 함께 쓸 수 없다(단일
-        공유 게이트가 일반 HardConcreteGate여야 한다는 가정)."""
+        scen_group_ids(그룹 계층 게이팅)와는 아직 함께 쓸 수 없다(단일 공유 게이트가
+        일반 HardConcreteGate여야 한다는 가정)."""
         assert self.n_gate_groups == 1, (
             "branch_scen_gates()는 n_gate_groups=1(전체 시나리오 공유 게이트 1개)로 만든 "
             f"모델에서만 호출할 수 있습니다 (현재 n_gate_groups={self.n_gate_groups})."
         )
-        assert not self.shrinkage_gate, "branch_scen_gates()는 shrinkage_gate와 함께 쓸 수 없습니다."
         assert self.shared_gate is None, "branch_scen_gates()는 shared_hi_mask(v4)와 함께 쓸 수 없습니다."
 
         from models.hard_concrete import HardConcreteGate

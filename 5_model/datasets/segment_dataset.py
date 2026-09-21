@@ -30,7 +30,7 @@ from torch.utils.data import Dataset
 from utils.hi_schema import (
     STAT_KEYS, DIFF_KEYS, LFP_KEYS, MORPH_KEYS,
     get_hi_cols_for_seg, get_hi_cost_vector, N_HI, spec_from_qfrac,
-    EXCLUDE_STAT_LEAK,
+    EXCLUDE_STAT_LEAK, EXCLUDE_DQDV_LEAK,
     RAW_N, RAW_CH,
 )
 
@@ -128,14 +128,18 @@ def _get_native_hi_cols() -> list[str]:
     2026-08-07: stat_q_abs/stat_energy_seg 포함(5_model/utils/hi_schema.py와 동일
     변경 — 이 함수가 그 파일의 _STAT_EXCLUDE 로직을 별도로 복제해서 갖고 있었음).
     2026-08-08: EXCLUDE_STAT_LEAK도 hi_schema.py와 동일하게 반영(SOH_EXCLUDE_STAT_LEAK=1).
+    2026-09-19: EXCLUDE_DQDV_LEAK도 동일하게 반영(SOH_EXCLUDE_DQDV_LEAK=1, diff_dqdv_area 제외).
     """
     _STAT_EXCLUDE: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
+    _DIFF_EXCLUDE: set[str] = {"dqdv_area"} if EXCLUDE_DQDV_LEAK else set()
     cols: list[str] = []
     for key in STAT_KEYS:
         if key in _STAT_EXCLUDE:
             continue
         cols.append(f"stat_{key}")
     for key in DIFF_KEYS:
+        if key in _DIFF_EXCLUDE:
+            continue
         cols.append(f"diff_{key}")
     for key in LFP_KEYS:
         cols.append(f"lfp_{key}")

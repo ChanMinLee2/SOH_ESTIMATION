@@ -105,6 +105,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--shuffle-seed", type=int, default=42, dest="shuffle_seed",
                    help="--shuffle-from 전용 무작위 배정 시드")
     p.add_argument("--tag", required=True)
+    p.add_argument("--out-dir", default=None, dest="out_dir",
+                   help="산출물 저장 위치(기본: results/) — run_pipeline.py가 Step 9 학습 "
+                        "run 폴더로 넘길 때 씀(2026-09-19).")
     return p.parse_args()
 
 
@@ -176,8 +179,9 @@ def main() -> None:
                     "동일하게 유지)다 — r_by_scenario 등 나머지 필드는 참조 파일의 실제 계산값을 "
                     "그대로 복사한 진단용 정보이며 이 배정 결정에는 안 쓰였다.",
         }
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        out_path = RESULTS_DIR / f"hi_scenario_interaction_{args.tag}.json"
+        out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"hi_scenario_interaction_{args.tag}.json"
         out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"[interaction] 저장: {out_path} (공유 {payload['n_hi'] - n_sig}개 / "
               f"특이 {n_sig}개, 무작위 배정)")
@@ -247,8 +251,9 @@ def main() -> None:
                 "차이가 크면(실측: 66/66 vs 소수) 그 증거.",
     }
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"hi_scenario_interaction_{args.tag}.json"
+    out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"hi_scenario_interaction_{args.tag}.json"
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"[interaction] HI {n_hi}개 중 p-value 기준 유의: {n_p_sig}개(참고용, 대표본이라 "
