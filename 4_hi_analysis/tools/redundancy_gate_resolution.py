@@ -1,5 +1,5 @@
 """
-4_hi_analysis/redundancy_gate_resolution.py
+4_hi_analysis/tools/redundancy_gate_resolution.py
 
 Fig3(a, docs/figures/fig3_hi_design_rationale.py)가 |Pearson r| >= 0.95로 표시한
 "극단적으로 중복된" raw-HI 쌍들이, 실제 학습된 게이트(canonical v4 run,
@@ -11,7 +11,7 @@ Fig3(a)는 dis_lo 세그먼트 상관행렬 하나로 쌍을 뽑는다(그 축 �
 멤버가 전부 선택됐는지를 센다. "남아있음" = 둘 다 gate_prob>=threshold(기본 0.9,
 plot_hi_selection_matrix.py와 동일 관례) = 게이트가 이 중복을 해소하지 못함.
 
-Run: python 4_hi_analysis/redundancy_gate_resolution.py
+Run: python 4_hi_analysis/tools/redundancy_gate_resolution.py
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "docs" / "figures"))
 
 from _style import INK, SUBINK, setup_rcparams  # noqa: E402

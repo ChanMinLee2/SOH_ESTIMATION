@@ -11,10 +11,10 @@ _1_data_unified/<DATASET> 폴더의 모든 셀에 대해 plot_cell_cycles.py 를
 100% 그대로 동작한다.
 
 사용:
-  python 4_hi_analysis/plot_all_mit_cells.py                          # MIT, 순차
-  python 4_hi_analysis/plot_all_mit_cells.py --workers 8              # MIT, 8개 병렬
-  python 4_hi_analysis/plot_all_mit_cells.py --dataset calce --workers 8
-  python 4_hi_analysis/plot_all_mit_cells.py --dataset tju --workers 0  # CPU 코어 수만큼
+  python 4_hi_analysis/tools/plot_all_mit_cells.py                          # MIT, 순차
+  python 4_hi_analysis/tools/plot_all_mit_cells.py --workers 8              # MIT, 8개 병렬
+  python 4_hi_analysis/tools/plot_all_mit_cells.py --dataset calce --workers 8
+  python 4_hi_analysis/tools/plot_all_mit_cells.py --dataset tju --workers 0  # CPU 코어 수만큼
 """
 
 import argparse
@@ -31,7 +31,7 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _DATASET_DIRS = {
     "mit":   PROJECT_ROOT / "_1_data_unified" / "MIT",
     "hust":  PROJECT_ROOT / "_1_data_unified" / "HUST",

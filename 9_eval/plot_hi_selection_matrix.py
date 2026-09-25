@@ -1,5 +1,5 @@
 """
-5_model/experiments/phase1_lab/plot_hi_selection_matrix.py
+9_eval/plot_hi_selection_matrix.py
 
 raw HI(N_HI개, 63/64/66 등 실행에 따라 다름)가 시나리오(chg_lo/chg_mid/chg_hi/dis_hi/
 dis_mid/dis_lo 등)별로 얼마나/어떻게 선택되는지 한눈에 비교하는 "raw HI × 시나리오"
@@ -18,12 +18,12 @@ chart라 x축이 HI 순위일 뿐 HI 정체성이 아니다 — 이 스크립트
 없음), raw HI 패널과 달리 "시나리오 간 비교"라는 이 플랏의 목적 자체가 성립하지
 않는다(raw HI는 진짜 전 시나리오 공유 카탈로그라 비교가 의미 있음). 커널 HI의
 중요도/시나리오별 분포는 `plot_hi_importance_ranking`이 만드는
-`figures/hi_importance_ranking.png`(test_phase1_checkpoint.py에 내장, 랭킹 막대 +
+`figures/hi_importance_ranking.png`(test.py에 내장, 랭킹 막대 +
 시나리오 색 구분)에서 확인할 것 — 그쪽은 애초에 "시나리오 간 매트릭스 비교"가 아니라
 "전체 랭킹"이라 이 구조적 제약과 무관하게 의미가 있다.
 
 입력은 학습이 이미 저장해 둔 산출물만 읽는다(재학습/체크포인트 로드 없음):
-  <run-dir>/gates/regression_HIs.json (raw HI, phase1_trainer_v2.py/train_scr.py 저장)
+  <run-dir>/gates/regression_HIs.json (raw HI, train.py/train_scr.py 저장)
 
 "gate_prob 랭킹 전체"(seg_s_ranked/names/probs/seg_name)를 담고 있을 뿐 임계값으로
 걸러진 "선택됨" 표시는 없다 — 이 스크립트가 --threshold(기본 0.9, 프로젝트 전체 관례인
@@ -31,8 +31,8 @@ GATE_THRESHOLD/--min-active-prob와 동일값)로 직접 이진화해서 히트�
 마커로 표시한다.
 
 사용 예:
-  python 5_model/experiments/phase1_lab/plot_hi_selection_matrix.py \
-      --run-dir 5_model/experiments/phase1_lab/results/p1v2_runs/0827_1705_p1v2_p1v4_full_seed42
+  python 9_eval/plot_hi_selection_matrix.py \
+      --run-dir legacy_results/experiments/phase1_lab/results/p1v2_runs/0827_1705_p1v2_p1v4_full_seed42
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _CATEGORY_COLORS = {
     "stat":  "#1f77b4",
@@ -182,7 +182,7 @@ def main() -> None:
     if kernel_path.exists():
         print(f"[plot] {kernel_path} 있음 — 참고: 커널 HI는 own-scenario 제한(2026-09-18)으로 "
               "시나리오 간 매트릭스 비교가 구조적으로 무의미해 이 스크립트에서 제외했습니다. "
-              "figures/hi_importance_ranking.png(test_phase1_checkpoint.py 산출)를 참고하세요.")
+              "figures/hi_importance_ranking.png(test.py 산출)를 참고하세요.")
 
     fig_h = max(6.0, len(raw_base) * 0.16)
     fig, ax = plt.subplots(1, 1, figsize=(6.5, fig_h))

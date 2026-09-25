@@ -17,7 +17,7 @@ dV/dt가 아니라 dV/dQ를 쓰는 이유: MIT는 사이클 내 multi-step 급�
 출력: 4_hi_analysis/outputs/plateau_soc_stats/per_cycle.csv (원자료)
       4_hi_analysis/outputs/plateau_soc_stats/summary.csv (데이터셋×방향 집계)
 
-Run: python 4_hi_analysis/plateau_soc_stats.py
+Run: python 4_hi_analysis/tools/plateau_soc_stats.py
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 from data_directories import DATA_4_HI_ROOT  # noqa: E402
 

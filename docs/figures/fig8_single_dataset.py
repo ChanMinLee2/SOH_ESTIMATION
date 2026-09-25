@@ -8,11 +8,11 @@ Layout: 2 rows x 3 columns.
   row (a): true-vs-predicted SOH scatter, hard routing
   row (b): mean |error| (%) heatmap, scenario x observed capacity, hard routing
            (same smoothed-grid technique as
-           test_phase1_checkpoint.py::_smoothed_error_grid, re-rendered in
+           test.py::_smoothed_error_grid, re-rendered in
            this paper's palette instead of the diagnostic script's jet map)
 
 Real data: predictions/test_predictions_hard.csv from each single-dataset
-p1v4 run (2026-09-13: test_phase1_checkpoint.py extended to also export
+p1v4 run (2026-09-13: test.py extended to also export
 hard/soft mode predictions, not just oracle -- see that file's
 _export_for_visualize).
 
@@ -31,7 +31,7 @@ from _style import INK, SUBINK, GRID, SCEN_NAMES, setup_rcparams, label_panel, P
 
 setup_rcparams()
 
-RUNS_DIR = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs"
+RUNS_DIR = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs"
 DATASETS = [
     ("MIT", RUNS_DIR / "0908_0100_p1v2_p1v4_mit_only_seed42"),
     ("HUST", RUNS_DIR / "0908_0358_p1v2_p1v4_hust_only_seed42"),

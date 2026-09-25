@@ -13,11 +13,9 @@ hi_segment_viz.py
   hi_overlay_lfp.png            -LFP HI 시나리오 오버레이 (카테고리 C)
   hi_overlay_morph.png          -형태학적 거리 HI 시나리오 오버레이 (카테고리 D)
 
-사용:
+사용(q_frac_ref만 지원, 2026-09-24 비-정식 축 일괄 삭제):
   python hi_segment_viz.py
-  python hi_segment_viz.py --seg-axis protocol --workers 8
-  python hi_segment_viz.py --seg-axis vwindow --axis-config '{"vwindow": {"n_windows": 4}}'
-  python hi_segment_viz.py --seg-axis rcs
+  python hi_segment_viz.py --workers 8
 """
 
 import argparse
@@ -48,6 +46,9 @@ from hi_correlation import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT.parent))
+import parameters as P  # noqa: E402 — 축 설정/실행 환경 단일 소스
 
 # ── 폰트 설정 ──────────────────────────────────────────────────────────────────
 for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
@@ -562,14 +563,19 @@ def plot_segment_hi_overlay(df: pd.DataFrame, out_path: Path,
 def main():
     parser = argparse.ArgumentParser(
         description="세그먼트 분할 시각화 + HI 열화 추이 (카테고리 A–D, 다축 호환)")
-    parser.add_argument("--workers",      type=int, default=4,
-                        help="HI 추출 병렬 워커 수 (기본: 4)")
+    import os
+    parser.add_argument("--workers",      type=int,
+                        default=min(P.ACTIVE_WORKERS, os.cpu_count() or 1),
+                        help=f"HI 추출 병렬 워커 수 (parameters.py 기본 "
+                             f"{min(P.ACTIVE_WORKERS, os.cpu_count() or 1)})")
     parser.add_argument("--force",        action="store_true",
                         help="캐시 무시하고 HI 재추출")
-    parser.add_argument("--seg-axis",     type=str, default="qfrac",
-                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster (기본: qfrac)")
-    parser.add_argument("--axis-config",  type=str, default="{}",
-                        help="축 파라미터 JSON (예: '{\"max_steps\": 3}')")
+    parser.add_argument("--seg-axis",     type=str, default=P.FIXED_SEG_AXIS,
+                        help=f"세그멘테이션 축 — {P.FIXED_SEG_AXIS!r}만 등록돼 있다(2026-09-24 "
+                             "비-정식 축 일괄 삭제)")
+    parser.add_argument("--axis-config",  type=str, default=json.dumps(P.ACTIVE_AXIS_CONFIG),
+                        help="축 파라미터 JSON — 기본값은 parameters.py: ACTIVE_AXIS_CONFIG "
+                             "(예: '{\"max_steps\": 3}')")
     args = parser.parse_args()
 
     _axis = args.seg_axis
@@ -590,13 +596,10 @@ def main():
         HI_GROUPS = _new_groups
         print(f"[hi_viz] HI_GROUPS 재빌드: {_seg_names}")
 
-    # hi_plot 폴더 suffix — q_frac_wide/vqslope는 파라미터·random 태그까지 포함해 분리
-    if _axis == "q_frac_wide":
-        from hi_correlation import _qfw_tag
-        _dir_suffix = f"_qfw_{_qfw_tag(_axis_cfg)}"
-    elif _axis == "vqslope":
-        from hi_correlation import _vqslope_tag
-        _dir_suffix = f"_vqslope_{_vqslope_tag(_axis_cfg)}"
+    # hi_plot 폴더 suffix — q_frac_ref는 파라미터·random 태그까지 포함해 분리
+    if _axis == "q_frac_ref":
+        from hi_correlation import _qfref_tag
+        _dir_suffix = f"_qfref_{_qfref_tag(_axis_cfg)}"
     elif _axis != "qfrac":
         _dir_suffix = f"_{_axis}"
     else:

@@ -20,10 +20,10 @@ HI 구조 기준 세그먼트 × 카테고리별 상관분석 + MI 분석 + Scen
   corr_3d_{ds}.png           — 시나리오별 |ρ| 3D 산점도
 
 사용:
-  python 4_hi_analysis/seg_corr_analysis.py
-  python 4_hi_analysis/seg_corr_analysis.py --seg-axis protocol
-  python 4_hi_analysis/seg_corr_analysis.py --seg-axis vwindow --axis-config '{"n_windows": 4}'
-  python 4_hi_analysis/seg_corr_analysis.py --dataset mit --min-cycles 5 --workers 8
+  python 4_hi_analysis/tools/seg_corr_analysis.py
+  python 4_hi_analysis/tools/seg_corr_analysis.py --seg-axis protocol
+  python 4_hi_analysis/tools/seg_corr_analysis.py --seg-axis vwindow --axis-config '{"n_windows": 4}'
+  python 4_hi_analysis/tools/seg_corr_analysis.py --dataset mit --min-cycles 5 --workers 8
 """
 
 import argparse
@@ -60,6 +60,8 @@ try:
 except ImportError:
     from tqdm import tqdm
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from hi_correlation import (
     HI_GROUPS,
     HI_LABELS,
@@ -69,8 +71,8 @@ from hi_correlation import (
     MORPH_KEYS,
 )
 
-# ── 경로 ─────────────────────────────────────────────────────────────────────
-HERE    = Path(__file__).resolve().parent
+# ── 경로 (4_hi_analysis/ 기준 — 이 스크립트 자신의 위치인 tools/가 아님) ──────
+HERE    = Path(__file__).resolve().parent.parent
 
 # ── 폰트 ─────────────────────────────────────────────────────────────────────
 for _f in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:

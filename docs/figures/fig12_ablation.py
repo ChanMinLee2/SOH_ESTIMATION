@@ -29,7 +29,7 @@ from _style import INK, SUBINK, GRID, setup_rcparams, label_panel, PROJECT_ROOT
 
 setup_rcparams()
 
-RUNS_DIR = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs"
+RUNS_DIR = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs"
 
 CONDITIONS = [
     ("no scen", RUNS_DIR / "0911_0541_p1v2_p1v4_noscen_kernel_zonetile_seed42", "#3A6178"),

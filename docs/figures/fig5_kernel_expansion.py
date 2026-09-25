@@ -7,7 +7,7 @@
 composition/top-3 by R^2 -- per user feedback; kept only the two
 quantitative panels.)
 
-Real data: 5_model/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v3.pkl
+Real data: legacy_results/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v3.pkl
 (synergy-grouped kernel features, Nystroem+Ridge) and the same HI cache used
 in Figure 3 for the raw univariate baseline.
 
@@ -30,8 +30,8 @@ from _style import (INK, SUBINK, FAINT, GRID, SCEN_NAMES, SCEN_POS_COLOR, setup_
 warnings.filterwarnings("ignore", category=UserWarning)
 setup_rcparams()
 
-KERNEL_PKL = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v3.pkl"
-GATE_JSON = (PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs/"
+KERNEL_PKL = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/kernel_group_features_k25_full_N2_kernel_v3.pkl"
+GATE_JSON = (PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs/"
              "0827_1705_p1v2_p1v4_full_seed42/gates/regression_HIs.json")
 HI_CACHE = DATA_4_HI_ROOT.parent / "4_hi_analysis" / (
     "hi_features_qfref_n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA.pkl")

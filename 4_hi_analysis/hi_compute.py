@@ -856,7 +856,6 @@ if __name__ == "__main__":
     _pkl  = next((DATA_4_HI_ROOT / "MIT").glob("*.pkl"), None)
     if _pkl:
         import pickle
-        sys.path.insert(0, str(_root / "5_model"))
         with open(_pkl, "rb") as f: df = pickle.load(f)
         cyc = df.iloc[9]
         v = cyc[[c for c in df.columns if c.startswith("stat_v_mean")]].values[:1]  # fallback

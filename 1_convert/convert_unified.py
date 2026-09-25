@@ -38,6 +38,7 @@ cycles DataFrame 컬럼:
 import argparse
 import os
 import pickle
+import sys
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -49,6 +50,9 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 PROJECT_ROOT  = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+import parameters as P  # noqa: E402 — 실행 환경/데이터셋 선택 단일 소스
 MIT_MAT_DIR   = PROJECT_ROOT / "_0_data_raw" / "FastCharge"
 HUST_PKL_DIR  = PROJECT_ROOT / "_0_data_raw" / "our_data" / "our_data"
 OUTPUT_ROOT     = PROJECT_ROOT / "_1_data_unified"
@@ -855,11 +859,13 @@ def convert_hust(out_root: Path, target_cell: str = None, n_workers: int = 4,
 
 def main():
     parser = argparse.ArgumentParser(description="MIT/HUST/TJU/CALCE → 통일 포맷 변환 (병렬 지원)")
-    parser.add_argument("--dataset",      default="all",
+    parser.add_argument("--dataset",      default=P.ACTIVE_DATASET,
                         choices=["mit", "hust", "tju", "calce", "all"])
     parser.add_argument("--output-root",  default=str(OUTPUT_ROOT))
-    parser.add_argument("--workers",      type=int, default=3,
-                        help="병렬 프로세스 수 (기본: 3)")
+    parser.add_argument("--workers",      type=int,
+                        default=min(P.ACTIVE_WORKERS, os.cpu_count() or 1),
+                        help=f"병렬 프로세스 수 (parameters.py 기본 "
+                             f"{min(P.ACTIVE_WORKERS, os.cpu_count() or 1)})")
     parser.add_argument("--no-cache",     action="store_true",
                         help="캐시 무시 — _0_data_raw/ 가 있어도 원본 파일부터 재변환 "
                              "(MIT/HUST 전용 — TJU/CALCE는 원본 자체가 캐시 없이 매번 재변환)")

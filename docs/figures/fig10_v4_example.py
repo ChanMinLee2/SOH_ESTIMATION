@@ -23,7 +23,7 @@ scr_evaluator.py::_plot_capacity_curves / capacity_curve_1-7.png -- dropped
 the absolute-error-in-Ah column per user feedback, kept shape + %error.)
 
 Real data: predictions/test_predictions_hard.csv from the v4 canonical run
-(2026-09-13: test_phase1_checkpoint.py extended to export hard/soft mode
+(2026-09-13: test.py extended to export hard/soft mode
 predictions, not just oracle).
 
 Run: python docs/figures/fig6_v4_example.py
@@ -39,7 +39,7 @@ from _style import INK, SUBINK, setup_rcparams, label_panel, PROJECT_ROOT
 
 setup_rcparams()
 
-RUN_DIR = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs/0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42"
+RUN_DIR = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs/0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42"
 EXAMPLE_CELLS = ["b1c5", "1-7"]   # (MIT, HUST) -- both confirmed present in this run's test split
 
 CHG_LEVELS = [("chg_lo", "lo"), ("chg_mid", "mid"), ("chg_hi", "hi")]

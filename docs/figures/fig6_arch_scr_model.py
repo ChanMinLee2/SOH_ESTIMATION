@@ -29,7 +29,7 @@ decorative filler):
   - output card: the real SOH-vs-cycle trajectory (HUST 1-7, same cell/run
     as Fig6/Fig7)
 
-Shows the real forward-pass mechanism (5_model/models/scr_model.py):
+Shows the real forward-pass mechanism (model_lib/models/scr_model.py):
   1. Raw HI extraction (64, 4 categories) -- direction-agnostic
   2. Direction-aware Stage-A probe gate (L0 HardConcrete) -- dual gradient
      (MSE regression + CE classification, Phase-1 only)

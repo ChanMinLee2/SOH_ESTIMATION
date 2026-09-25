@@ -44,9 +44,9 @@ routing/routing_table.csv / checkpoints/*.pt 를 읽어 하나의 비교 플롯�
     summary.json
 
 사용:
-  & python 5_model/visualize_results.py --runs "_5_data_model_scr/0723_1633_p2_mlp_qfw_35%_20%" "_5_data_model_scr/0723_2356_p2_tr_qfw_35%_20%" "_5_data_model_scr/0724_0111_p2_res_qfw_35%_20%" --labels mlp transformer resnet_tab
-  python 5_model/visualize_results.py --runs _5_data_model_scr/0723_1633_p2_mlp_qfw _5_data_model_scr/0724_0111_p2_res_qfw
-  python 5_model/visualize_results.py --runs RUN1 RUN2 RUN3 --labels mlp resnet transformer --with-jacobian
+  & python model_lib/tools/visualize_results.py --runs "_5_data_model_scr/0723_1633_p2_mlp_qfw_35%_20%" "_5_data_model_scr/0723_2356_p2_tr_qfw_35%_20%" "_5_data_model_scr/0724_0111_p2_res_qfw_35%_20%" --labels mlp transformer resnet_tab
+  python model_lib/tools/visualize_results.py --runs _5_data_model_scr/0723_1633_p2_mlp_qfw _5_data_model_scr/0724_0111_p2_res_qfw
+  python model_lib/tools/visualize_results.py --runs RUN1 RUN2 RUN3 --labels mlp resnet transformer --with-jacobian
 """
 
 from __future__ import annotations
@@ -66,8 +66,8 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
@@ -93,7 +93,7 @@ from utils.hi_schema import N_HI, RAW_CH, RAW_N, get_hi_cols_for_seg
 from models.scr_model import SCRModel
 from common.scenario.base import ScenarioSpec
 from common.scenario import get_segmenter
-import train_scr as _base  # noqa: E402 (_load_synergy_group_ids 재사용 — 중복 구현 금지)
+from utils.gate_io import _load_synergy_group_ids  # noqa: E402 (2026-09-24: 구 train_scr.py에서 이전)
 
 OUT_ROOT = PROJECT_ROOT / "_5_data_model_scr" / "comparison"
 
@@ -114,7 +114,7 @@ def _parse_args() -> argparse.Namespace:
                    help="실 데이터 기반 Jacobian(gradient) 코사인 유사도 패널 추가 (느림 — 데이터셋 재구축 필요)")
     p.add_argument("--checkpoint-name", default="best_by_saturation.pt",
                    help="run별 사용할 체크포인트 파일명 (기본 best_by_saturation.pt — "
-                        "phase1_trainer_v2.py/p1v2_runs 관례, 없으면 best.pt로 폴백)")
+                        "train.py/p1v2_runs 관례, 없으면 best.pt로 폴백)")
     p.add_argument("--infer-batch-size", type=int, default=256)
     p.add_argument("--infer-warmup", type=int, default=10)
     p.add_argument("--infer-reps", type=int, default=50)
@@ -129,13 +129,13 @@ def _parse_args() -> argparse.Namespace:
                         "(<MMDD_HHMM>_<title> 형태로 생성, 타임스탬프는 유지)")
     p.add_argument("--regression-models", nargs="+", default=None, dest="regression_models",
                    help="run별 회귀 헤드(mlp/transformer/resnet_tab/...), --runs와 같은 개수 "
-                        "— phase1_trainer_v2.py --regression-model 오버라이드가 config.yaml에 "
-                        "반영 안 되므로(항상 'mlp'로 저장됨, test_phase1_checkpoint.py와 동일한 "
+                        "— train.py --regression-model 오버라이드가 config.yaml에 "
+                        "반영 안 되므로(항상 'mlp'로 저장됨, test.py와 동일한 "
                         "제약) mlp가 아닌 헤드를 쓴 run을 비교하려면 반드시 지정해야 한다. "
                         "미지정 run은 config.yaml 값(보통 mlp)을 그대로 씀.")
     p.add_argument("--interaction-json", default=None, dest="interaction_json",
                    help="v4(shared_gate) run 전용 — p1v2_summary.json에 이 경로가 기록돼 "
-                        "있지 않아(test_phase1_checkpoint.py와 동일한 이유) 비교 대상에 v4 "
+                        "있지 않아(test.py와 동일한 이유) 비교 대상에 v4 "
                         "run이 있으면 학습 때 쓴 hi_scenario_interaction_*.json을 여기 직접 "
                         "지정해야 한다. 모든 --runs에 동일하게 적용된다.")
     p.add_argument("--rep-cells", nargs="+", default=None,
@@ -203,7 +203,7 @@ class RunBundle:
         self.kernel_features_pkl = self._resolve_summary_path(self.p1v2_summary.get("kernel_features_pkl"))
         self.synergy_groups_json = self._resolve_summary_path(self.p1v2_summary.get("synergy_groups_json"))
         # v4(shared_gate)는 interaction_json이 p1v2_summary.json에 기록되지 않는다
-        # (test_phase1_checkpoint.py와 동일한 제약) — --interaction-json CLI 오버라이드로
+        # (test.py와 동일한 제약) — --interaction-json CLI 오버라이드로
         # 보충한다.
         self.interaction_json = (
             self._resolve_summary_path(self.p1v2_summary.get("interaction_json"))
@@ -285,7 +285,7 @@ class RunBundle:
 
     def _resolve_summary_path(self, v) -> "Path | None":
         """p1v2_summary.json 값(학습 당시 cwd 기준 상대경로일 수 있음)을 PROJECT_ROOT
-        기준으로 고정한다 — test_phase1_checkpoint.py의 동명 로직과 동일 원칙(중복
+        기준으로 고정한다 — test.py의 동명 로직과 동일 원칙(중복
         구현이지만 그쪽은 함수 내부 클로저라 임포트 재사용이 어려움)."""
         if not v:
             return None
@@ -437,12 +437,12 @@ def _build_model_for_run(b: RunBundle, device: torch.device, ckpt_name: str,
     """b.model / b.n_params 를 채운다.
 
     2026-09-08 이전엔 charge_probe_mask/discharge_probe_mask/scen_masks(Phase 1의 옛
-    "고정폭 top-k 마스크" 방식)로 SCRModel을 재구성했는데, 이건 phase1_trainer_v2.py가
+    "고정폭 top-k 마스크" 방식)로 SCRModel을 재구성했는데, 이건 train.py가
     실제로 v4를 학습하는 방식(학습된 HardConcreteGate + shared_hi_mask(v4) +
     n_kernel_hi(커널 피처))과 다르다 — strict=False라 죽지는 않지만 shared_gate/
-    scen_kernel_gates 가중치가 통째로 안 실리고 조용히 넘어갔다(test_phase1_checkpoint.py
+    scen_kernel_gates 가중치가 통째로 안 실리고 조용히 넘어갔다(test.py
     가 test_scr.py를 그대로 못 쓰고 새로 만들어야 했던 것과 동일한 원인). 이 함수를
-    test_phase1_checkpoint.py의 재구성 로직과 동일하게 맞춘다(중복 구현이지만 그쪽은
+    test.py의 재구성 로직과 동일하게 맞춘다(중복 구현이지만 그쪽은
     데이터셋 로딩까지 포함된 훨씬 무거운 함수라 그대로 임포트해 재사용하기보다 필요한
     부분만 여기 옮기는 게 낫다 — 이 함수는 순수 추론 벤치마크용이라 실제 데이터셋은
     필요 없다)."""
@@ -464,7 +464,7 @@ def _build_model_for_run(b: RunBundle, device: torch.device, ckpt_name: str,
 
     scen_group_ids = None
     if b.synergy_groups_json:
-        scen_group_ids = _base._load_synergy_group_ids(
+        scen_group_ids = _load_synergy_group_ids(
             b.synergy_groups_json, b.spec.n_scenarios, b.spec.scenario_names,
         )
 

@@ -4,7 +4,7 @@ K 선택 진단 -- axis_comparison.py가 저장한 hi_window_features.csv를 재
 꺾은선으로 그린다. K_RANGE=(2,6)이 매번 상한에 붙던 문제(원래 axis_comparison.py)
 의 원인을 눈으로 확인하기 위함.
 
-Run: python 4_hi_analysis/k_selection_diagnostics.py
+Run: python 4_hi_analysis/tools/k_selection_diagnostics.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OUT_DIR = PROJECT_ROOT / "4_hi_analysis" / "outputs" / "axis_comparison"
 FEAT_PATH = OUT_DIR / "hi_window_features.csv"
 

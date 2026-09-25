@@ -1,49 +1,30 @@
 """
-5_model/experiments/phase1_lab/test_phase1_checkpoint.py
+9_eval/test.py
 
-phase1_trainer_v2.py가 저장한 체크포인트(checkpoints/best_by_saturation.pt)를 test split에서
-평가하고, 대표 셀의 용량곡선 비교 플랏을 그린다.
+train.py(v4, shared_gate)가 저장한 체크포인트(checkpoints/best_by_saturation.pt)를
+test split에서 평가하고, 대표 셀의 용량곡선 비교 플랏을 그린다. run_dir/config.yaml(트레이너가
+저장한 완전히 해석된 cfg)과 run_dir/p1v2_summary.json(kernel_features_pkl 등 경로)을 자동으로
+읽는다 — interaction_json은 p1v2_summary.json에 기록되지만, 값이 없거나 산출물을 옮긴 경우엔
+--interaction-json으로 다시 지정한다.
 
-왜 5_model/test_scr.py를 그대로 못 쓰는가: test_scr.py는 "Phase 2" 체크포인트(norm_mean/std와
-cfg를 통째로 저장, classifier 라우팅 지원)를 가정한다. phase1_trainer_v2.py의 체크포인트는
-{"model_state","epoch","gate_saturation","val_rmse"}만 저장하고, SCRModel도 scen_group_ids
-(v3)/shared_hi_mask(v4)/n_kernel_hi(커널 피처 버전)로 구성될 수 있어 test_scr.py의 모델
-재구성 로직(이 세 kwarg를 모르는 채로 SCRModel을 만듦)과 맞지 않는다 — 그대로 로드하면
-norm_mean 키 누락으로 즉시 죽거나, 아키텍처 불일치로 load_state_dict가 깨진다.
+hard/soft 라우팅: train.py는 lambda_scen>0이면 SCRModel에 probe_mlp라는
+dual-objective 분류 헤드(probe_x+direction -> level_logits)를 CE로 함께 학습한다(scr_model.py
+forward 참고) — 입력 형태가 SCREvaluator.set_classifier()와 완전히 같아 그대로 꽂힌다. 이
+스크립트는 checkpoint에 probe_mlp가 있으면 자동으로 oracle/hard/soft 전부 평가하고, 없으면
+(lambda_scen=0) oracle만 평가한다 — 분류기를 별도로 학습하는 스텝 없이도 라우팅 현실성(hard)을
+볼 수 있다.
 
-대신 phase1_trainer_v2.py와 완전히 동일한 방식으로 cfg/spec/데이터/모델을 재구성한 뒤(중복
-구현 금지 — train_scr.py/test_scr.py/phase1_trainer_v2.py의 기존 함수만 재사용), 평가 자체는
-test_scr.py와 같은 SCREvaluator(5_model/evaluation/scr_evaluator.py)를 그대로 쓴다.
-
-hard/soft 라우팅(2026-09-03 복원): phase1_trainer_v2.py는 lambda_scen>0이면 SCRModel에
-probe_mlp라는 dual-objective 분류 헤드(probe_x+direction -> level_logits)를 CE로 함께
-학습한다(scr_model.py forward 참고) — 원래 있던 별도 시나리오 분류기(train_classifier.py,
-run_pipeline.py 구 Step 7)와는 목적이 다른 보조 헤드지만, 입력 형태가 완전히 같아
-SCREvaluator.set_classifier(model.probe_mlp)로 그대로 꽂힌다. 이 스크립트는 checkpoint에
-probe_mlp가 있으면 자동으로 oracle/hard/soft 전부 평가하고, 없으면(lambda_scen=0) oracle만
-평가한다 — 분류기를 별도로 학습하는 스텝 없이도 라우팅 현실성(hard)을 볼 수 있다.
-
-run_dir/config.yaml(트레이너가 저장한, 완전히 해석된 cfg)과 run_dir/p1v2_summary.json
-(synergy_groups_json/kernel_features_pkl 경로)을 자동으로 읽으므로 v0/v2/v3/v-ctrl/v0-ctrl
-run은 --run-dir와 --rep-cells만 주면 된다. v4(shared_gate)는 interaction_json이
-p1v2_summary.json에 기록되지 않으므로 --interaction-json으로 학습 때 쓴 파일을 다시 지정해야
-한다.
-
-사용 예:
-  python 5_model/experiments/phase1_lab/test_phase1_checkpoint.py \
-      --run-dir 5_model/experiments/phase1_lab/results/p1v2_runs/0828_1549_p1v2_p1v0ctrl_full_seed42 \
+사용 예(--run-dir은 2026-09-23 재배치 이전의 기존 run 경로도 그대로 쓸 수 있다 — results/
+자체는 안 옮겼음):
+  python 9_eval/test.py \
+      --run-dir legacy_results/experiments/phase1_lab/results/p1v2_runs/<v4_run> \
       --rep-cells b1c0 b1c1
 
-  # v4(shared_gate) checkpoint는 --interaction-json도 같이 지정:
-  python 5_model/experiments/phase1_lab/test_phase1_checkpoint.py \
-      --run-dir 5_model/experiments/phase1_lab/results/p1v2_runs/<v4_run> \
-      --interaction-json 5_model/experiments/phase1_lab/results/hi_scenario_interaction_k25_full_N2.json \
+  # interaction_json이 p1v2_summary.json에 없거나 산출물을 옮겼다면 다시 지정:
+  python 9_eval/test.py \
+      --run-dir legacy_results/experiments/phase1_lab/results/p1v2_runs/<v4_run> \
+      --interaction-json legacy_results/experiments/phase1_lab/results/hi_scenario_interaction_k25_full_N2.json \
       --rep-cells b1c0
-
-  # 여러 run(v0/v2/v3/v4)을 plot_phase1_capacity_comparison.py로 한 그림에 비교하려면
-  # --export-for-visualize를 추가해 각 run_dir에 metrics/predictions/routing을 채워둔다:
-  python 5_model/experiments/phase1_lab/test_phase1_checkpoint.py \
-      --run-dir <run> --rep-cells b1c0 --export-for-visualize
 """
 
 from __future__ import annotations
@@ -53,8 +34,9 @@ import json
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
+sys.path.insert(0, str(PROJECT_ROOT / "8_train"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 _HERE = Path(__file__).resolve().parent
@@ -79,6 +61,7 @@ try:
 except ImportError:
     _HAS_MPL = False
 
+import parameters as P  # noqa: E402 — 재현성/평가 파라미터 단일 소스
 from utils.io_utils import load_config  # noqa: E402
 from utils.hi_schema import get_hi_cols_for_seg  # noqa: E402
 from datasets.segment_dataset import build_datasets  # noqa: E402
@@ -86,18 +69,42 @@ from models.scr_model import SCRModel  # noqa: E402
 from evaluation.scr_evaluator import SCREvaluator  # noqa: E402
 from common.scenario import get_segmenter  # noqa: E402
 
-import train_scr as _base  # noqa: E402 (synergy group 로더 재사용)
-import test_scr as _tbase  # noqa: E402 (_resolve_device/_pick_rep_cells 재사용)
-from phase1_trainer_v2 import (  # noqa: E402 (중복 구현 금지)
+from train import (  # noqa: E402 (중복 구현 금지)
     _apply_kernel_features, _build_redundancy_mask,
 )
+
+
+def _resolve_device(device_str: str) -> torch.device:
+    """2026-09-24: model_lib/legacy/test_scr.py(Stage0, 삭제됨)에서 이전 — 이 스크립트만
+    쓰는 단일 소비자라 공용 모듈로 안 빼고 로컬로 유지."""
+    if device_str == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device_str)
+
+
+def _pick_rep_cells(test_ds, cfg: dict, n_per_dataset: int = 1) -> list[str]:
+    """2026-09-24: model_lib/legacy/test_scr.py(Stage0, 삭제됨)에서 이전."""
+    data_cfg   = cfg["data"]
+    seg_dir    = PROJECT_ROOT / data_cfg["seg_data_dir"]
+    test_cells = sorted(set(test_ds.cell_ids))
+    picked: list[str] = []
+    for ds_name in data_cfg.get("datasets", []):
+        ds_dir = seg_dir / ds_name
+        if not ds_dir.exists():
+            continue
+        ds_cell_set = {p.stem for p in ds_dir.glob("*.pkl")}
+        candidates  = [c for c in test_cells if c in ds_cell_set]
+        picked.extend(candidates[:n_per_dataset])
+    if not picked:
+        picked = test_cells[:n_per_dataset * 2]
+    return picked
 
 
 class _KernelAugmentedDataset(torch.utils.data.Dataset):
     """SCREvaluator.predict_dataset은 표준 DataLoader(+scr_evaluator._collate)를 쓰는데,
     SegmentDataset.__getitem__(datasets/segment_dataset.py)은 x_kernel을 모르는 고정
     dict만 반환한다 — x_kernel은 FastTensorLoader(트레이너 전용)만 hasattr(ds,"x_kernel")로
-    감지해서 배치에 넣어준다. 그래서 커널 있는 checkpoint(v2/v3/v4)를 SCREvaluator로 평가하면
+    감지해서 배치에 넣어준다. 그래서 커널 있는 checkpoint(v4)를 SCREvaluator로 평가하면
     forward에서 KeyError: 'x_kernel'이 난다. segment_dataset.py/scr_evaluator.py는 건드리지
     않고(중복 구현/기존 스크립트 수정 금지), 여기서만 __getitem__에 x_kernel을 끼워 넣는
     얇은 래퍼로 우회한다. __getattr__로 나머지 속성(cell_ids/cycles/seg_names 등)은 원본
@@ -120,48 +127,42 @@ class _KernelAugmentedDataset(torch.utils.data.Dataset):
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="phase1_trainer_v2.py 체크포인트 test 평가 + 대표 셀 용량곡선 비교 플랏"
+        description="train.py 체크포인트 test 평가 + 대표 셀 용량곡선 비교 플랏"
     )
     p.add_argument("--run-dir", required=True, dest="run_dir",
                    help="results/p1v2_runs/<run> 디렉터리(config.yaml/p1v2_summary.json이 있는 곳)")
     p.add_argument("--checkpoint", default=None,
                    help="기본값: <run-dir>/checkpoints/best_by_saturation.pt")
-    p.add_argument("--interaction-json", default=None, dest="interaction_json",
-                   help="v4(shared_gate) checkpoint 전용 — p1v2_summary.json에 기록돼 있으면 "
-                        "자동 적용되고, 안 돼 있으면(구버전) 학습 때 준 "
-                        "test_hi_scenario_interaction.py 산출물을 다시 지정해야 함")
-    p.add_argument("--kernel-features-pkl", default=None, dest="kernel_features_pkl",
-                   help="2026-09-19 추가 — p1v2_summary.json에 기록된 경로를 무시하고 이 값을 "
-                        "쓴다. 학습 후 산출물을 옮긴 경우(예: run_dir 재구성) summary.json의 "
-                        "기록이 낡아져 FileNotFoundError가 나는데, 그럴 때 직접 지정하는 용도 "
-                        "— 보통은 자동 탐지로 충분하니 안 줘도 됨.")
-    p.add_argument("--combined-redundancy-json", default=None, dest="combined_redundancy_json",
-                   help="2026-09-19 추가 — 위와 동일 이유의 오버라이드(kernel-features-pkl과 "
-                        "짝을 이루는 파일이라 보통 같이 옮겨졌을 것).")
-    p.add_argument("--regression-model", default="mlp", dest="regression_model",
-                   choices=["mlp", "transformer", "i_transformer", "resnet_tab", "ft_transformer"],
-                   help="학습 때 --regression-model을 오버라이드했다면 동일하게 지정 "
-                        "(config.yaml에는 반영 안 돼 있음 — 기본값 mlp면 신경 안 써도 됨)")
-    p.add_argument("--rep-cells", nargs="+", default=None, dest="rep_cells",
+    p.add_argument("--interaction-json", default=P.ACTIVE_INTERACTION_JSON, dest="interaction_json",
+                   help="shared_gate(v4) 구성 — 보통 p1v2_summary.json에 기록된 경로가 자동 "
+                        "적용되므로, 그 기록이 없거나 산출물을 옮겼을 때만 지정하면 됨 "
+                        "(parameters.py 기본 None=자동 탐지)")
+    p.add_argument("--kernel-features-pkl", default=P.ACTIVE_KERNEL_FEATURES_PKL,
+                   dest="kernel_features_pkl",
+                   help="p1v2_summary.json에 기록된 경로를 무시하고 이 값을 쓴다. 학습 후 "
+                        "산출물을 옮긴 경우(예: run_dir 재구성) summary.json의 기록이 낡아져 "
+                        "FileNotFoundError가 나는데, 그럴 때 직접 지정하는 용도 — 보통은 자동"
+                        "탐지로 충분하니 안 줘도 됨(parameters.py 기본 None).")
+    p.add_argument("--combined-redundancy-json", default=P.ACTIVE_COMBINED_REDUNDANCY_JSON,
+                   dest="combined_redundancy_json",
+                   help="위와 동일 이유의 오버라이드(kernel-features-pkl과 짝을 이루는 파일이라 "
+                        "보통 같이 옮겨졌을 것). parameters.py 기본 None.")
+    p.add_argument("--rep-cells", nargs="+", default=P.ACTIVE_REP_CELLS, dest="rep_cells",
                    help="비교 플랏을 그릴 셀 ID(들). 미지정 시 데이터셋별 5개 자동 선정"
                         "(2026-09-18, 기존 1개 -> 5개)")
-    p.add_argument("--data-dir", default=None, dest="data_dir",
+    p.add_argument("--data-dir", default=P.ACTIVE_DATA_DIR, dest="data_dir",
                    help="config.yaml의 data.data_dir 오버라이드 — run마다 학습 당시 머신의 "
                         "경로(상대경로 또는 다른 드라이브)가 그대로 박혀있어, 이 스크립트를 "
                         "돌리는 머신에 그 경로가 없으면 필요")
-    p.add_argument("--seg-data-dir", default=None, dest="seg_data_dir",
+    p.add_argument("--seg-data-dir", default=P.ACTIVE_SEG_DATA_DIR, dest="seg_data_dir",
                    help="config.yaml의 data.seg_data_dir 오버라이드 (위와 동일 이유)")
-    p.add_argument("--device", default="auto")
-    p.add_argument("--export-for-visualize", action="store_true", dest="export_for_visualize",
-                   help="(레거시, 기본 동작이 됨— 지정 여부 무관) metrics/metrics.json, "
-                        "predictions/test_predictions.csv, routing/routing_table.csv는 "
-                        "이제 항상 저장된다(2026-09-06)")
+    p.add_argument("--device", default=P.FIXED_DEVICE or "auto")
     return p.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    device = _tbase._resolve_device(args.device)
+    device = _resolve_device(args.device)
     print(f"[test_p1] device={device}")
 
     run_dir = Path(args.run_dir)
@@ -171,7 +172,7 @@ def main() -> None:
     cfg_path = run_dir / "config.yaml"
     if not cfg_path.exists():
         raise FileNotFoundError(
-            f"{cfg_path} 없음 — phase1_trainer_v2.py가 만든 run 디렉터리가 맞는지 확인하세요"
+            f"{cfg_path} 없음 — train.py가 만든 run 디렉터리가 맞는지 확인하세요"
         )
     cfg = load_config(str(cfg_path))
     if args.data_dir is not None:
@@ -186,7 +187,7 @@ def main() -> None:
 
     def _resolve_summary_path(v):
         # p1v2_summary.json에는 트레이너 실행 당시 cwd 기준 상대경로가 그대로 남아있을 수
-        # 있어(예: "5_model/experiments/.../kernel_v3.pkl"), 이 스크립트를 다른 cwd에서
+        # 있어(예: "legacy_results/experiments/.../kernel_v3.pkl"), 이 스크립트를 다른 cwd에서
         # 실행해도 항상 찾도록 PROJECT_ROOT 기준으로 고정한다.
         if not v:
             return None
@@ -203,7 +204,6 @@ def main() -> None:
             return fallback
         return resolved
 
-    synergy_groups_json = _resolve_summary_path(summary.get("synergy_groups_json"))
     kernel_features_pkl = (Path(args.kernel_features_pkl) if args.kernel_features_pkl
                             else _resolve_summary_path(summary.get("kernel_features_pkl")))
     combined_redundancy_json = (Path(args.combined_redundancy_json) if args.combined_redundancy_json
@@ -224,7 +224,6 @@ def main() -> None:
     ).get_spec()
     train_ds, val_ds, test_ds, norm = build_datasets(cfg, spec=spec)
 
-    kernel_names_by_scen = None
     kernel_hi_counts = None
     kernel_costs_by_scen = None
     combined_redundancy = None
@@ -233,24 +232,17 @@ def main() -> None:
         combined_redundancy = json.loads(Path(combined_redundancy_json).read_text(encoding="utf-8"))
     if kernel_features_pkl:
         print(f"[test_p1] kernel-features-pkl 자동 적용(p1v2_summary.json): {kernel_features_pkl}")
-        kernel_names_by_scen, kernel_hi_counts, kernel_costs_by_scen = _apply_kernel_features(
+        _, kernel_hi_counts, kernel_costs_by_scen = _apply_kernel_features(
             [train_ds, val_ds, test_ds], Path(kernel_features_pkl), spec,
             combined_redundancy=combined_redundancy,
         )
     if combined_redundancy is not None:
-        # 2026-09-21: 입력 레벨 nan_mask 이중 마스킹은 제거(phase1_trainer_v2.py와 동일 이유
+        # 2026-09-21: 입력 레벨 nan_mask 이중 마스킹은 제거(train.py와 동일 이유
         # — probe_x가 그 nan_mask를 공유해서 분류기 정확도를 붕괴시키는 버그였음). 학습 때와
         # 똑같이 게이트 레벨 redundancy_mask만 적용해야 체크포인트와 아키텍처가 일치한다.
         redundancy_mask = _build_redundancy_mask(combined_redundancy, spec)
         print(f"[test_p1] combined-redundancy-json 자동 적용(p1v2_summary.json): {combined_redundancy_json} "
               f"(게이트 출력 0-강제만 적용, {int((~redundancy_mask).sum().item())}개 (시나리오,HI) 조합 배제)")
-
-    scen_group_ids = None
-    if synergy_groups_json:
-        print(f"[test_p1] synergy-groups-json 자동 적용(p1v2_summary.json): {synergy_groups_json}")
-        scen_group_ids = _base._load_synergy_group_ids(
-            Path(synergy_groups_json), spec.n_scenarios, spec.scenario_names,
-        )
 
     interaction_json = args.interaction_json or (
         str(_resolve_summary_path(summary.get("interaction_json"))) if summary.get("interaction_json") else None
@@ -273,29 +265,18 @@ def main() -> None:
 
     lambda_scen = cfg.get("loss", {}).get("lambda_scen", 0.0)
     with_probe_mlp = lambda_scen > 0
-    p1_model_cfg = {**cfg["model"], "regression_model": args.regression_model,
-                     "with_raw_cnn": False, "with_raw_flat": False}
-
-    # 2026-09-17 안건2: p1v2_summary.json 자동감지 — 학습 때
-    # --scen-gate-direction-only/--scenario-onehot-input을 줬으면 체크포인트 재구성 시에도
-    # 반드시 같은 아키텍처(n_gate_groups/scenario_onehot)로 만들어야 load_state_dict가 맞는다.
-    scen_gate_direction_only = bool(summary.get("scen_gate_direction_only", False))
-    scenario_onehot_input = bool(summary.get("scenario_onehot_input", False))
-    if scen_gate_direction_only:
-        print("[test_p1] scen_gate_direction_only 적용 [p1v2_summary.json 자동감지]")
-    if scenario_onehot_input:
-        print("[test_p1] scenario_onehot_input 적용 [p1v2_summary.json 자동감지]")
+    # regression_model은 항상 cfg["model"]의 저장값(v4는 항상 "mlp") 그대로 쓴다 — 다른
+    # 아키텍처(transformer 등)는 sanity-check용으로만 쓰이던 옵션이라 여기서 오버라이드할
+    # 이유가 없다. with_raw_cnn/with_raw_flat도 v4에서 항상 비활성.
+    p1_model_cfg = {**cfg["model"], "with_raw_cnn": False, "with_raw_flat": False}
 
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
         spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
-        scen_group_ids=scen_group_ids,
         shared_hi_mask=shared_hi_mask,
         kernel_hi_counts=kernel_hi_counts,
         kernel_hi_costs=kernel_costs_by_scen,
         redundancy_mask=redundancy_mask,
-        n_gate_groups=(2 if scen_gate_direction_only else None),
-        scenario_onehot=scenario_onehot_input,
     ).to(device)
     model.load_state_dict(ckpt["model_state"], strict=True)
     model.eval()
@@ -303,7 +284,7 @@ def main() -> None:
     if hasattr(test_ds, "x_kernel"):
         test_ds = _KernelAugmentedDataset(test_ds)
 
-    rep_cells = args.rep_cells or _tbase._pick_rep_cells(test_ds, cfg, 5)
+    rep_cells = args.rep_cells or _pick_rep_cells(test_ds, cfg, 5)
     print(f"[test_p1] rep_cells: {rep_cells}")
 
     figures_dir = run_dir / "figures"
@@ -596,7 +577,7 @@ def _export_for_visualize(run_dir: Path, evaluator: SCREvaluator, test_modes: di
     """visualize_results.py의 RunBundle(__init__에서 metrics/predictions/routing을
     무조건 다 읽음)이 phase1_lab run_dir을 로드할 수 있도록, test_scr.py Phase2 run이
     남기는 것과 같은 스키마로 세 파일을 추가 저장한다. checkpoints/*.pt, config.yaml,
-    scenario_spec.json, gates/*.json은 phase1_trainer_v2.py가 이미 저장해두므로 손댈 필요
+    scenario_spec.json, gates/*.json은 train.py가 이미 저장해두므로 손댈 필요
     없음 — 여기서 부족한 세 파일만 채운다(RunBundle/_plot_capacity_curve_comparison 코드는
     무수정)."""
     import csv

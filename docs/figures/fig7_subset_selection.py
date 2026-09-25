@@ -11,7 +11,7 @@ run, i.e. the deployed subset -- raw HI (64) AND kernel HI (59).
 
 Real data only -- gates/regression_HIs.json + gates/regression_kernel_HIs.json
 from the same canonical run Fig6 uses (0904_1708_..._seed42), no retraining/
-checkpoint loading needed (phase1_trainer_v2.py already exports both at the
+checkpoint loading needed (train.py already exports both at the
 end of training). Reuses fig3's category ordering/coloring
 (base_names_and_categories, CAT_*) so the two figures read against the same
 visual vocabulary.
@@ -44,11 +44,11 @@ from fig3_hi_design_rationale import CAT_ORDER, CAT_LABEL, CAT_COLOR, base_names
 
 setup_rcparams()
 
-RUN_DIR = (PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs/"
+RUN_DIR = (PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs/"
            "0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42")
 GATE_JSON = RUN_DIR / "gates" / "regression_HIs.json"
 KERNEL_GATE_JSON = RUN_DIR / "gates" / "regression_kernel_HIs.json"
-INTERACTION_JSON = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/hi_scenario_interaction_k25_full_N2.json"
+INTERACTION_JSON = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/hi_scenario_interaction_k25_full_N2.json"
 
 SCEN_NAMES = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]
 KERNEL_COLOR = "#555555"   # matches plot_hi_selection_matrix.py's dev-tool convention

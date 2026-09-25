@@ -1,5 +1,5 @@
 """
-5_model/experiments/phase1_lab/test_hi_scenario_interaction.py
+5_interaction/interaction.py
 
 HI x 시나리오 상호작용 통계 검정 — v4의 선행 작업(docs/260824_RESULTS.md 기준 5,
 "차기 버전 설계안 v4" 참고). 모델과 완전히 분리된 절차로, "이 HI가 시나리오마다
@@ -14,13 +14,13 @@ HI의 "상호작용 증거"로 삼고, 64개 HI에 대해 Benjamini-Hochberg로 
 이 스크립트의 산출물(JSON)은:
   1) v4의 shared_gate/scen_gates 라우팅 결정(유의미한 HI만 시나리오별 게이트 유지)
   2) plot_hi_scenario_interaction.py의 입력
-에 쓰인다. train split만 사용(val/test 누수 없음) — build_synergy_groups.py와
+에 쓰인다. train split만 사용(val/test 누수 없음) — synergy.py와
 동일한 데이터 로더(_load_all_scenarios)를 그대로 재사용(중복 구현 금지 원칙).
 
 사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir은 표준 조합이면 생략 가능 —
 기본값 자동 적용):
-  python 5_model/experiments/phase1_lab/test_hi_scenario_interaction.py \
-      --model-config 5_model/config/main_qfref_S.yaml \
+  python 5_interaction/interaction.py \
+      --model-config model_lib/config/main_qfref_S.yaml \
       --split-seed 42 --alpha 0.05 --tag k25_full_N2
 """
 
@@ -35,11 +35,12 @@ from pathlib import Path
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
-PROJECT_ROOT = _HERE.parent.parent.parent
-RESULTS_DIR = _HERE / "results"
+PROJECT_ROOT = _HERE.parent
+RESULTS_DIR = PROJECT_ROOT / "model_lib" / "results"
 
 sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+sys.path.insert(0, str(PROJECT_ROOT / "6_synergy"))
+sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -50,24 +51,17 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-from build_synergy_groups import _load_all_scenarios  # noqa: E402 — 중복 구현 금지, 그대로 재사용
+from synergy import _load_all_scenarios  # noqa: E402 — 중복 구현 금지, 그대로 재사용
+import parameters as P  # noqa: E402 — 축/실행/통계 파라미터 단일 소스
 
-# 루트는 data_directories.py의 DATA_4_HI_ROOT_STR에서 가져온다(build_synergy_groups.py/
-# lambda_sweep.py와 동일 이유 — PC마다 실제 드라이브가 다름).
-from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
-
-_DATA_ROOT = f"{DATA_4_HI_ROOT_STR}/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200"
-DEFAULT_DATA_DIR = f"{_DATA_ROOT}/cycle"
-DEFAULT_SEG_DATA_DIR = f"{_DATA_ROOT}/seg"
-
-# seg-axis/axis-config도 이 세션 전체에서 한 번도 안 바뀐 고정값 — 위 데이터 경로와 세트로
-# 묶인 값이라(다른 조합이면 데이터 경로도 같이 바뀌어야 함) 다른 조합을 쓰려면 셋 다
-# 함께 오버라이드해야 한다.
-DEFAULT_SEG_AXIS = "q_frac_ref"
-DEFAULT_AXIS_CONFIG = json.dumps({
-    "n1": 0.35, "n2": 0.20, "ref_lag": 0, "noise_amp": 0.03,
-    "noise_mode": "ou", "noise_period_cycles": 200, "n_samples": 2,
-})
+# seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
+# 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
+# lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다 — train.py에서
+# 먼저 발견/수정한 것과 동일한 지뢰).
+DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS
+DEFAULT_AXIS_CONFIG = json.dumps(P.ACTIVE_AXIS_CONFIG)
+DEFAULT_DATA_DIR = P.FIXED_CANONICAL_DATA_DIR
+DEFAULT_SEG_DATA_DIR = P.FIXED_CANONICAL_SEG_DATA_DIR
 
 
 def _parse_args() -> argparse.Namespace:
@@ -78,15 +72,19 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR)
     p.add_argument("--datasets", nargs="+", default=["MIT", "HUST"])
-    p.add_argument("--split-seed", type=int, default=42)
-    p.add_argument("--alpha", type=float, default=0.05,
-                   help="BH 보정 후 유의성 판정 기준(기본 0.05) — 참고용, 표본이 "
+    p.add_argument("--split-seed", type=int,
+                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else 42)
+    p.add_argument("--alpha", type=float, default=P.FIXED_INTERACTION_ALPHA,
+                   help=f"BH 보정 후 유의성 판정 기준(parameters.py 기본 "
+                        f"{P.FIXED_INTERACTION_ALPHA}) — 참고용, 표본이 "
                         "수십만~백만 행이라 참값과 무관하게 거의 항상 유의하게 나온다 "
                         "(실측: 초기 테스트에서 66/66 전부 유의). shared_gate 배정은 "
                         "이것만으로 하지 말고 --min-effect-size와 함께 봐야 한다.")
-    p.add_argument("--min-effect-size", type=float, default=0.1, dest="min_effect_size",
+    p.add_argument("--min-effect-size", type=float,
+                   default=P.FIXED_INTERACTION_MIN_EFFECT_SIZE, dest="min_effect_size",
                    help="시나리오 간 상관계수의 표준편차(std_r_across_scenarios)가 이 값 "
-                        "미만이면 '실질적으로 불변'으로 본다. 기본 0.1 = Cohen 상관계수 "
+                        f"미만이면 '실질적으로 불변'으로 본다. parameters.py 기본 "
+                        f"{P.FIXED_INTERACTION_MIN_EFFECT_SIZE} = Cohen 상관계수 "
                         "'작음' 관행(이 문서 시너지 Level1의 |r|>=0.1 문턱과 동일 기준 재사용, "
                         "일관성 유지). 실측 분포가 0.043~0.207 사이에 뚜렷한 이봉분포 없이 "
                         "연속적으로 퍼져 있어(자연스러운 무릎이 없음) 0.05는 63/64가 통과해 "
@@ -95,15 +93,16 @@ def _parse_args() -> argparse.Namespace:
                         "비교 15개 중 극값을 고르는 것이라 진짜 차이가 없어도 순전히 표본 "
                         "변동만으로 부풀려진다(order-statistics 효과).")
     p.add_argument("--shuffle-from", default=None, dest="shuffle_from",
-                   help="v4-ctrl 전용(build_synergy_groups.py --shuffle-from과 동일 취지): "
+                   help="v4-ctrl 전용(synergy.py --shuffle-from과 동일 취지): "
                         "이 경로의 hi_scenario_interaction_*.json이 가진 공유/특이 HI *개수*는 "
                         "그대로 두고, 어떤 HI가 공유인지만 무작위로 재배정한다. 통계 검정 자체는"
                         "안 돌리고 건너뛴다 — 각 HI의 r_by_scenario/std_r 등 실제 계산값은 "
                         "참조 파일 값을 그대로 복사해 진단용으로 남기되(--shuffle-from 없을 때와 "
                         "동일 스키마 유지, 다운스트림 스크립트 무수정 호환), shared_gate 라우팅을 "
                         "결정하는 'significant' 필드만 무작위로 덮어쓴다.")
-    p.add_argument("--shuffle-seed", type=int, default=42, dest="shuffle_seed",
-                   help="--shuffle-from 전용 무작위 배정 시드")
+    p.add_argument("--shuffle-seed", type=int, default=P.FIXED_SHUFFLE_SEED, dest="shuffle_seed",
+                   help=f"--shuffle-from 전용 무작위 배정 시드 (parameters.py 기본 "
+                        f"{P.FIXED_SHUFFLE_SEED})")
     p.add_argument("--tag", required=True)
     p.add_argument("--out-dir", default=None, dest="out_dir",
                    help="산출물 저장 위치(기본: results/) — run_pipeline.py가 Step 9 학습 "
@@ -113,7 +112,7 @@ def _parse_args() -> argparse.Namespace:
 
 def _shuffle_significant(ref_path: str, seed: int) -> dict:
     """참조 interaction json의 공유/특이 *개수*는 유지하고 배정만 무작위로 섞는다
-    (build_synergy_groups.py의 build_groups_shuffled와 동일 원칙 — 대조군은 실제 산출물과
+    (synergy.py의 build_groups_shuffled와 동일 원칙 — 대조군은 실제 산출물과
     피처/구조 규모가 같아야 순수 효과 비교가 성립한다)."""
     ref = json.loads(Path(ref_path).read_text(encoding="utf-8"))
     per_hi = ref["per_hi"]

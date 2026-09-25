@@ -103,7 +103,7 @@ class GroupedHardConcreteGate(HardConcreteGate):
     이 흔들림이 줄어든다. forward/gate_prob/active_indices 등은 log_alpha를 그대로
     참조하므로 HardConcreteGate 쪽 구현을 재사용하고, log_alpha만 property로 재정의한다.
 
-    group_ids: 길이 n_features, 값은 0..n_groups-1 (build_synergy_groups.py의
+    group_ids: 길이 n_features, 값은 0..n_groups-1 (synergy.py의
                seg_{s}_groups를 펼친 것). 시너지 그룹 정보가 없는(모든 HI가 자기 혼자인)
                경우 group_ids=range(n_features)를 주면 일반 HardConcreteGate와 동등하다.
     """

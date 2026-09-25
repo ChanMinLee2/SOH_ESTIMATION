@@ -27,9 +27,9 @@ plot_cell_cycles.py
     임계와 무관하게 항상 제거 후보로 강제된다. (예: b1c23 charge 1003 만 제거)
 
 사용:
-  python 4_hi_analysis/plot_cell_cycles.py --cell b1c0
-  python 4_hi_analysis/plot_cell_cycles.py --dataset hust --cell 1-1
-  python 4_hi_analysis/plot_cell_cycles.py --cell b1c1 --dev-thresh-charge 0.05
+  python 4_hi_analysis/tools/plot_cell_cycles.py --cell b1c0
+  python 4_hi_analysis/tools/plot_cell_cycles.py --dataset hust --cell 1-1
+  python 4_hi_analysis/tools/plot_cell_cycles.py --cell b1c1 --dev-thresh-charge 0.05
 """
 
 import argparse
@@ -44,7 +44,7 @@ import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # MIT_DIR  = PROJECT_ROOT / "_4_data_hi" / "clean" / "MIT"
 # HUST_DIR = PROJECT_ROOT / "_4_data_hi" / "clean" / "HUST"
 MIT_DIR   = PROJECT_ROOT / "_1_data_unified" / "MIT"
@@ -55,7 +55,7 @@ TJU_DIR   = PROJECT_ROOT / "_1_data_unified" / "TJU"
 # voltage_V/current_A/time_s/capacity_Ah 컬럼)가 MIT/HUST와 동일해 이 dict 조회
 # 추가만으로 나머지 로직(load_cell/compute_qfrac/plot_overlay) 전부 무수정 재사용 가능.
 _DATASET_DIRS = {"mit": MIT_DIR, "hust": HUST_DIR, "calce": CALCE_DIR, "tju": TJU_DIR}
-STEP_DIR = Path(__file__).resolve().parent
+STEP_DIR = Path(__file__).resolve().parent.parent
 SHAPE_CSV = PROJECT_ROOT / "2_preprocess" / "outputs" / "shape_outlier_report.csv"
 MANUAL_CSV = PROJECT_ROOT / "2_preprocess" / "manual_outliers.csv"
 

@@ -7,9 +7,9 @@ plot_cycle_segments.py
   아래: 전 사이클 방전 용량 열화 곡선 (선택 사이클 강조 표시)
 
 사용:
-  python 4_hi_analysis/plot_cycle_segments.py
-  python 4_hi_analysis/plot_cycle_segments.py --cell b1c0 --cycle 2
-  python 4_hi_analysis/plot_cycle_segments.py --dataset hust --cell 1-1 --cycle 5
+  python 4_hi_analysis/tools/plot_cycle_segments.py
+  python 4_hi_analysis/tools/plot_cycle_segments.py --cell b1c0 --cycle 2
+  python 4_hi_analysis/tools/plot_cycle_segments.py --dataset hust --cell 1-1 --cycle 5
 """
 
 import argparse
@@ -22,10 +22,10 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MIT_DIR  = PROJECT_ROOT / "_1_data_unified" / "MIT"
 HUST_DIR = PROJECT_ROOT / "_1_data_unified" / "HUST"
-STEP_DIR = Path(__file__).resolve().parent
+STEP_DIR = Path(__file__).resolve().parent.parent
 
 for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
     try:

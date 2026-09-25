@@ -65,16 +65,16 @@ from fig3_hi_design_rationale import base_names_and_categories
 
 setup_rcparams()
 
-RUNS_DIR = PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs"
+RUNS_DIR = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs"
 RUNS = {
     "MIT":  RUNS_DIR / "0908_0100_p1v2_p1v4_mit_only_seed42",
     "HUST": RUNS_DIR / "0908_0358_p1v2_p1v4_hust_only_seed42",
     "TJU":  RUNS_DIR / "0910_1533_p1v2_p1v4_tju_only_seed42",
 }
 KERNEL_PKL = {
-    "MIT":  PROJECT_ROOT / "5_model/experiments/phase1_lab/results/kernel_group_features_mit_only.pkl",
-    "HUST": PROJECT_ROOT / "5_model/experiments/phase1_lab/results/kernel_group_features_hust_only.pkl",
-    "TJU":  PROJECT_ROOT / "5_model/experiments/phase1_lab/results/kernel_group_features_tju_only.pkl",
+    "MIT":  PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/kernel_group_features_mit_only.pkl",
+    "HUST": PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/kernel_group_features_hust_only.pkl",
+    "TJU":  PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/kernel_group_features_tju_only.pkl",
 }
 PAIRS = [("MIT", "HUST"), ("MIT", "TJU"), ("HUST", "TJU")]
 SCEN_NAMES = ["chg_lo", "chg_mid", "chg_hi", "dis_hi", "dis_mid", "dis_lo"]

@@ -1,11 +1,11 @@
 """
-5_model/experiments/phase1_lab/log_utils.py
+model_lib/log_utils.py
 
 docs/phase1_lab/RESULTS_LOG.md에 실험 기록을 자동으로 append하는 공용 유틸.
-analyze_convergence.py / analyze_hi_synergy.py / materialize_ensemble_gates.py /
-run_all_stages.py가 각자 실행 끝에 append_log_entry()를 호출해 로그를 남긴다 —
-사람이 수동으로 복사-붙여넣기 할 필요 없음(기존에 만든 RESULTS_LOG.md 템플릿과
-동일한 형식으로 append만 함, 기존 내용은 절대 덮어쓰지 않음).
+6_synergy/synergy.py / 7_kernel/kernel.py가
+각자 실행 끝에 append_log_entry()를 호출해 로그를 남긴다 — 사람이 수동으로
+복사-붙여넣기 할 필요 없음(기존에 만든 RESULTS_LOG.md 템플릿과 동일한 형식으로
+append만 함, 기존 내용은 절대 덮어쓰지 않음).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOG_PATH = PROJECT_ROOT / "docs" / "phase1_lab" / "RESULTS_LOG.md"
 
 

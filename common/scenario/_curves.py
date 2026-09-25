@@ -123,3 +123,39 @@ def _peak_fwhm_asym(arr, pk_idx, x_arr):
     if right_hw < 1e-9:
         return fwhm, np.nan
     return fwhm, left_hw / right_hw
+
+
+# ---------------------------------------------------------------------------
+# CC→CV 전환 검출 — 원래 vwindow.py에 있었으나, 2026-09-24 비-정식 축(q_frac_ref
+# 제외) 일괄 삭제 때 vwindow.py 자체는 지우면서 hi_correlation.py --exclude-cv
+# 옵션이 축과 무관하게 계속 쓰는 이 함수만 이 공용 모듈로 옮겼다.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CV_V    = 3.60   # CC→CV 전환 전압 임계값 [V]
+_DEFAULT_CV_FRAC = 0.80   # CC→CV: I < cv_cc_frac × I_max
+
+
+def _detect_cv_start(
+    v: np.ndarray,
+    i: np.ndarray,
+    v_thresh: float = _DEFAULT_CV_V,
+    cc_frac: float = _DEFAULT_CV_FRAC,
+) -> int:
+    """CC→CV 전환 시작 인덱스 반환.
+
+    V ≥ v_thresh 이고 I < cc_frac × I_max 를 동시에 만족하는 첫 샘플.
+    조건을 만족하는 샘플이 없으면 len(v) 반환 (CV 구간 없음).
+
+    근거: LFP 충전 CV 구간은 (1) 전압이 컷오프에 근접하고 (2) 충전기가
+    정전압으로 전환해 전류가 감소하기 시작할 때 진입한다. cc_frac=0.80은
+    전류 노이즈에 둔감하면서도 CC→CV 전환을 놓치지 않는 실용적 임계값이다.
+    """
+    if i is None or len(i) == 0:
+        return len(v)
+    i_max = float(np.max(i))
+    if i_max < 1e-6:
+        return len(v)
+    cv_mask = (v >= v_thresh) & (i < cc_frac * i_max)
+    if not cv_mask.any():
+        return len(v)
+    return int(np.argmax(cv_mask))

@@ -98,7 +98,7 @@ class SCRLoss(nn.Module):
         2026-09-18(비용 가중치 추가): 커널 HI는 raw HI처럼 고정된 카테고리 하나가 아니라
         여러 raw HI(멤버)의 RBF 융합값이라, model.kernel_hi_costs[s]에 그 커널을 만든
         멤버들의 카테고리 비용(stat/diff/lfp/morph) 평균을 미리 계산해 저장해두고
-        (build_kernel_group_features.py의 f["cost"]) 그 값으로 gate_prob()을 가중합산한다
+        (kernel.py의 f["cost"]) 그 값으로 gate_prob()을 가중합산한다
         — kernel_hi_costs가 없으면(구 pkl 등) 균일 비용 1.0으로 하위호환.
         raw HI 조기반환(probe/scen 둘 다 고정인 Phase2 케이스)과 무관하게 항상 계산한다
         — 커널 게이트는 고정 마스크 개념이 아예 없는 Phase1 전용 학습 가능 게이트라서.

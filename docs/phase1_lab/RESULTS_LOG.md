@@ -1115,3 +1115,47 @@
 - **해석 / 다음 액션**: 이 pkl은 phase1_trainer_v2.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 phase1_trainer_v2.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
 
 ---
+
+### 2026-09-21 19:59 — synergy_groups_p1v4_scen_lag1zone_redunfix_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\build_synergy_groups.py --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":1,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2,"tile_scope":"zone"} --split-seed 0 --max-group-size 4 --redundancy-threshold 0.9 --min-partial-corr 0.02 --prefilter-top-m 15 --tag p1v4_scen_lag1zone_redunfix_groups --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\p1v2_runs\0921_1953_p1v2_p1v4_scen_lag1zone_redunfix_seed0 --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_tilezone_lag-1_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_tilezone_lag-1_noise-3%_ou-200/seg --model-config 5_model/config/main_qfref_S.yaml
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\p1v2_runs\0921_1953_p1v2_p1v4_scen_lag1zone_redunfix_seed0\synergy_groups_p1v4_scen_lag1zone_redunfix_groups.json`
+- **핵심 수치**: 전체 HI 114개 -> 그룹 114개, 평균 그룹 크기 3.37
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-09-21 20:09 — kernel_group_features_p1v4_scen_lag1zone_redunfix_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 2차 다중공선성 배제 + 정규화 통계 저장 + 3차 결합(raw+kernel) 다중공선성 배제(시나리오별, 2026-09-18 신규)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\build_kernel_group_features.py --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":1,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2,"tile_scope":"zone"} --synergy-groups-json C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\p1v2_runs\0921_1953_p1v2_p1v4_scen_lag1zone_redunfix_seed0\synergy_groups_p1v4_scen_lag1zone_redunfix_groups.json --split-seed 0 --alpha 1.0 --n-components 100 --redundancy-threshold 0.9 --combined-redundancy-threshold 0.95 --tag p1v4_scen_lag1zone_redunfix_kernel --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\p1v2_runs\0921_1953_p1v2_p1v4_scen_lag1zone_redunfix_seed0 --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_tilezone_lag-1_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_tilezone_lag-1_noise-3%_ou-200/seg --model-config 5_model/config/main_qfref_S.yaml
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\p1v2_runs\0921_1953_p1v2_p1v4_scen_lag1zone_redunfix_seed0\kernel_group_features_p1v4_scen_lag1zone_redunfix_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\p1v2_runs\0921_1953_p1v2_p1v4_scen_lag1zone_redunfix_seed0\kernel_group_features_p1v4_scen_lag1zone_redunfix_kernel_rejected.json`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\5_model\experiments\phase1_lab\results\p1v2_runs\0921_1953_p1v2_p1v4_scen_lag1zone_redunfix_seed0\kernel_group_features_p1v4_scen_lag1zone_redunfix_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 94개 -> 최종 93개, 평균 train R^2=0.3887, 시나리오별 개수={'chg_lo': 16, 'chg_mid': 15, 'chg_hi': 16, 'dis_hi': 16, 'dis_mid': 15, 'dis_lo': 15}, 결합 다중공선성 배제: raw 77개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 phase1_trainer_v2.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 phase1_trainer_v2.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-09-24 10:27 — synergy_groups_p1v4_scen_lag1zone_redunfix_groups_verify
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe 7_synergy/synergy.py --seg-axis q_frac_ref --axis-config {"n1":0.35,"n2":0.20,"ref_lag":1,"noise_amp":0.03,"noise_mode":"ou","noise_period_cycles":200,"n_samples":2,"tile_scope":"zone"} --split-seed 0 --max-group-size 4 --redundancy-threshold 0.9 --min-partial-corr 0.02 --prefilter-top-m 15 --tag p1v4_scen_lag1zone_redunfix_groups_verify --out-dir model_lib/results/synergy_verify_seed0 --data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_tilezone_lag-1_noise-3%_ou-200/cycle --seg-data-dir D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/n1-35%_n2-20%_N-2_tilezone_lag-1_noise-3%_ou-200/seg --model-config model_lib/config/main_qfref_S.yaml
+  ```
+- **결과 파일**:
+  - `model_lib\results\synergy_verify_seed0\synergy_groups_p1v4_scen_lag1zone_redunfix_groups_verify.json`
+- **핵심 수치**: 전체 HI 114개 -> 그룹 114개, 평균 그룹 크기 3.37
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---

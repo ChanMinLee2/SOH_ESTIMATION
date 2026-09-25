@@ -33,16 +33,16 @@ seg_diagnose.py
        아직 _4_data_hi/{axis}/{tag}/ 에 추출되어 있지 않아도 즉시 비교할 수 있다.
 
 사용 예시:
-  python 4_hi_analysis/seg_diagnose.py                        # 자동: 모든 hi_features*.pkl 축
-  python 4_hi_analysis/seg_diagnose.py --seg-axis protocol    # 특정 축 지정
-  python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --dataset HUST
-  python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --mode ic
-  python 4_hi_analysis/seg_diagnose.py --seg-axis vwindow --mode ic --n-cycles 8
-  python 4_hi_analysis/seg_diagnose.py --seg-axis qfrac --cell b1c0 --cycle 10
-  python 4_hi_analysis/seg_diagnose.py --seg-axis protocol --no-plot
-  python 4_hi_analysis/seg_diagnose.py --seg-axis cluster --no-stats
-  python 4_hi_analysis/seg_diagnose.py --mode compare --dataset HUST --cell HUST_1-8 --cycle 1145
-  python 4_hi_analysis/seg_diagnose.py --mode compare --dataset HUST --cell HUST_1-8 --cycle 1145 \
+  python 4_hi_analysis/tools/seg_diagnose.py                        # 자동: 모든 hi_features*.pkl 축
+  python 4_hi_analysis/tools/seg_diagnose.py --seg-axis protocol    # 특정 축 지정
+  python 4_hi_analysis/tools/seg_diagnose.py --seg-axis vwindow --dataset HUST
+  python 4_hi_analysis/tools/seg_diagnose.py --seg-axis vwindow --mode ic
+  python 4_hi_analysis/tools/seg_diagnose.py --seg-axis vwindow --mode ic --n-cycles 8
+  python 4_hi_analysis/tools/seg_diagnose.py --seg-axis qfrac --cell b1c0 --cycle 10
+  python 4_hi_analysis/tools/seg_diagnose.py --seg-axis protocol --no-plot
+  python 4_hi_analysis/tools/seg_diagnose.py --seg-axis cluster --no-stats
+  python 4_hi_analysis/tools/seg_diagnose.py --mode compare --dataset HUST --cell HUST_1-8 --cycle 1145
+  python 4_hi_analysis/tools/seg_diagnose.py --mode compare --dataset HUST --cell HUST_1-8 --cycle 1145 \
       --compare-config 4_hi_analysis/compare_conditions.json
 """
 
@@ -63,8 +63,8 @@ import pandas as pd
 from tqdm import tqdm
 
 # ─────────────────────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STEP_DIR     = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+STEP_DIR     = Path(__file__).resolve().parent.parent
 # 2026-08-08: pkl 데이터(_4_data_hi 입력, 4_hi_analysis 캐시/outputs pkl)만 D로 이동 —
 # STEP_DIR은 다른 곳(compare_conditions.json 등 실제 코드 자산)에도 쓰이므로 그대로 두고
 # data_directories.py의 공유 상수를 쓴다(hi_correlation.py와 동일 패턴).
@@ -2215,7 +2215,7 @@ def _recompute_hi(hc_module, rec, seg_name: str, hi_name: str) -> float:
     """rec(SegmentRecord)의 원시 v/i/dt/q로 hi_name 하나를 즉석 재계산.
 
     hi_correlation.py가 추출 시점에 쓰는 것과 동일한 함수(_seg_stat/_seg_diff/_seg_lfp —
-    실제 계산 로직의 단일 소스는 5_model/hi_compute.py, hi_correlation.py는 그걸 그대로
+    실제 계산 로직의 단일 소스는 4_hi_analysis/hi_compute.py, hi_correlation.py는 그걸 그대로
     재노출)를 호출하므로 "저장 로직과 다른 별도 재구현"이 아니라 "그 세그먼트를 지금 다시
     계산하면 뭐가 나오는가"를 정직하게 확인한다."""
     merged: dict = {}

@@ -54,6 +54,7 @@ OUTPUT_DIR       = _OUTPUTS_ROOT / date.today().strftime("%m%d")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from data_directories import DATA_4_HI_ROOT, EXTERNAL_DATA_ROOT  # noqa: E402
+import parameters as P  # noqa: E402 — 실행 환경/데이터셋 선택 단일 소스
 POSTPROCESS_ROOT = DATA_4_HI_ROOT / "clean"
 
 # _1_data_unified 원본(대용량)이 로컬에 없을 수 있음 — 이 경우 외부 드라이브로 폴백
@@ -599,17 +600,20 @@ def main():
     parser = argparse.ArgumentParser(
         description="unified PKL → 7단계 이상 사이클·행 제거 → postprocess 저장"
     )
-    parser.add_argument("--dataset",  default="all",
+    parser.add_argument("--dataset",  default=P.ACTIVE_DATASET,
                         choices=["mit", "hust", "tju", "calce", "all"],
-                        help="처리할 데이터셋 (기본: all). TJU/CALCE는 2026-09-05 추가 — "
+                        help="처리할 데이터셋 (parameters.py 기본 "
+                             f"{P.ACTIVE_DATASET!r}). TJU/CALCE는 2026-09-05 추가 — "
                              "필터 로직 자체는 스키마 기반이라 데이터셋 무관하게 그대로 재사용된다.")
-    parser.add_argument("--skip-shape",   action="store_true",
+    parser.add_argument("--skip-shape",   action="store_true", default=P.FIXED_SKIP_SHAPE,
                         help="[필터7] 완전 비활성화 — shape_sigma/KNOWN_SHAPE_ANOMALIES "
                              "무관하게 호출 자체를 건너뜀(기존 --shape-sigma 완화와 분리된 "
-                             "별도 옵션). 실험용 — 기본은 기존 동작 그대로(꺼짐=False)")
+                             f"별도 옵션). parameters.py 기본 {P.FIXED_SKIP_SHAPE}")
     # 공통
-    parser.add_argument("--workers",  type=int, default=min(4, os.cpu_count() or 1),
-                        help="병렬 프로세스 수 (기본: 4)")
+    parser.add_argument("--workers",  type=int,
+                        default=min(P.ACTIVE_WORKERS, os.cpu_count() or 1),
+                        help=f"병렬 프로세스 수 (parameters.py 기본 "
+                             f"{min(P.ACTIVE_WORKERS, os.cpu_count() or 1)})")
     args = parser.parse_args()
 
     # 튜닝 완료 후 고정된 필터 임계값 (CLI 오버라이드 이력 없어 상수로 승격, docs/params.md 참고).

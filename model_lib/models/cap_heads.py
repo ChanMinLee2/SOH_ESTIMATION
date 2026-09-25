@@ -77,7 +77,7 @@ class TransformerHead(nn.Module):
     semantic 토큰으로 분할해 Transformer Encoder에 입력한다.
       Token 0: probe_x  (64-dim)  — 방향별 probe gate 출력
       Token 1: scen_x   (64-dim)  — 시나리오 gate 출력
-      Token 2: (n_kernel_hi>0) kernel_x (n_kernel_hi-dim) — build_kernel_group_features.py
+      Token 2: (n_kernel_hi>0) kernel_x (n_kernel_hi-dim) — kernel.py
                산출물(그룹당 RBF 커널 융합값), probe/scen과 동일하게 통째로 한 토큰으로
                선형 투영(2026-09-08, v4를 transformer에서도 돌릴 수 있게 추가)
       Token 3: (with_raw_cnn=True) cnn_emb (3-dim) — raw V/I/t CNN 임베딩
@@ -112,7 +112,7 @@ class TransformerHead(nn.Module):
         self.probe_embed = nn.Linear(N_HI, d_model)
         self.scen_embed  = nn.Linear(N_HI, d_model)
         self.meta_embed  = nn.Linear(2, d_model)
-        # 커널 융합 HI 블록(build_kernel_group_features.py 산출물) — probe/scen과 마찬가지로
+        # 커널 융합 HI 블록(kernel.py 산출물) — probe/scen과 마찬가지로
         # 별도 semantic 토큰 1개로 투영한다. scr_model.py의 concat 순서(probe‖scen‖kernel‖
         # cnn_emb/raw_flat‖meta)와 정확히 맞춰 forward()에서 슬라이싱한다.
         self.kernel_embed = nn.Linear(n_kernel_hi, d_model) if n_kernel_hi > 0 else None
@@ -171,7 +171,7 @@ class ITransformerHead(nn.Module):
     """
     Inverted Transformer (Liu et al., ICLR 2024 스타일 적용):
     130개 피처(probe 64 + scen 64 + direction/cap_init 2) 각각을, n_kernel_hi>0이면
-    커널 융합 HI(build_kernel_group_features.py 산출물) n_kernel_hi개도 똑같이 개별
+    커널 융합 HI(kernel.py 산출물) n_kernel_hi개도 똑같이 개별
     스칼라로 취급해 전부를 독립 토큰으로 처리한다(feature-wise self-attention).
     커널 HI를 raw HI와 구분 없이 "그냥 피처 하나 더"로 넣는 설계(2026-09-10, 옵션1 —
     "59개를 하나로 뭉친 토큰" 대신 "59개를 각각 개별 토큰"으로 선택) — probe/scen/kernel
@@ -392,7 +392,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
         model_cfg   : cfg["model"] 딕셔너리 (scr.yaml의 model: 섹션)
         d_head      : MLP hidden dim 또는 Transformer d_model / ResNet block width
         dropout     : dropout rate (yaml model.dropout)
-        n_kernel_hi : build_kernel_group_features.py의 커널 융합 HI 블록 폭(0=없음).
+        n_kernel_hi : kernel.py의 커널 융합 HI 블록 폭(0=없음).
                       mlp/transformer/resnet_tab/i_transformer 지원(i_transformer는
                       2026-09-10 추가 — 커널 HI를 개별 토큰으로 넣음, 옵션1). ft_transformer는
                       아직 미지원 — 에러(설계 미정, 위 NotImplementedError 참고).

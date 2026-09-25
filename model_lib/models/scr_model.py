@@ -31,7 +31,7 @@ import torch.nn.functional as F
 from utils.hi_schema import N_HI, RAW_CH, RAW_N, spec_from_qfrac
 from models.cap_heads import build_cap_head
 
-# 5_model/models/scr_model.py → repo root (train_scr.py/test_scr.py의 PROJECT_ROOT와 동일 계산)
+# model_lib/models/scr_model.py → repo root (train_scr.py/test_scr.py의 PROJECT_ROOT와 동일 계산)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -57,15 +57,15 @@ class SCRModel(nn.Module):
         model_cfg: Optional[dict] = None,  # Phase 2 전용: regression_model 선택
         spec=None,   # ScenarioSpec | None  (None → qfrac default)
         with_probe_mlp: bool = False,  # Phase 1 dual-objective: probe_gate에 CE 그래디언트 추가
-        scen_group_ids: Optional[dict[int, list[int]]] = None,  # Phase 1: build_synergy_groups.py
+        scen_group_ids: Optional[dict[int, list[int]]] = None,  # Phase 1: synergy.py
             # 산출물 — {scenario_idx: [group_id per HI]}. 주어진 시나리오는 scen_gates가
             # GroupedHardConcreteGate로, 없는 시나리오는 기존 HardConcreteGate로 만들어진다.
-        n_kernel_hi: int = 0,  # Phase 1: build_kernel_group_features.py 산출물 — 그룹당 RBF
+        n_kernel_hi: int = 0,  # Phase 1: kernel.py 산출물 — 그룹당 RBF
             # 커널 융합 HI를 raw HI(x_hi)를 대체하지 않고 "추가"로 넣을 때의 폭. 0이면 기존과
             # 완전히 동일(커널 블록 없음). >0이면 시나리오별 scen_kernel_gates(N_HI와 별개
             # 폭 n_kernel_hi)가 추가로 생기고, cap_head 입력에 그 블록이 덧붙는다.
         shared_hi_mask: Optional[torch.Tensor] = None,  # Phase 1(v4): bool (N_HI,) —
-            # test_hi_scenario_interaction.py 산출물 기반. True인 HI는 시나리오 무관 단일
+            # interaction.py 산출물 기반. True인 HI는 시나리오 무관 단일
             # shared_gate로, False인 HI는 기존처럼 시나리오별 scen_gates로 라우팅한다.
             # None(기본)이면 완전히 비활성 — 기존과 100% 동일 동작(전부 scen_gates).
             # scen_group_ids와 동시 사용 가능: shared_hi_mask가 있으면 scen_gate_width가
@@ -98,7 +98,7 @@ class SCRModel(nn.Module):
             # None(기본)이면 기존과 100% 동일(n_kernel_hi 균일 폭).
         kernel_hi_costs: Optional[dict[int, list[float]]] = None,  # 2026-09-18(L0 비용
             # 가중치): {scenario_idx: [비용, ...]} — 길이는 kernel_hi_counts[s]와 동일해야
-            # 한다(로컬 순서도 동일해야 함, build_kernel_group_features.py가 저장한 f["cost"]
+            # 한다(로컬 순서도 동일해야 함, kernel.py가 저장한 f["cost"]
             # = 그 커널을 만든 멤버 raw HI들의 카테고리 비용(stat/diff/lfp/morph) 평균).
             # scr_loss.py의 커널 L0 페널티가 gate_prob() 합을 균일 비용(1.0) 대신 이
             # 가중치로 곱해서 합산하는 데 쓴다 — raw HI가 cost_vec(카테고리별)로 하는 것과
@@ -114,7 +114,7 @@ class SCRModel(nn.Module):
             # 뭐라고 하든 항상 0으로 강제한다 — "고를 수는 있지만 기여는 0"이 아니라 "고른
             # 결과 자체가 무조건 0"이라 커널 쪽과 동일한 강도의 보장이 된다.
             # 2026-09-21: 예전엔 입력 레벨에서도 nan_mask를 0으로 이중 강제했는데
-            # (phase1_trainer_v2.py의 _apply_combined_redundancy_raw, 이제 삭제됨), 그
+            # (train.py의 _apply_combined_redundancy_raw, 이제 삭제됨), 그
             # nan_mask가 probe_x(분류기 입력)에도 공유돼 분류기 정확도가 붕괴하는 버그였다
             # — 이 게이트 레벨 마스크 하나만으로 scen_x 쪽 정확성은 이미 충분히 보장되므로
             # 입력 레벨 이중 마스킹은 제거했다. None(기본)이면 기존과 100% 동일.
@@ -220,7 +220,7 @@ class SCRModel(nn.Module):
 
         # ----------------------------------------------------------------
         # Stage B' — 커널 융합 HI 블록(선택) — raw HI(scen_gates)를 대체하지 않고
-        # 별도 폭(n_kernel_hi)의 독립 게이트로 "추가"한다. build_kernel_group_features.py가
+        # 별도 폭(n_kernel_hi)의 독립 게이트로 "추가"한다. kernel.py가
         # 그룹당 1개씩 만든 RBF 커널 특징을 소비하는 용도(다중공선성/시너지 그룹 정보를
         # raw HI와 나란히 쓰고 싶을 때). n_kernel_hi=0이면 완전히 비활성(기존과 동일 동작).
         # ----------------------------------------------------------------
@@ -286,40 +286,19 @@ class SCRModel(nn.Module):
                                         n_scen_onehot=(self.n_classes if scenario_onehot else 0))
 
         # ----------------------------------------------------------------
-        # raw_cnn — 회귀 헤드용 원시 V/|I| 곡선 CNN 임베딩 (REGRESSION_UPGRADE.md §5/§8)
-        # with_raw_cnn=False(기본) → 회귀 경로 완전히 기존과 동일(x_raw 무시).
-        # with_raw_cnn=True:
-        #   raw_cnn_pretrained_from 미지정 → RawCNN 랜덤 초기화, Phase2와 함께 학습 (방안 (b))
-        #   raw_cnn_pretrained_from=<classifier clf_best.pt 경로> → 그 체크포인트의
-        #     RawCNN 서브모듈("cnn.*")만 가중치 로드 후 얼림(requires_grad_(False)+eval 고정)
-        #     — 사전 검증 (a): 분류기 CNN 재사용, Phase2 MSE 그래디언트가 CNN에 안 흐름.
+        # raw_cnn — 2026-09-25 삭제. 회귀 헤드용 원시 V/|I| 곡선 CNN 임베딩 실험
+        # (REGRESSION_UPGRADE.md §5/§8)이었는데, 의존하는 models/raw_cnn.py 자체가
+        # repo에 없었다(with_raw_cnn=True로 켤 때만 import되는 경로라 지금까지
+        # 한 번도 실행된 적 없이 방치된 깨진 코드였음 — 켰으면 ModuleNotFoundError).
+        # v4는 train.py/test.py가 with_raw_cnn을 항상 강제 False로 덮어써서 애초에
+        # 실사용 경로도 아니었다. self.raw_cnn/self._raw_cnn_frozen은 forward()/
+        # train() 오버라이드/visualize_results.py가 여전히 참조하므로 "항상 없음"
+        # 상태로 남겨둔다.
         # ----------------------------------------------------------------
         _mcfg = model_cfg or {}
-        self.with_raw_cnn = bool(_mcfg.get("with_raw_cnn", False))
+        self.with_raw_cnn = False
         self._raw_cnn_frozen = False
-        if self.with_raw_cnn:
-            from models.raw_cnn import RawCNN
-            self.raw_cnn = RawCNN()   # 출력 3D 고정: [h_scen,h_intensity,h_soh] (docs/260803_RESULTS.md §10)
-            _pretrained_from = _mcfg.get("raw_cnn_pretrained_from")
-            if _pretrained_from:
-                _pf_path = Path(_pretrained_from)
-                if not _pf_path.is_absolute():
-                    _pf_path = _PROJECT_ROOT / _pf_path
-                _ckpt = torch.load(_pf_path, map_location="cpu")
-                _state = _ckpt["clf_state"] if isinstance(_ckpt, dict) and "clf_state" in _ckpt else _ckpt
-                _cnn_state = {
-                    k[len("cnn."):]: v for k, v in _state.items() if k.startswith("cnn.")
-                }
-                missing, unexpected = self.raw_cnn.load_state_dict(_cnn_state, strict=True)
-                for p in self.raw_cnn.parameters():
-                    p.requires_grad_(False)
-                self.raw_cnn.eval()
-                self._raw_cnn_frozen = True
-                print(f"[scr_model] raw_cnn: frozen, loaded from {_pf_path}")
-            else:
-                print("[scr_model] raw_cnn: random init, trainable (Phase2와 함께 학습)")
-        else:
-            self.raw_cnn = None
+        self.raw_cnn = None
 
         # ----------------------------------------------------------------
         # raw_flat — 방안1(REGRESSION_UPGRADE.md §2 방안1): raw V/|I| 곡선을 압축 없이
@@ -500,7 +479,7 @@ class SCRModel(nn.Module):
         kernel_hi_counts가 없으면(기존 동작) 모든 시나리오 게이트가 동일 폭 n_kernel_hi라
         _apply_gate_list로 바로 위임한다. kernel_hi_counts가 있으면(2026-09-18, 요구사항1을
         게이트 구조로 강제) 시나리오마다 게이트 폭이 K_s로 다르므로, x(폭 max_k=n_kernel_hi,
-        각 행은 자기 시나리오 own 슬롯 [0:K_s)만 실값이고 나머지는 phase1_trainer_v2.py가
+        각 행은 자기 시나리오 own 슬롯 [0:K_s)만 실값이고 나머지는 train.py가
         이미 0-패딩해둔 상태)를 시나리오별로 [0:K_s) 구간만 잘라 그 폭의 게이트에 넣고,
         결과를 다시 max_k 폭으로 되돌린다(뒤쪽은 항상 0)."""
         if self._gate_group_map is not None:
@@ -645,7 +624,7 @@ class SCRModel(nn.Module):
         return {s: gate.active_indices() for s, gate in enumerate(self.scen_gates)}
 
     def branch_scen_gates(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
-        """웜스타트 후 분기(docs/260917_REPORT.md 안건2 다음 단계, phase1_trainer_v2.py의
+        """웜스타트 후 분기(docs/260917_REPORT.md 안건2 다음 단계, train.py의
         --warmstart-branch-epoch T 전용): n_gate_groups=1로 학습된 단일 공유 scen_gates[0]
         (모든 시나리오 데이터로 학습됨, L0/이산화 압력 없음)을 n_scenarios개의 독립
         HardConcreteGate로 복제해 분기한다. 각 새 게이트의 log_alpha는 공유 게이트의

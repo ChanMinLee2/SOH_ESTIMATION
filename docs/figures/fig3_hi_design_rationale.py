@@ -38,7 +38,7 @@ setup_rcparams()
 
 HI_CACHE = DATA_4_HI_ROOT.parent / "4_hi_analysis" / (
     "hi_features_qfref_n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA.pkl")
-GATE_JSON = (PROJECT_ROOT / "5_model/experiments/phase1_lab/results/p1v2_runs/"
+GATE_JSON = (PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs/"
              "0827_1705_p1v2_p1v4_full_seed42/gates/regression_HIs.json")
 
 CAT_ORDER = ["stat", "diff", "lfp", "morph"]

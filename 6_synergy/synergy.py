@@ -1,7 +1,7 @@
 """
-5_model/experiments/phase1_lab/build_synergy_groups.py
+6_synergy/synergy.py
 
-Phase1 학습 이전에 실행하는 "시너지 그룹" 사전 구성 스크립트 (기존 5_model 코드 무변경).
+Phase1 학습 이전에 실행하는 "시너지 그룹" 사전 구성 스크립트 (기존 model_lib 코드 무변경).
 
 설계 배경 (세션 논의 요약):
   - 다중공선성 제거를 먼저 하고 시너지를 나중에 찾으면, "클러스터 대표"를 뭘로 뽑을지가
@@ -32,8 +32,8 @@ Phase1 학습 이전에 실행하는 "시너지 그룹" 사전 구성 스크립�
 
 사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir 전부 표준 조합(q_frac_ref,
 n1=0.35/n2=0.20/n_samples=2)이면 생략 가능 — 기본값 자동 적용, 다른 조합이면 넷 다 같이 오버라이드):
-  python 5_model/experiments/phase1_lab/build_synergy_groups.py \
-      --model-config 5_model/config/main_qfref_S_p60.yaml \
+  python 6_synergy/synergy.py \
+      --model-config model_lib/config/main_qfref_S_p60.yaml \
       --split-seed 42 --tag k25_full_N2_groups
 """
 
@@ -45,34 +45,24 @@ from pathlib import Path
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-RESULTS_DIR = Path(__file__).resolve().parent / "results"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RESULTS_DIR = PROJECT_ROOT / "model_lib" / "results"
 
 import sys
-sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from log_utils import append_log_entry, current_command_str  # noqa: E402
+import parameters as P  # noqa: E402 — 축/실행 파라미터 단일 소스
 
-# 루트는 data_directories.py의 DATA_4_HI_ROOT_STR에서 가져온다 — PC마다 실제 드라이브가
-# 다르므로(lambda_sweep.py와 동일 이유) 절대경로를 여기 하드코딩하지 않는다. 표준 조합
-# (q_frac_ref, n1=0.35/n2=0.20/n_samples=2) 기준 기본값이고, 다른 조합이면 CLI로 오버라이드.
-from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
-
-_DATA_ROOT = f"{DATA_4_HI_ROOT_STR}/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200"
-DEFAULT_DATA_DIR = f"{_DATA_ROOT}/cycle"
-DEFAULT_SEG_DATA_DIR = f"{_DATA_ROOT}/seg"
-
-# seg-axis/axis-config도 이 세션 전체에서 한 번도 안 바뀐 고정값 — lambda_sweep.py의
-# FIXED_AXIS_PARAMS와 동일 이유로 기본값을 준다. DEFAULT_DATA_DIR/DEFAULT_SEG_DATA_DIR과
-# 세트로 묶인 값이라(다른 조합이면 데이터 경로도 같이 바뀌어야 함) 다른 조합을 쓰려면
-# 셋 다 함께 오버라이드해야 한다.
-DEFAULT_SEG_AXIS = "q_frac_ref"
-DEFAULT_AXIS_CONFIG = json.dumps({
-    "n1": 0.35, "n2": 0.20, "ref_lag": 0, "noise_amp": 0.03,
-    "noise_mode": "ou", "noise_period_cycles": 200, "n_samples": 2,
-})
+# seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
+# 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
+# lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다).
+DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS
+DEFAULT_AXIS_CONFIG = json.dumps(P.ACTIVE_AXIS_CONFIG)
+DEFAULT_DATA_DIR = P.FIXED_CANONICAL_DATA_DIR
+DEFAULT_SEG_DATA_DIR = P.FIXED_CANONICAL_SEG_DATA_DIR
 
 # analyze_hi_synergy.py와 동일한 이유로 torch 의존 import(load_config/build_datasets/
 # get_segmenter)는 모듈 최상단에 두지 않는다 — 이 스크립트는 멀티프로세싱을 안 쓰지만,
@@ -101,17 +91,23 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로")
     p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로")
     p.add_argument("--datasets", nargs="+", default=["MIT", "HUST"])
-    p.add_argument("--split-seed", type=int, default=42)
-    p.add_argument("--max-group-size", type=int, default=4,
-                   help="그룹당 최대 HI 개수 (기본 4)")
-    p.add_argument("--redundancy-threshold", type=float, default=0.9,
-                   help="|raw corr| >= 이 값이면 같은 그룹에 같이 못 들어감 (Stage4 클러스터 threshold와 동일 기준)")
-    p.add_argument("--min-partial-corr", type=float, default=0.02,
-                   help="그룹 성장을 멈추는 기준 — 편상관계수 절댓값이 이보다 작으면 더 안 채움")
-    p.add_argument("--prefilter-top-m", type=int, default=15,
+    p.add_argument("--split-seed", type=int,
+                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else 42)
+    p.add_argument("--max-group-size", type=int, default=P.ACTIVE_MAX_GROUP_SIZE,
+                   help=f"그룹당 최대 HI 개수 (parameters.py 기본 {P.ACTIVE_MAX_GROUP_SIZE})")
+    p.add_argument("--redundancy-threshold", type=float,
+                   default=P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD,
+                   help=f"|raw corr| >= 이 값이면 같은 그룹에 같이 못 들어감 (parameters.py 기본 "
+                        f"{P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD}, Stage4 클러스터 threshold와 동일 기준)")
+    p.add_argument("--min-partial-corr", type=float, default=P.FIXED_MIN_PARTIAL_CORR,
+                   help=f"그룹 성장을 멈추는 기준 — 편상관계수 절댓값이 이보다 작으면 더 안 채움 "
+                        f"(parameters.py 기본 {P.FIXED_MIN_PARTIAL_CORR})")
+    p.add_argument("--prefilter-top-m", type=int, default=P.FIXED_PREFILTER_TOP_M,
                    help="그룹 성장 단계마다 정밀 검사(편상관계수)할 후보 수 상한 — "
-                        "먼저 단순 상관계수로 이 개수만 추린 뒤에만 정밀 계산 (시간복잡도 완화)")
+                        "먼저 단순 상관계수로 이 개수만 추린 뒤에만 정밀 계산 (시간복잡도 완화, "
+                        f"parameters.py 기본 {P.FIXED_PREFILTER_TOP_M})")
     p.add_argument("--global-dedup", action="store_true", dest="global_dedup",
+                   default=P.FIXED_GLOBAL_DEDUP,
                    help="v3 전용: 그룹 성장을 시작하기 전에 raw HI끼리 1:1로 |corr|>=threshold인 "
                         "쌍을 먼저 정리한다(타깃과의 단순상관이 더 낮은 쪽을 후보군에서 제외, "
                         "가장 상관 높았던 survivor에 사후 귀속). 이러면 그룹 성장 단계에 진입하는 "
@@ -124,8 +120,9 @@ def _parse_args() -> argparse.Namespace:
                         "진짜 편상관 기반 그리디 알고리즘(build_groups)은 아예 안 돌리고 "
                         "건너뛴다. 최종 그룹 개수·크기가 참조 파일과 동일해서 커널 HI "
                         "개수(=피처 개수)가 v2/v3와 정확히 같아진다(대조군 성립 조건).")
-    p.add_argument("--shuffle-seed", type=int, default=42, dest="shuffle_seed",
-                   help="--shuffle-from 전용 무작위 배정 시드")
+    p.add_argument("--shuffle-seed", type=int, default=P.FIXED_SHUFFLE_SEED, dest="shuffle_seed",
+                   help=f"--shuffle-from 전용 무작위 배정 시드 (parameters.py 기본 "
+                        f"{P.FIXED_SHUFFLE_SEED})")
     p.add_argument("--tag", required=True)
     p.add_argument("--out-dir", default=None, dest="out_dir",
                    help="산출물 저장 위치(기본: results/) — run_pipeline.py가 Step 9 학습 "
@@ -425,7 +422,7 @@ def main() -> None:
         report[f"seg_{s}_group_names"] = [[names_by_seg[s][i] for i in g["members"]] for g in groups]
         report[f"seg_{s}_group_scores"] = [g["scores"] for g in groups]
         # v3.1 전용(global_dedup): 사전 가지치기로 탈락해 이 그룹에 사후 편입된 HI —
-        # 시너지 성장(Level1)과 커널 피처 구성(build_kernel_group_features.py) 둘 다에
+        # 시너지 성장(Level1)과 커널 피처 구성(kernel.py) 둘 다에
         # 안 쓰인다. 다중공선성 장부(이 HI가 어느 그룹 소속인지)와 x_hi 자체의 독립 게이트
         # 커버리지 용도로만 남겨둔다 — members와 합치면 그룹 크기가 2~29개로 들쭉날쭉해져
         # Level2 gap 비교의 교란변수가 된다는 게 실측으로 확인돼(docs/260827_RESULTS.md

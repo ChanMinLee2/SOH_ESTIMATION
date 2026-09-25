@@ -19,7 +19,7 @@ q_frac_wide/q_abs 등 "분모=현재 실제 용량"인 축으로 되돌아가면
 **모듈 임포트 시점 상수**로 nn.Linear/게이트 크기를 정하는 데 쓰이므로(N_HI=64와 66은
 서로 다른 체크포인트 구조), CLI 인자(argparse, main() 실행 시점)로는 이미 임포트된 뒤라
 너무 늦다 — 프로세스 시작 전 환경변수로 줘야 hi_schema 임포트 시점에 반영된다:
-  SOH_EXCLUDE_STAT_LEAK=1 python 5_model/train_scr.py --phase 1 ...
+  SOH_EXCLUDE_STAT_LEAK=1 python model_lib/legacy/train_scr.py --phase 1 ...
 학습·분류기·평가(train_scr.py/train_classifier.py/test_scr.py) 전부 N_HI를 모듈 상단에서
 임포트하므로, 한 run으로 만든 체크포인트를 나중에 평가할 때도 **그때 썼던 환경변수 값을
 그대로 다시 지정**해야 한다(안 그러면 N_HI 불일치로 로드가 깨지거나 조용히 다른 차원으로

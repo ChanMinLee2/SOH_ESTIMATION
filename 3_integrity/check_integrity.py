@@ -37,6 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from data_directories import DATA_4_HI_ROOT  # noqa: E402
+import parameters as P  # noqa: E402 — 실행 환경 단일 소스
 MIT_DIR   = DATA_4_HI_ROOT / "clean" / "MIT"
 HUST_DIR  = DATA_4_HI_ROOT / "clean" / "HUST"
 TJU_DIR   = DATA_4_HI_ROOT / "clean" / "TJU"     # 2026-09-05 추가
@@ -241,8 +242,10 @@ def run_check(pkl_dir: Path, expected: int, label: str,
 if __name__ == "__main__":
     import argparse, os
     parser = argparse.ArgumentParser(description="_4_data_hi/clean PKL 무결성 검사")
-    parser.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1),
-                        help="병렬 프로세스 수 (기본: 4)")
+    parser.add_argument("--workers", type=int,
+                        default=min(P.ACTIVE_WORKERS, os.cpu_count() or 1),
+                        help=f"병렬 프로세스 수 (parameters.py 기본 "
+                             f"{min(P.ACTIVE_WORKERS, os.cpu_count() or 1)})")
     args = parser.parse_args()
 
     df_mit,   issues_mit   = run_check(MIT_DIR,    123, "MIT",   args.workers)

@@ -8,7 +8,7 @@ hi_window_features.csv 재사용(재추출 없음, 빠름).
        (일치하면 클러스터=SOC 위치 구조, 안 일치하면 클러스터가 다른 걸(셀/열화 등)
        잡고 있다는 뜻)
 
-Run: python 4_hi_analysis/cluster_scatter.py
+Run: python 4_hi_analysis/tools/cluster_scatter.py
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OUT_DIR = PROJECT_ROOT / "4_hi_analysis" / "outputs" / "axis_comparison"
 FEAT_PATH = OUT_DIR / "hi_window_features.csv"
 

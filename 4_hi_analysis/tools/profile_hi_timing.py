@@ -6,8 +6,8 @@ profile_hi_timing.py  —  HI 카테고리·피처별 계산 시간 프로파일
   4_hi_analysis/hi_profile/hi_timing_feature.png   — 피처별 평균 소요시간 (컨셉 단위)
 
 사용:
-  python 4_hi_analysis/profile_hi_timing.py
-  python 4_hi_analysis/profile_hi_timing.py --n-cells 10 --n-cycles 40
+  python 4_hi_analysis/tools/profile_hi_timing.py
+  python 4_hi_analysis/tools/profile_hi_timing.py --n-cells 10 --n-cycles 40
 """
 
 import argparse
@@ -23,7 +23,7 @@ import pandas as pd
 from scipy.signal import find_peaks, savgol_filter
 from scipy.stats import kurtosis as sp_kurtosis, skew as sp_skew
 
-_HERE = Path(__file__).resolve().parent
+_HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_HERE))
 
 from hi_correlation import (
@@ -31,13 +31,15 @@ from hi_correlation import (
     DIFF_KEYS, LFP_KEYS, MORPH_KEYS, STAT_KEYS,
     HI_LABELS,
     _add_phase,
-    _build_ica_seg, _build_vq_curve,
-    _dtw_distance, _frechet_distance,
     _global_dva, _global_ica,
     _peak_fwhm_asym, _r_dc_from_chg,
     _seg_diff, _seg_lfp, _seg_morph_curves, _seg_stat,
     HUST_DIR, MIT_DIR,
 )
+# hi_correlation.py는 더 이상 이 이름들을 갖고 있지 않다 — 계산 로직의 단일 소스인
+# hi_compute.py에서 직접 가져온다(2026-09-22 정리, hi_correlation.py의 죽은 로컬
+# 정의 제거와 함께).
+from hi_compute import _build_ica_seg, _build_vq_curve, _dtw_distance, _frechet_distance
 
 THETA_FLAT = 0.05  # _seg_lfp 와 동일한 플래토 임계값
 

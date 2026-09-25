@@ -1,75 +1,43 @@
 ﻿"""
 hi_correlation.py
 
-MIT + HUST _4_data_hi/clean 에서 HI를 사이클별로 추출하고
-방전 용량(capacity_Ah)과의 Spearman 상관계수를 계산·시각화.
+_4_data_hi/clean 에서 HI(Health Indicator)를 사이클별로 추출하고 방전 용량(capacity_Ah)과의
+Spearman 상관계수를 계산·시각화 — run_pipeline.py Step 4.
 
-입력 : _4_data_hi/clean/MIT/*.pkl, _4_data_hi/clean/HUST/*.pkl
+입력 : _4_data_hi/clean/{MIT,HUST,TJU,CALCE}/*.pkl
 출력 : hi_correlation.png
        _4_data_hi/{axis}/cycle/{DS}/{cell_id}.pkl
-       _4_data_hi/{axis}/seg/{DS}/{cell_id}.pkl   (세그먼트 포맷)
+       _4_data_hi/{axis}/seg/{DS}/{cell_id}.pkl   (세그먼트 포맷 — Step 5 이후가 실제로 읽는 것)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-실행 예시 — 세그멘테이션 축(--seg-axis)별
+실행 예시
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-① qfrac (기본, SOC 구간 균등 분할)
+2026-09-24: q_frac_ref가 유일한 세그멘테이션 축이다(과거 실험용 축 protocol/vwindow/
+rcs/cluster/q_abs/vqslope/full_cycle/test_rs는 common/scenario/에서 삭제 — git
+히스토리에 남아있으니 필요하면 그쪽에서 복원). --seg-axis는 이제 실질적으로 상수라
+CLI에 남아있지만 다른 값을 주면 get_segmenter()가 ValueError(Unknown scenario axis)를
+낸다.
+
+생략하면 parameters.py: FIXED_SEG_AXIS(="q_frac_ref")/ACTIVE_AXIS_CONFIG가
+자동 적용된다(run_pipeline.py도 동일):
     python 4_hi_analysis/hi_correlation.py
-    python 4_hi_analysis/hi_correlation.py --dataset HUST --force
+    python 4_hi_analysis/hi_correlation.py --dataset-group lfp --force
 
-② protocol (CC 단계 전환 경계)
-    python 4_hi_analysis/hi_correlation.py --seg-axis protocol
-    # 파라미터 조정: max_steps(단계 수), nom_cap(정격 용량 Ah), i_step_thresh_c(C-rate 임계값)
-    python 4_hi_analysis/hi_correlation.py --seg-axis protocol \
-        --axis-config '{"max_steps": 3, "nom_cap": 1.1, "i_step_thresh_c": 0.5}'
+n1/n2/ref_lag/noise_amp 등 q_frac_ref 파라미터를 바꾸려면 --axis-config로 전체
+딕셔너리를 다시 주거나, --n1/--n2/... 단축 인자로 일부만 patch:
+    python 4_hi_analysis/hi_correlation.py --n1 0.4 --ref-lag 0
 
-③ vwindow (전압 구간 균등 분할)
-    python 4_hi_analysis/hi_correlation.py --seg-axis vwindow
-    # 파라미터 조정: n_windows(분할 수, 기본 3)
-    python 4_hi_analysis/hi_correlation.py --seg-axis vwindow \
-        --axis-config '{"n_windows": 4}'
-
-④ rcs (랜덤 구간 샘플링)
-    python 4_hi_analysis/hi_correlation.py --seg-axis rcs
-    # 파라미터 조정: n_samples(샘플 수), window(구간 폭 qfrac), seed(재현성)
-    python 4_hi_analysis/hi_correlation.py --seg-axis rcs \
-        --axis-config '{"n_samples": 6, "window": 0.3, "seed": 42}'
-
-⑤ cluster (K-means 클러스터)
-    python 4_hi_analysis/hi_correlation.py --seg-axis cluster
-    # [경고] fit() 없이 실행 시 모든 세그먼트가 cluster 0으로 분류됨
-    # 파라미터 조정: n_fine(미세분할 수), split_direction(방향별 분리 여부)
-    python 4_hi_analysis/hi_correlation.py --seg-axis cluster \
-        --axis-config '{"n_fine": 20, "split_direction": true}'
-
-  [주의] --axis-config는 축 이름으로 감싸지 않은 "맨" 파라미터 dict를 받는다
-  (예: {"n_samples": 6, ...} — {"rcs": {"n_samples": 6, ...}}가 아님). main()이
-  내부에서 이미 {axis: axis_cfg}로 한 번 감싸 get_segmenter()에 넘기므로, 여기서
-  축 이름으로 한 번 더 감싸면 이중 래핑되어 axis_kwargs에 축 이름 자체가
-  키로 들어가 TypeError가 난다(2026-08-11 실제 재현: RCSSegmenter.__init__()
-  got an unexpected keyword argument 'random').
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-공통 옵션
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  --dataset  MIT|HUST         (기본: MIT)
-  --workers  N                (병렬 프로세스 수, 기본: min(4, cpu))
-  --force                     캐시 무시하고 HI 재추출
-  --n-top    N                상관계수 산점도 표시 상위 HI 수 (기본: 4)
-  --cell     CELL_ID          curve-debug / plateau-debug 대상 셀
-  --cycle    N                시각화 대상 사이클 번호 (0 = 첫 유효 사이클)
-  --curve-debug               세그먼트×커브 시각화 (HI 유효성 검증)
-  --cycles   1,100,300        curve-debug 대상 사이클 목록 (쉼표 구분)
-  --n-cycles N                curve-debug 자동 선택 사이클 수 (기본: 5)
-  --plateau-debug             단일 사이클 플래토 판정 디버그 플롯
-  --plateau-summary           전체 데이터 plateau_frac 요약 플롯
+전체 CLI 옵션은 `python 4_hi_analysis/hi_correlation.py --help` 참고 — 대부분
+parameters.py 기본값을 참조한다(--n1/--n2/... 축 단축 인자만 예외로, 명시 안 하면
+--axis-config 값을 그대로 patch 없이 둔다).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HI 구조 (docs/NEW_HIS.md 참조)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Global  (15):  G01–G15
   Segment (n_seg × 66): 통계 S01–S20 / 미분 D01–D20 / LFP L01–L20 / Morph M01–M06
-  세그먼트 이름: 축마다 다름 (qfrac: dis_hi/dis_mid/dis_lo/chg_lo/chg_mid/chg_hi)
+  세그먼트 이름: 축마다 다름 (q_frac_ref: dis_hi/dis_mid/dis_lo/chg_lo/chg_mid/chg_hi)
   키 명명: stat_{k}_{seg} / diff_{k}_{seg} / lfp_{k}_{seg} / morph_{k}_{seg}
 """
 
@@ -107,6 +75,7 @@ STEP_DIR     = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from data_directories import DATA_4_HI_ROOT, PKL_CACHE_ROOT  # noqa: E402
+import parameters as P  # noqa: E402 — 축 설정 단일 소스(P.ACTIVE_AXIS_CONFIG)
 MIT_DIR      = DATA_4_HI_ROOT / "clean" / "MIT"
 HUST_DIR     = DATA_4_HI_ROOT / "clean" / "HUST"
 TJU_DIR      = DATA_4_HI_ROOT / "clean" / "TJU"
@@ -139,13 +108,19 @@ def _ds_dir(name: str) -> Path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# dV/dQ(DVA)·dQ/dV(ICA) 곡선 계산 헬퍼 — common/scenario/_curves.py 단일 소스.
-# (vqslope 세그멘터와 공유. 과거 이 파일에 로컬 정의돼 있던 것을 이동함)
-from common.scenario._curves import (  # noqa: E402
-    _build_vq_curve, _build_ica_seg, _peak_fwhm_asym,
+# CC→CV 전환 검출 (--exclude-cv 옵션에서 재사용)
+from common.scenario._curves import _detect_cv_start  # noqa: E402
+
+# 세그먼트 HI 계산 로직의 단일 소스는 hi_compute.py(같은 디렉터리, 2026-09-23까지는
+# 5_model/에 있었다가 Step4 전용이라 여기로 이동) — stat/diff/lfp/morph 66개 HI 전부
+# 여기서 가져온다(같은 이름의 로컬 정의를 두지 않는다, 2026-09-22 정리).
+from hi_compute import (  # noqa: E402
+    _seg_stat,
+    _seg_diff,
+    _seg_lfp,
+    _seg_morph_curves,
+    _peak_fwhm_asym,
 )
-# CC→CV 전환 검출 (--exclude-cv 옵션에서 재사용; vwindow 모듈의 기존 함수)
-from common.scenario.vwindow import _detect_cv_start  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HI 키 상수 정의
@@ -371,7 +346,7 @@ _DTW_BAND   = 5    # Sakoe-Chiba 밴드 (그리드의 10% = 위상 이동 허용
 _DTW_CHUNK  = 2000
 
 # ── 원시 세그먼트 곡선 리샘플 (CNN 입력용) ──────────────────────────────────
-# 5_model/utils/hi_schema.py 의 RAW_N 과 동일해야 함 (단일 소스: 값 48).
+# model_lib/utils/hi_schema.py 의 RAW_N 과 동일해야 함 (단일 소스: 값 48).
 RAW_N = 48
 
 
@@ -415,29 +390,6 @@ def _resample_segment(vs: np.ndarray, ims: np.ndarray, qcs: np.ndarray, dts: np.
     return rv, ri, rt
 
 
-def _dtw_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """Sakoe-Chiba banded DTW (정규화: / n)."""
-    n = len(a)
-    d = np.abs(a[:, None] - b[None, :])      # n×n 거리행렬 (vectorized)
-    dtw = np.full((n, n), np.inf)
-    dtw[0, 0] = d[0, 0]
-    for j in range(1, min(_DTW_BAND + 1, n)):
-        dtw[0, j] = dtw[0, j - 1] + d[0, j]
-    for i in range(1, n):
-        dtw[i, 0] = dtw[i - 1, 0] + d[i, 0]
-    for i in range(1, n):
-        j_lo = max(1, i - _DTW_BAND)
-        j_hi = min(n, i + _DTW_BAND + 1)
-        for j in range(j_lo, j_hi):
-            best = dtw[i - 1, j]
-            if dtw[i, j - 1] < best:
-                best = dtw[i, j - 1]
-            if dtw[i - 1, j - 1] < best:
-                best = dtw[i - 1, j - 1]
-            dtw[i, j] = d[i, j] + best
-    return float(dtw[n - 1, n - 1]) / n
-
-
 def _dtw_batch(queries: np.ndarray, bol: np.ndarray) -> np.ndarray:
     """N개 쿼리 곡선을 단일 참조 곡선에 대해 배치 DTW 계산.
 
@@ -477,42 +429,6 @@ def _dtw_batch(queries: np.ndarray, bol: np.ndarray) -> np.ndarray:
                 dtw[:, i, j] += d[:, i, j]
         out[start:end] = dtw[:, n - 1, n - 1] / n
     return out
-
-
-def _frechet_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """이산 Fréchet 거리.
-
-    고정 x-그리드에 보간된 1D 곡선에서는 대각선 경로가 최적이므로
-    max|a[i]-b[i]| 와 동치 — O(n), numpy 연산.
-    """
-    return float(np.max(np.abs(a - b)))
-
-
-def _seg_morph_curves(vs: np.ndarray, ims: np.ndarray, dts: np.ndarray):
-    """세그먼트 → (V-t, V-Q, V-E) 3곡선을 [0,1] 정규화 그리드로 보간.
-
-    Returns: (vt, vq, ve) — 계산 불가 시 None
-    """
-    if len(vs) < 8:
-        return None, None, None
-
-    t_cum = np.cumsum(dts)
-    q_cum = np.cumsum(np.abs(ims) * dts) / 3600.0
-    e_cum = np.cumsum(vs * np.abs(ims) * dts) / 3600.0
-
-    grid = np.linspace(0.0, 1.0, _MORPH_GRID)
-
-    def _interp(x_raw, min_val=1e-9):
-        xf = float(x_raw[-1])
-        if xf < min_val:
-            return None
-        return np.interp(grid, x_raw / xf, vs)
-
-    vt = _interp(t_cum)
-    vq = _interp(q_cum, min_val=1e-4)
-    ve = _interp(e_cum, min_val=1e-7)
-    return vt, vq, ve
-
 
 
 def _global_ica(v, i_mag, dt, v_lo=2.8, v_hi=3.65, n_bins=80):
@@ -616,373 +532,6 @@ def _r_dc_from_chg(vc, ic, dtc):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 세그먼트 HI 계산 함수 (top-level — multiprocessing 호환)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _seg_stat(vs, ims, dts, qcs, seg):
-    """카테고리 A: 통계 기반 20종 (S01–S20)."""
-    out = {f"stat_{k}_{seg}": np.nan for k in STAT_KEYS}
-    n = len(vs)
-    if n < 5:
-        return out
-    q_rel = qcs - qcs[0]
-
-    # S01 v_mean_cw (전하 가중 평균 전압 = Σ(V·I·dt)/Σ(I·dt))
-    denom = float(np.sum(ims * dts))
-    out[f"stat_v_mean_cw_{seg}"] = (
-        float(np.sum(vs * ims * dts)) / denom if denom > 1e-9 else float(np.mean(vs))
-    )
-    # S02–S04
-    out[f"stat_v_std_{seg}"]  = float(np.std(vs))
-    if n >= 3:
-        out[f"stat_v_skew_{seg}"] = float(sp_skew(vs))
-    if n >= 4:
-        out[f"stat_v_kurt_{seg}"] = float(sp_kurtosis(vs))
-    # S05 v_ent (PMF, 20-bin)
-    _cnt = np.histogram(vs, bins=20)[0].astype(float)
-    _tot = _cnt.sum()
-    if _tot > 0:
-        p = _cnt[_cnt > 0] / _tot
-        out[f"stat_v_ent_{seg}"] = float(-np.sum(p * np.log(p)))
-    # S06–S07
-    out[f"stat_i_mean_{seg}"] = float(np.mean(ims))
-    out[f"stat_i_std_{seg}"]  = float(np.std(ims))
-    # S08
-    out[f"stat_v_med_{seg}"]  = float(np.median(vs))
-    # S09 corr_qi
-    if np.std(q_rel) > 1e-9 and np.std(ims) > 1e-9:
-        out[f"stat_corr_qi_{seg}"] = float(np.corrcoef(q_rel, ims)[0, 1])
-    else:
-        out[f"stat_corr_qi_{seg}"] = 0.0
-    # S10 corr_vi
-    if np.std(vs) > 1e-6 and np.std(ims) > 1e-9:
-        out[f"stat_corr_vi_{seg}"] = float(np.corrcoef(vs, ims)[0, 1])
-    else:
-        out[f"stat_corr_vi_{seg}"] = 0.0
-    # S11–S12
-    out[f"stat_q_abs_{seg}"]      = float(np.sum(ims * dts) / 3600.0)
-    out[f"stat_energy_seg_{seg}"] = float(np.sum(vs * ims * dts) / 3600.0)
-    # S13–S15
-    out[f"stat_v_iqr_{seg}"]  = float(np.percentile(vs, 75) - np.percentile(vs, 25))
-    out[f"stat_v_range_{seg}"] = float(vs.max() - vs.min())
-    out[f"stat_v_p10_{seg}"]   = float(np.percentile(vs, 10))
-
-    # S16 v_p90
-    out[f"stat_v_p90_{seg}"] = float(np.percentile(vs, 90))
-
-    # S17 v_samp_ent (SampEn, m=2, r=0.2·std) — vectorized, subsampled ≤200 pts
-    if n >= 10:
-        r_tol = 0.2 * float(np.std(vs))
-        if r_tol > 0:
-            xs = vs[::max(1, (n + 199) // 200)]  # ceil-div: ns ≤ 200
-            ns = len(xs)
-            if ns >= 10:
-                w2 = np.column_stack([xs[:-1], xs[1:]])
-                w3 = np.column_stack([xs[:-2], xs[1:-1], xs[2:]])
-                c2 = np.max(np.abs(w2[:, None, :] - w2[None, :, :]), axis=2)
-                c3 = np.max(np.abs(w3[:, None, :] - w3[None, :, :]), axis=2)
-                np.fill_diagonal(c2, np.inf)
-                np.fill_diagonal(c3, np.inf)
-                B_se = int(np.sum(c2 <= r_tol))
-                A_se = int(np.sum(c3 <= r_tol))
-                if B_se > 0 and A_se > 0:
-                    out[f"stat_v_samp_ent_{seg}"] = float(-np.log(A_se / B_se))
-
-    # S18 corr_vt and S20 v_detrended_std — shared t_norm
-    t_seg = np.zeros(n)
-    t_seg[1:] = np.cumsum(dts[1:])
-    t_tot_seg = float(t_seg[-1])
-    if t_tot_seg > 0:
-        t_norm_s = t_seg / t_tot_seg
-        # S18 corr_vt
-        if np.std(vs) > 1e-6:
-            out[f"stat_corr_vt_{seg}"] = float(np.corrcoef(vs, t_norm_s)[0, 1])
-        # S20 v_detrended_std
-        A20 = np.column_stack([t_norm_s, np.ones(n)])
-        coef20 = np.linalg.lstsq(A20, vs, rcond=None)[0]
-        out[f"stat_v_detrended_std_{seg}"] = float(np.std(vs - A20 @ coef20))
-
-    # S19 i_q_slope (OLS slope of |I| vs Q_cum)
-    if np.std(q_rel) > 1e-9:
-        A19 = np.column_stack([q_rel, np.ones(n)])
-        coef19 = np.linalg.lstsq(A19, ims, rcond=None)[0]
-        out[f"stat_i_q_slope_{seg}"] = float(coef19[0])
-
-    return out
-
-
-def _seg_diff(vs, ims, dts, qcs, seg):
-    """카테고리 B: 미분 기반 20종 (D01–D20)."""
-    out = {f"diff_{k}_{seg}": np.nan for k in DIFF_KEYS}
-    n = len(vs)
-    if n < 8:
-        return out
-
-    # V-Q 곡선 (dV/dQ)
-    n_bins = max(8, min(30, n // 3))
-    qm, v_sm, dvdq_sm, q_tot = _build_vq_curve(vs, ims, dts, n_bins=n_bins)
-    if q_tot > 0.005 and np.any(np.isfinite(dvdq_sm)):
-        fin = np.isfinite(dvdq_sm)
-        vd  = dvdq_sm[fin]
-        if len(vd) >= 3:
-            # D01–D05
-            out[f"diff_dvdq_mean_{seg}"]    = float(np.mean(vd))
-            out[f"diff_dvdq_std_{seg}"]     = float(np.std(vd))
-            out[f"diff_dvdq_max_abs_{seg}"] = float(np.max(np.abs(vd)))
-            out[f"diff_dvdq_min_{seg}"]     = float(np.min(vd))
-            out[f"diff_dvdq_area_{seg}"]    = float(np.trapz(np.abs(dvdq_sm[fin]), qm[fin]))
-            # D12 d²V/dQ² RMS
-            dq_b = float(qm[1] - qm[0]) if len(qm) > 1 else 1.0
-            d2   = np.gradient(dvdq_sm, dq_b)
-            fin2 = np.isfinite(d2)
-            if fin2.sum() > 0:
-                out[f"diff_d2vdq2_rms_{seg}"] = float(np.sqrt(np.mean(d2[fin2] ** 2)))
-            # D13 skew, D14 entropy
-            out[f"diff_dvdq_skew_{seg}"] = float(sp_skew(vd))
-            _cnt = np.histogram(np.abs(vd), bins=10)[0].astype(float)
-            _tot = _cnt.sum()
-            if _tot > 0:
-                p = _cnt[_cnt > 0] / _tot
-                out[f"diff_dvdq_ent_{seg}"] = float(-np.sum(p * np.log(p)))
-
-    # dQ/dV (ICA in segment)
-    vmids, dqdv_sm = _build_ica_seg(vs, ims, dts)
-    if len(vmids) >= 4:
-        # D09 dqdv_area
-        out[f"diff_dqdv_area_{seg}"] = float(np.trapz(np.maximum(dqdv_sm, 0), vmids))
-        pk = int(np.argmax(dqdv_sm))
-        if dqdv_sm[pk] > 0:
-            # D06–D08
-            out[f"diff_dqdv_peak_h_{seg}"] = float(dqdv_sm[pk])
-            out[f"diff_dqdv_peak_v_{seg}"] = float(vmids[pk])
-            fwhm, asym = _peak_fwhm_asym(dqdv_sm, pk, vmids)
-            out[f"diff_dqdv_peak_w_{seg}"]    = fwhm
-            out[f"diff_dqdv_peak_asym_{seg}"] = asym  # D11
-
-    # D10 v_trend_slope: 구간 시작→끝 선형 기울기 ΔV/Δt_total
-    dt_tot = float(np.sum(dts))
-    if dt_tot >= 1.0:
-        out[f"diff_v_trend_slope_{seg}"] = float(vs[-1] - vs[0]) / dt_tot
-
-    # D15 dv_di_seg: |ΔV/ΔI| 비율 (연속 샘플, ΔI≠0, Δt<2s); CC 구간(ΔI≈0) → 0.0
-    if n > 1:
-        dv_a = np.diff(vs); di_a = np.diff(ims); dt_a = dts[1:]
-        valid = (np.abs(di_a) > 0.01) & (dt_a < 2.0) & (dt_a > 0)
-        if valid.sum() > 0:
-            r_dyn = np.abs(dv_a[valid] / di_a[valid])
-            r_dyn = r_dyn[r_dyn < 1000.0]
-            if len(r_dyn) > 0:
-                out[f"diff_dv_di_seg_{seg}"] = float(np.mean(r_dyn))
-        else:
-            out[f"diff_dv_di_seg_{seg}"] = 0.0
-
-    # D16–D17: IC curve valley (min of dQ/dV, relative to peak — uses ICA vmids/dqdv_sm)
-    # 밸리 미발견 시 0.0 폴백 (단일 피크 또는 짧은 세그먼트)
-    if len(vmids) >= 6:
-        pk16 = int(np.argmax(dqdv_sm))
-        pk16_h = float(dqdv_sm[pk16])
-        _valley_found = False
-        if pk16_h > 0 and pk16 >= 2 and pk16 <= len(dqdv_sm) - 3:
-            li = int(np.argmin(dqdv_sm[:pk16]))
-            ri = pk16 + 1 + int(np.argmin(dqdv_sm[pk16 + 1:]))
-            lh, rh = float(dqdv_sm[li]), float(dqdv_sm[ri])
-            lv, rv = float(vmids[li]), float(vmids[ri])
-            lval = lh <= 0.2 * pk16_h
-            rval = rh <= 0.2 * pk16_h
-            if lval or rval:
-                vpk = float(vmids[pk16])
-                if lval and rval:
-                    if (vpk - lv) >= (rv - vpk):
-                        vh, vv = lh, lv
-                    else:
-                        vh, vv = rh, rv
-                elif lval:
-                    vh, vv = lh, lv
-                else:
-                    vh, vv = rh, rv
-                out[f"diff_dqdv_valley_h_{seg}"] = vh
-                out[f"diff_dqdv_valley_v_{seg}"] = vv
-                _valley_found = True
-        if not _valley_found:
-            out[f"diff_dqdv_valley_h_{seg}"] = 0.0
-            out[f"diff_dqdv_valley_v_{seg}"] = 0.0
-
-    # D18–D19: V-Q curve peak/flat Q positions
-    fin18 = np.isfinite(dvdq_sm)
-    if q_tot > 0.005 and fin18.sum() >= 3:
-        qm_f18 = qm[fin18]
-        dv_f18 = dvdq_sm[fin18]
-        out[f"diff_dvdq_peak_q_{seg}"] = float(qm_f18[int(np.argmax(np.abs(dv_f18)))]) / q_tot
-        out[f"diff_dvdq_flat_q_{seg}"] = float(qm_f18[int(np.argmin(np.abs(dv_f18)))]) / q_tot
-
-    # D20: IC area asymmetry (left / right of peak)
-    if len(vmids) >= 4:
-        pk20 = int(np.argmax(dqdv_sm))
-        if float(dqdv_sm[pk20]) > 0 and pk20 >= 1 and pk20 <= len(dqdv_sm) - 2:
-            al = float(np.trapz(np.maximum(dqdv_sm[:pk20 + 1], 0), vmids[:pk20 + 1]))
-            ar = float(np.trapz(np.maximum(dqdv_sm[pk20:],     0), vmids[pk20:]))
-            if al > 1e-9 and ar > 1e-9:
-                out[f"diff_dqdv_area_asym_{seg}"] = float(al / ar)
-
-    return out
-
-
-def _seg_lfp(vs, ims, dts, qcs, seg):
-    """카테고리 C: LFP 특징 기반 20종 (L01–L20)."""
-    out = {f"lfp_{k}_{seg}": np.nan for k in LFP_KEYS}
-    n = len(vs)
-    if n < 8:
-        return out
-
-    n_bins = max(8, min(30, n // 3))
-    qm, v_sm, dvdq_sm, q_tot = _build_vq_curve(vs, ims, dts, n_bins=n_bins)
-    dq_b = float(qm[1] - qm[0]) if len(qm) > 1 else 1.0
-
-    if q_tot < 0.005:
-        return out
-
-    fin_b = np.isfinite(dvdq_sm) & np.isfinite(v_sm)
-
-    # L01–L04: 플래토 기반
-    plt_mask = fin_b & (np.abs(dvdq_sm) < THETA_FLAT)
-    n_b = len(qm)
-    plt_frac = float(plt_mask.sum()) / n_b if n_b > 0 else 0.0
-    out[f"lfp_plateau_frac_{seg}"] = plt_frac
-    min_plt_bins = max(2, int(0.05 * n_b))
-    if plt_mask.sum() >= min_plt_bins:
-        plt_vs = v_sm[plt_mask]
-        out[f"lfp_plateau_v_mean_{seg}"] = float(np.mean(plt_vs))
-        out[f"lfp_plateau_v_std_{seg}"]  = float(np.std(plt_vs))
-        plt_dv = dvdq_sm[plt_mask]
-        fin_pd = np.isfinite(plt_dv)
-        if fin_pd.sum() >= 3:
-            out[f"lfp_plateau_dvdq_std_{seg}"] = float(np.std(plt_dv[fin_pd]))
-
-    # L05 nonlin_idx: RMSE(V, V_linear) / V_range
-    if fin_b.sum() >= 4:
-        v_lin = np.interp(qm, [qm[0], qm[-1]], [v_sm[0], v_sm[-1]])
-        v_rng = float(v_sm[fin_b].max() - v_sm[fin_b].min())
-        if v_rng > 1e-4:
-            rmse = float(np.sqrt(np.mean((v_sm[fin_b] - v_lin[fin_b]) ** 2)))
-            out[f"lfp_nonlin_idx_{seg}"] = rmse / v_rng
-
-    # L06 v_dev_mid: V(q_mid) - V_linear(q_mid), 선형 대비 중간점 편차 (방전: 음, 충전: 양)
-    q_mid = q_tot / 2.0
-    if fin_b.any():
-        v_mid     = float(np.interp(q_mid, qm, v_sm))
-        v_lin_mid = float(np.interp(q_mid, [qm[0], qm[-1]], [v_sm[0], v_sm[-1]]))
-        out[f"lfp_v_dev_mid_{seg}"] = v_mid - v_lin_mid
-
-    # L07 v_flatness
-    v_rng_raw = float(vs.max() - vs.min())
-    if v_rng_raw > 1e-4:
-        out[f"lfp_v_flatness_{seg}"] = 1.0 - float(np.std(vs)) / v_rng_raw
-
-    # L08 delta_v_rms (dt >= 1s のみ)
-    if n > 1:
-        dt_pairs = dts[1:]
-        slow = dt_pairs >= 1.0
-        if slow.sum() > 0:
-            dv_arr = np.diff(vs)[slow]
-            out[f"lfp_delta_v_rms_{seg}"] = float(np.sqrt(np.mean(dv_arr ** 2)))
-
-    # L09 vq_slope_mid: dV/dQ at q_mid (측정 전압 기반, OCV 아님)
-    if fin_b.any():
-        out[f"lfp_vq_slope_mid_{seg}"] = float(np.interp(q_mid, qm, dvdq_sm))
-
-    # L10–L11 inflect (V-Q 변곡점: d²(dV/dQ)/dQ² 영교차 중 최대 곡률 지점)
-    if fin_b.sum() >= 6 and n_b >= 6:
-        d2 = np.gradient(dvdq_sm, dq_b)
-        ws11 = min(11, n_b - (1 - n_b % 2))
-        ws11 = max(3, ws11 if ws11 % 2 == 1 else ws11 - 1)
-        try:
-            d2_sm = savgol_filter(d2, ws11, min(2, ws11 - 1))
-        except Exception:
-            d2_sm = d2
-        sc = np.where(np.diff(np.sign(d2_sm)) != 0)[0]
-        if len(sc) > 0:
-            best = sc[int(np.argmax(np.abs(d2_sm[sc])))]
-            out[f"lfp_inflect_v_{seg}"]      = float(v_sm[best])
-            out[f"lfp_inflect_q_frac_{seg}"] = float(qm[best]) / q_tot
-
-    # L12 v_concavity
-    if n >= 10:
-        denom_cw = float(np.sum(ims * dts))
-        v_mean_cw = (
-            float(np.sum(vs * ims * dts)) / denom_cw if denom_cw > 1e-9
-            else float(np.mean(vs))
-        )
-        out[f"lfp_v_concavity_{seg}"] = v_mean_cw - (float(vs[0]) + float(vs[-1])) / 2.0
-
-    # L13 phase_entry_dvdq: |dV/dQ| 구간 첫 5%
-    n5 = max(1, int(0.05 * n_b))
-    if fin_b[:n5].sum() > 0:
-        out[f"lfp_phase_entry_dvdq_{seg}"] = float(
-            np.mean(np.abs(dvdq_sm[:n5][fin_b[:n5]]))
-        )
-
-    # L14 v_q_pearson
-    q_rel = qcs - qcs[0]
-    if np.std(vs) > 1e-6 and np.std(q_rel) > 1e-9:
-        out[f"lfp_v_q_pearson_{seg}"] = float(np.corrcoef(vs, q_rel)[0, 1])
-
-    # L15 ica_peak_cnt
-    vmids_ica, dqdv_ica = _build_ica_seg(vs, ims, dts)
-    if len(vmids_ica) >= 4:
-        try:
-            pks, _ = find_peaks(dqdv_ica, height=0)
-            out[f"lfp_ica_peak_cnt_{seg}"] = float(len(pks))
-        except Exception:
-            pass
-
-    # L16 plateau_v_slope (OLS slope of V vs Q_cum within plateau mask)
-    if plt_mask.sum() >= 3:
-        qp16 = qm[plt_mask]
-        vp16 = v_sm[plt_mask]
-        if float(qp16[-1] - qp16[0]) > 1e-9:
-            A16 = np.column_stack([qp16, np.ones(len(qp16))])
-            out[f"lfp_plateau_v_slope_{seg}"] = float(
-                np.linalg.lstsq(A16, vp16, rcond=None)[0][0]
-            )
-
-    # L17 v_gradient_exit (mean |dV/dQ| at final 5% of seg)
-    n5e = max(1, int(0.05 * n_b))
-    exit_mask = np.zeros(n_b, dtype=bool)
-    exit_mask[max(0, n_b - n5e):] = True
-    valid_exit = exit_mask & fin_b
-    if valid_exit.sum() >= 1:
-        out[f"lfp_v_gradient_exit_{seg}"] = float(np.mean(np.abs(dvdq_sm[valid_exit])))
-
-    # L18 plateau_q_onset (q_frac of first plateau sample in seg)
-    plt_idx18 = np.where(plt_mask)[0]
-    if len(plt_idx18) > 0 and q_tot > 0:
-        out[f"lfp_plateau_q_onset_{seg}"] = float(qm[plt_idx18[0]]) / q_tot
-
-    # L19 dv_dt_plateau (mean |dV/dt| in plateau region, dt>=1s only) [mV/s]
-    if plt_mask.sum() >= 2 and q_tot > 0 and n > 1:
-        q_plt_lo = float(qm[plt_mask][0])  - dq_b / 2
-        q_plt_hi = float(qm[plt_mask][-1]) + dq_b / 2
-        raw_in_plt = (q_rel >= q_plt_lo) & (q_rel <= q_plt_hi)
-        if raw_in_plt.sum() >= 3:
-            vs_p  = vs[raw_in_plt]
-            dts_p = dts[raw_in_plt]
-            slow_p = dts_p[1:] >= 1.0
-            if slow_p.sum() >= 3:
-                dvdt_p = np.abs(np.diff(vs_p)[slow_p] / dts_p[1:][slow_p])
-                out[f"lfp_dv_dt_plateau_{seg}"] = float(np.mean(dvdt_p)) * 1000.0
-
-    # L20 v_ent_plateau (Shannon entropy of V within plateau mask, 10-bin PMF)
-    if plt_mask.sum() >= 3:
-        _cnt20 = np.histogram(v_sm[plt_mask], bins=10)[0].astype(float)
-        _tot20 = _cnt20.sum()
-        if _tot20 > 0:
-            p20 = _cnt20[_cnt20 > 0] / _tot20
-            out[f"lfp_v_ent_plateau_{seg}"] = float(-np.sum(p20 * np.log(p20)))
-
-    return out
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # HI 추출 (top-level — multiprocessing 호환)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1018,7 +567,7 @@ def _extract_one_cell(args) -> tuple:
     """반환: (seg_rows, cycle_rows, coverage).
 
     seg_rows: 세그먼트 인스턴스 1개당 행 1개(native seg 포맷, HI 컬럼 접미사 없음) —
-      모델 학습 입력(5_model)이 실제로 읽는 데이터. 한 (사이클,시나리오)에 n_samples개면
+      모델 학습 입력(8_train)이 실제로 읽는 데이터. 한 (사이클,시나리오)에 n_samples개면
       n_samples개 행이 그대로 남는다(2026-08-16 이전엔 row.update() 덮어쓰기로 마지막
       1개만 남았음 — docs/260816_RESULTS.md 참고).
     cycle_rows: 사이클 1개당 행 1개, 글로벌 HI(G01~G15) + capacity_Ah만 포함 — 세그먼트와
@@ -1372,7 +921,7 @@ def load_all(
 def _build_flat_correlation_df(df_seg: pd.DataFrame, df_cycle: pd.DataFrame) -> pd.DataFrame:
     """세그먼트 인스턴스 df + 사이클 글로벌 df → Step4 자체 상관분석/플롯 전용 wide df.
 
-    2026-08-16: 모델 학습(5_model)은 이제 df_seg를 그대로 읽으므로(세그먼트당 1행,
+    2026-08-16: 모델 학습(8_train)은 이제 df_seg를 그대로 읽으므로(세그먼트당 1행,
     docs/260816_RESULTS.md) 이 함수의 출력은 **학습에 쓰이지 않는다** — compute_correlations/
     plot_correlation/_plot_sample_hi가 기대하는 "사이클당 1행, 시나리오별 _{seg} 접미사
     컬럼" 형태를 맞춰주기 위한 순수 시각화·진단용 재구성이다. 같은 (사이클,시나리오)의
@@ -1515,31 +1064,6 @@ def _qfref_tag(axis_cfg: dict) -> str:
             f"{calib_path_tag(axis_cfg)}{offset_path_tag(axis_cfg)}")
 
 
-def _qabs_tag(axis_cfg: dict) -> str:
-    """q_abs 파라미터 → 파일/디렉터리 식별 태그.
-    (train_scr/train_classifier/visualize_results 와 동일 규칙)"""
-    ms = int(round(axis_cfg.get("mid_start", 0.20) * 100))
-    me = int(round(axis_cfg.get("mid_end", 0.50) * 100))
-    sl = int(round(axis_cfg.get("seg_len", 0.15) * 100))
-    ns = int(axis_cfg.get("n_samples", 4))
-    return f"ms-{ms}%_me-{me}%_sl-{sl}%_N-{ns}{_rand_suffix(axis_cfg)}"
-
-
-def _vqslope_tag(axis_cfg: dict) -> str:
-    """vqslope 파라미터 → 파일/디렉터리 식별 태그. (train_scr._axis_dir_from_spec 와 동일 규칙)
-
-    2026-09-16: assign이 태그에 안 반영되던 버그 수정 — assign="none"(H2 대조군)을
-    돌리면 기존 assign="position_bin" 캐시(예: dva_N-1)를 그대로 재사용하거나
-    덮어써버렸다. q_frac_wide의 tile_scope 접미사와 동일 원칙(기본값이면 접미사
-    없음 → 기존 캐시 100% 하위호환, 명시적으로 다르면 접미사 추가)으로 고침.
-    """
-    mode   = str(axis_cfg.get("mode", "dva")).lower()
-    ns     = int(axis_cfg.get("n_samples", 1))
-    assign = str(axis_cfg.get("assign", "position_bin"))
-    _assign_suffix = "" if assign == "position_bin" else f"_{assign}"
-    return f"{mode}_N-{ns}{_assign_suffix}{_rand_suffix(axis_cfg)}"
-
-
 def _save_coverage_stats(path: Path, per_ds_cov: dict, axis: str, axis_cfg: dict) -> None:
     """존 포인트 커버리지/누락 비율을 텍스트로 저장.
 
@@ -1615,27 +1139,13 @@ def load_or_extract(
         raise ValueError(f"알 수 없는 dataset_group: {dataset_group!r} (선택: {list(DATASET_GROUPS)})")
     _ds_names = DATASET_GROUPS[dataset_group]
 
-    # q_frac_wide: 파라미터별 고유 경로 사용
-    if axis == "q_frac_wide":
-        _tag      = _qfw_tag(axis_cfg)
-        _cache    = cache_path.parent / f"hi_features_{_tag}.pkl"
-        _axis_dir = f"q_frac_wide/{_tag}"
-    elif axis == "q_frac_ref":
+    # 정식(v4) 축은 q_frac_ref 하나뿐(2026-09-24 비-정식 축 일괄 삭제) — 파라미터별
+    # 고유 경로 태그(_qfref_tag가 내부적으로 _qfw_tag를 재사용, n1/n2/N은 부모 클래스
+    # q_frac_wide와 동일 규칙).
+    if axis == "q_frac_ref":
         _tag      = _qfref_tag(axis_cfg)
         _cache    = cache_path.parent / f"hi_features_qfref_{_tag}.pkl"
         _axis_dir = f"q_frac_ref/{_tag}"
-    elif axis == "q_abs":
-        _tag      = _qabs_tag(axis_cfg)
-        _cache    = cache_path.parent / f"hi_features_qabs_{_tag}.pkl"
-        _axis_dir = f"q_abs/{_tag}"
-    elif axis == "vqslope":
-        # vqslope: mode(dva/ica)·n_samples 별 고유 경로
-        _tag      = _vqslope_tag(axis_cfg)
-        _cache    = cache_path.parent / f"hi_features_vqslope_{_tag}.pkl"
-        _axis_dir = f"vqslope/{_tag}"
-    elif axis == "qfrac":
-        _cache    = cache_path
-        _axis_dir = axis
     else:
         _cache    = cache_path.parent / f"hi_features_{axis}.pkl"
         _axis_dir = axis
@@ -1656,20 +1166,8 @@ def load_or_extract(
         print(f"  캐시 로드: {_cache}")
         return pd.read_pickle(_cache)
 
-    # vwindow: dis_edges/chg_edges 없으면 LFP 물리 기반 고정 경계 사용
-    if axis == "vwindow" and "dis_edges" not in axis_cfg:
-        from common.scenario.vwindow import VWindowSegmenter as _VW
-        _n_win = axis_cfg.get("n_windows", 3)
-        _tmp = _VW.from_lfp(n_windows=_n_win)
-        axis_cfg.setdefault("dis_edges", _tmp._dis_edges)
-        axis_cfg.setdefault("chg_edges", _tmp._chg_edges)
-        print(f"[vwindow] LFP 고정 전압 경계  dis={_tmp._dis_edges}  chg={_tmp._chg_edges}")
-
     from common.scenario import get_segmenter as _get_seg
     _segmenter = _get_seg(axis, {axis: axis_cfg or {}})
-    if axis == "cluster":
-        print("[경고] cluster 축은 fit() 없이 실행 시 모든 세그먼트가 cluster 0으로 분류됩니다. "
-              "HI는 추출되지만 시나리오 라우팅이 무의미합니다.")
 
     seg_per_ds: dict = {}
     cyc_per_ds: dict = {}
@@ -1700,7 +1198,7 @@ def load_or_extract(
           + "  (세그먼트 인스턴스: "
           + " / ".join(f"{ds} {len(seg_per_ds[ds]):,}" for ds in _ds_names) + ")")
 
-    # Step4 자체 상관분석/플롯 전용 wide df — 모델 학습(5_model)은 seg pkl(native
+    # Step4 자체 상관분석/플롯 전용 wide df — 모델 학습(8_train)은 seg pkl(native
     # 포맷, 세그먼트당 1행)을 직접 읽으므로 이 df는 학습에 안 쓰인다(_build_flat_correlation_df
     # 참고, docs/260816_RESULTS.md).
     df = _build_flat_correlation_df(seg_all, cyc_all)
@@ -1940,16 +1438,8 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
         _params, _n_scen = dict(axis_cfg), "?"
 
     # 데이터 저장 경로 태그 (load_or_extract 와 동일 규칙)
-    if axis == "q_frac_wide":
-        _axis_dir = f"q_frac_wide/{_qfw_tag(axis_cfg)}"
-    elif axis == "q_frac_ref":
+    if axis == "q_frac_ref":
         _axis_dir = f"q_frac_ref/{_qfref_tag(axis_cfg)}"
-    elif axis == "q_abs":
-        _axis_dir = f"q_abs/{_qabs_tag(axis_cfg)}"
-    elif axis == "vqslope":
-        _axis_dir = f"vqslope/{_vqslope_tag(axis_cfg)}"
-    elif axis == "qfrac":
-        _axis_dir = axis
     else:
         _axis_dir = axis
     _exclude_cv = bool(getattr(args, "exclude_cv", False))
@@ -1993,72 +1483,94 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
 
 
 def main():
-    cpu = os.cpu_count() or 1
     parser = argparse.ArgumentParser(description="HI 411종 추출 및 Spearman 상관 시각화")
-    parser.add_argument("--workers", type=int, default=max(1, cpu - 2),
-                        help=f"병렬 프로세스 수 (기본: CPU수-2 = {max(1, cpu - 2)})")
+    parser.add_argument("--workers", type=int, default=min(P.ACTIVE_WORKERS, os.cpu_count() or 1),
+                        help=f"병렬 프로세스 수 (parameters.py 기본 "
+                             f"{min(P.ACTIVE_WORKERS, os.cpu_count() or 1)})")
     parser.add_argument("--force",   action="store_true",
                         help="캐시 무시하고 HI 재추출")
-    parser.add_argument("--dataset-group", type=str, default="lfp", dest="dataset_group",
+    parser.add_argument("--dataset-group", type=str, default=P.FIXED_DATASET_GROUP, dest="dataset_group",
                         choices=list(DATASET_GROUPS),
-                        help="데이터셋 그룹: lfp(MIT+HUST, 기본, 기존 캐시 경로 그대로) | "
+                        help=f"데이터셋 그룹: lfp(MIT+HUST, 기존 캐시 경로 그대로) | "
                              "ncm(TJU+CALCE, NCM/LCO 신규 통합) | all(4개 전체). "
-                             "그룹별로 독립된 캐시/저장 경로를 쓰므로 서로 안 겹침.")
+                             "그룹별로 독립된 캐시/저장 경로를 쓰므로 서로 안 겹침. "
+                             f"(parameters.py 기본 {P.FIXED_DATASET_GROUP!r})")
     # ── 시나리오 축 ──────────────────────────────────────────────────────────
-    parser.add_argument("--seg-axis", type=str, default="qfrac",
-                        help="세그멘테이션 축: qfrac|protocol|vwindow|rcs|cluster|q_frac_wide|q_abs|vqslope|"
-                             "full_cycle(부분 사이클 대비 베이스라인, 방향당 전체 curve 1개) (기본: qfrac)")
-    parser.add_argument("--axis-config", type=str, default="{}",
-                        help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}'). "
-                             "PowerShell에서는 --axis-config=$cfg 형태 또는 --n1/--n2/--n-samples 사용")
-    # q_frac_wide / vqslope 전용 단축 인자 — JSON 없이 파라미터 직접 지정 (PowerShell 호환)
+    parser.add_argument("--seg-axis", type=str, default=P.FIXED_SEG_AXIS,
+                        help=f"세그멘테이션 축 — {P.FIXED_SEG_AXIS!r}만 등록돼 있다(2026-09-24 "
+                             "비-정식 축 일괄 삭제, common/scenario/ REGISTRY 참고). 다른 값을 "
+                             "주면 get_segmenter()가 ValueError.")
+    parser.add_argument("--axis-config", type=str, default=json.dumps(P.ACTIVE_AXIS_CONFIG),
+                        help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}'). 기본값은 "
+                             "parameters.py: ACTIVE_AXIS_CONFIG(단일 소스) — run_pipeline.py도 "
+                             "동일한 값을 기본으로 쓴다. 아래 --n1/--n2/... 단축 인자를 하나라도 "
+                             "주면 이 JSON(기본값이든 여기서 직접 준 값이든) 위에 그 값만 patch된다 "
+                             "(PowerShell JSON 인용 우회용).")
+    # q_frac_wide / vqslope 전용 단축 인자 — JSON 없이 파라미터 직접 지정 (PowerShell 호환).
+    # default=None은 "명시적으로 안 줬음"의 센티널이다 — parameters.py 값으로 바꾸면 안 됨
+    # (아래 병합 로직이 --axis-config 위에 patch하는 방식이라, None이 아니면 항상 덮어쓴다).
+    # 실제 기본값은 parameters.py: ACTIVE_AXIS_CONFIG에 키가 있으면 그 값, 없으면 세그먼터
+    # 자체 기본값(괄호 안)이다.
     parser.add_argument("--n1",       type=float, default=None,
-                        help="q_frac_wide: 구간 크기 (기본 0.4). --axis-config 대체")
+                        help=f"q_frac_wide/q_frac_ref 구간 크기 (parameters.py 기본 "
+                             f"{P.ACTIVE_AXIS_CONFIG.get('n1', '없음 — 세그먼터 자체 기본 0.4')}). --axis-config patch")
     parser.add_argument("--n2",       type=float, default=None,
-                        help="q_frac_wide: 세그먼트 길이 (기본 0.2). --axis-config 대체")
+                        help=f"q_frac_wide/q_frac_ref 세그먼트 길이 (parameters.py 기본 "
+                             f"{P.ACTIVE_AXIS_CONFIG.get('n2', '없음 — 세그먼터 자체 기본 0.2')}). --axis-config patch")
     parser.add_argument("--n-samples", type=int, default=None, dest="n_samples",
-                        help="q_frac_wide/vqslope: 구간당 세그먼트 수. --axis-config 대체")
+                        help=f"q_frac_wide/q_frac_ref/vqslope 구간당 세그먼트 수 (parameters.py 기본 "
+                             f"{P.ACTIVE_AXIS_CONFIG.get('n_samples', '없음 — 세그먼터 자체 기본값')}). --axis-config patch")
     # q_frac_ref 전용 단축 인자 (n1/n2/n_samples는 q_frac_wide와 공유해 위 인자 그대로 씀)
     parser.add_argument("--n2-start", type=float, default=None, dest="n2_start",
                         help="q_frac_ref: n2 범위 모드 하한 — 세그먼트 길이를 고정하지 않고 "
                              "{n2_start, +n2_step, ..., n2_end} 격자에서 랜덤 추첨하고 존을 "
                              "그 길이들로 타일링해 커버리지 100%%를 보장한다(n_samples 무시). "
-                             "--n2-end와 반드시 함께. --axis-config 대체")
+                             "parameters.py에 없음(현재 고정 n2 모드 사용) — --n2-end와 반드시 함께. "
+                             "--axis-config patch")
     parser.add_argument("--n2-end", type=float, default=None, dest="n2_end",
-                        help="q_frac_ref: n2 범위 모드 상한 (--n2-start와 함께). --axis-config 대체")
+                        help="q_frac_ref: n2 범위 모드 상한 (--n2-start와 함께). parameters.py에 없음. "
+                             "--axis-config patch")
     parser.add_argument("--n2-step", type=float, default=None, dest="n2_step",
-                        help="q_frac_ref: n2 길이 격자 간격 (기본 0.1). --axis-config 대체")
+                        help="q_frac_ref: n2 길이 격자 간격 (기본 0.1). parameters.py에 없음. "
+                             "--axis-config patch")
     parser.add_argument("--n2-seed", type=int, default=None, dest="n2_seed",
-                        help="q_frac_ref: n2 길이 추첨 시드 (기본 20260903). --axis-config 대체")
+                        help="q_frac_ref: n2 길이 추첨 시드 (기본 20260903). parameters.py에 없음. "
+                             "--axis-config patch")
     parser.add_argument("--ref-lag",   type=int, default=None, dest="ref_lag",
-                        help="q_frac_ref: 레퍼런스 지연 사이클 수 (기본 0=q_frac_wide와 동등). --axis-config 대체")
+                        help=f"q_frac_ref: 레퍼런스 지연 사이클 수 (parameters.py 기본 "
+                             f"{P.ACTIVE_AXIS_CONFIG.get('ref_lag', '없음 — 세그먼터 자체 기본 0')}). --axis-config patch")
     parser.add_argument("--noise-amp", type=float, default=None, dest="noise_amp",
-                        help="q_frac_ref: 레퍼런스 노이즈 최대 진폭, 분수 (기본 0.03=±3%%). --axis-config 대체")
+                        help=f"q_frac_ref: 레퍼런스 노이즈 최대 진폭, 분수 (parameters.py 기본 "
+                             f"{P.ACTIVE_AXIS_CONFIG.get('noise_amp', '없음 — 세그먼터 자체 기본 0.03')}). --axis-config patch")
     parser.add_argument("--noise-mode", type=str, default=None, dest="noise_mode",
                         choices=["ou", "sine"],
-                        help="q_frac_ref: 노이즈 드리프트 방식 ou(기본, bounded random walk)|"
-                             "sine(구버전, 결정론적). --axis-config 대체")
+                        help=f"q_frac_ref: 노이즈 드리프트 방식 (parameters.py 기본 "
+                             f"{P.ACTIVE_AXIS_CONFIG.get('noise_mode', '없음 — 세그먼터 자체 기본 ou')!r}). "
+                             "ou=bounded random walk | sine=구버전 결정론적. --axis-config patch")
     parser.add_argument("--noise-period", type=float, default=None, dest="noise_period_cycles",
-                        help="q_frac_ref: 노이즈 평균회귀 특성시간/파장(사이클 수, 기본 200). --axis-config 대체")
+                        help=f"q_frac_ref: 노이즈 평균회귀 특성시간/파장(사이클 수, parameters.py 기본 "
+                             f"{P.ACTIVE_AXIS_CONFIG.get('noise_period_cycles', '없음 — 세그먼터 자체 기본 200')}). "
+                             "--axis-config patch")
     parser.add_argument("--min-pts", type=int, default=None, dest="min_pts",
                         help="q_frac_wide/q_frac_ref: 세그먼트 최소 포인트 수(기본 10). "
-                             "기본값과 다르면 '_minptsN' 접미사 경로에 별도 저장(§4.6 confound 방지). "
-                             "--axis-config 대체")
+                             "parameters.py에 없음. 기본값과 다르면 '_minptsN' 접미사 경로에 별도 저장 "
+                             "(§4.6 confound 방지). --axis-config patch")
     parser.add_argument("--calibration-period", type=int, default=None, dest="calibration_period",
                         help="q_frac_ref: 레퍼런스 재보정 주기(사이클 수, docs/260903_RESULTS.md §1). "
-                             "미지정 시 재보정 없음(기존 동작). 권장값 100. --axis-config 대체")
+                             "parameters.py에 없음(미지정 시 재보정 없음, 기존 동작). 권장값 100. "
+                             "--axis-config patch")
     parser.add_argument("--calibration-mode", type=str, default=None, dest="calibration_mode",
                         choices=["drift_only", "full"],
                         help="q_frac_ref: 재보정 시 리셋 범위 — drift_only(기본, OU만) | "
-                             "full(바이어스까지). --axis-config 대체")
+                             "full(바이어스까지). parameters.py에 없음. --axis-config patch")
     parser.add_argument("--calibration-jitter", type=int, default=None, dest="calibration_jitter",
                         help="q_frac_ref: 재보정 주기를 ±jitter 사이클 흔듦(기본 0). "
-                             "--axis-config 대체")
+                             "parameters.py에 없음. --axis-config patch")
     parser.add_argument("--offset-amp", type=float, default=None, dest="offset_amp",
                         help="q_frac_ref: 센서 offset 오차 최대진폭, A 단위(기본 0=비활성). "
                              "전류 크기와 무관하게 사이클 소요시간에 비례하는 절대오차를 추가한다 "
                              "(common/scenario/q_frac_ref.py 모듈 docstring '센서 offset 오차' 절). "
-                             "--axis-config 대체")
+                             "parameters.py에 없음. --axis-config patch")
     parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
                         help="충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간 제외 "
                              "(segmenter는 무수정, 세그먼터에 넘기는 충전 배열만 CV 시작 지점에서 절단; "
@@ -2080,33 +1592,30 @@ def main():
         HUST_DIR = DATA_4_HI_ROOT / "clean_noshape" / "HUST"
         print(f"[--skip-shape] 입력 경로 재지정: MIT_DIR={MIT_DIR}  HUST_DIR={HUST_DIR}")
 
-    # 단축 인자 → axis_config 자동 구성 (PowerShell JSON 우회)
-    if (args.n1 is not None or args.n2 is not None or args.n_samples is not None
-            or args.ref_lag is not None or args.noise_amp is not None
-            or args.noise_mode is not None or args.noise_period_cycles is not None
-            or args.min_pts is not None or args.n2_start is not None
-            or args.n2_end is not None or args.n2_step is not None
-            or args.n2_seed is not None or args.calibration_period is not None
-            or args.calibration_mode is not None or args.calibration_jitter is not None
-            or args.offset_amp is not None):
-        _quick: dict = {}
-        if args.n1        is not None: _quick["n1"]        = args.n1
-        if args.n2        is not None: _quick["n2"]        = args.n2
-        if args.n2_start  is not None: _quick["n2_start"]  = args.n2_start
-        if args.n2_end    is not None: _quick["n2_end"]    = args.n2_end
-        if args.n2_step   is not None: _quick["n2_step"]   = args.n2_step
-        if args.n2_seed   is not None: _quick["n2_seed"]   = args.n2_seed
-        if args.n_samples is not None: _quick["n_samples"] = args.n_samples
-        if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
-        if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
-        if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
-        if args.noise_period_cycles is not None: _quick["noise_period_cycles"] = args.noise_period_cycles
-        if args.min_pts is not None: _quick["min_pts"] = args.min_pts
-        if args.calibration_period is not None: _quick["calibration_period"] = args.calibration_period
-        if args.calibration_mode   is not None: _quick["calibration_mode"]   = args.calibration_mode
-        if args.calibration_jitter is not None: _quick["calibration_jitter"] = args.calibration_jitter
-        if args.offset_amp is not None: _quick["offset_amp"] = args.offset_amp
-        args.axis_config = json.dumps(_quick)
+    # 단축 인자 → axis_config에 patch (PowerShell JSON 우회). 기존엔 단축 인자가 하나라도
+    # 있으면 axis_config 전체를 그 단축 인자들만으로 새로 만들어 덮어썼는데, 이러면
+    # --axis-config로 직접 넘긴 값(또는 그 기본값인 parameters.py: ACTIVE_AXIS_CONFIG)의
+    # 나머지 키가 전부 조용히 사라졌다. 이제는 이미 정해진 axis_config(기본값이든 명시
+    # 값이든) 위에 "명시적으로 준" 단축 인자만 patch한다 — 단일 소스(parameters.py)가
+    # 어느 경로로 실행해도 항상 베이스로 유지된다.
+    _quick: dict = json.loads(args.axis_config)
+    if args.n1        is not None: _quick["n1"]        = args.n1
+    if args.n2        is not None: _quick["n2"]        = args.n2
+    if args.n2_start  is not None: _quick["n2_start"]  = args.n2_start
+    if args.n2_end    is not None: _quick["n2_end"]    = args.n2_end
+    if args.n2_step   is not None: _quick["n2_step"]   = args.n2_step
+    if args.n2_seed   is not None: _quick["n2_seed"]   = args.n2_seed
+    if args.n_samples is not None: _quick["n_samples"] = args.n_samples
+    if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
+    if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
+    if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
+    if args.noise_period_cycles is not None: _quick["noise_period_cycles"] = args.noise_period_cycles
+    if args.min_pts is not None: _quick["min_pts"] = args.min_pts
+    if args.calibration_period is not None: _quick["calibration_period"] = args.calibration_period
+    if args.calibration_mode   is not None: _quick["calibration_mode"]   = args.calibration_mode
+    if args.calibration_jitter is not None: _quick["calibration_jitter"] = args.calibration_jitter
+    if args.offset_amp is not None: _quick["offset_amp"] = args.offset_amp
+    args.axis_config = json.dumps(_quick)
 
     _axis = args.seg_axis
     try:
@@ -2146,18 +1655,10 @@ def main():
         print(f"\n── {gname} ──")
         print(sub.to_string(float_format=lambda x: f"{x:+.3f}"))
 
-    if _axis == "q_frac_wide":
-        _dir_suffix = f"_qfw_{_qfw_tag(_axis_cfg)}"          # random suffix(_qfw_tag) 포함
-    elif _axis == "q_frac_ref":
+    if _axis == "q_frac_ref":
         _dir_suffix = f"_qfref_{_qfref_tag(_axis_cfg)}"
-    elif _axis == "q_abs":
-        _dir_suffix = f"_qabs_{_qabs_tag(_axis_cfg)}"
-    elif _axis == "vqslope":
-        _dir_suffix = f"_vqslope_{_vqslope_tag(_axis_cfg)}"  # mode·random suffix 포함
-    elif _axis != "qfrac":
-        _dir_suffix = f"_{_axis}"
     else:
-        _dir_suffix = ""
+        _dir_suffix = f"_{_axis}"
     if args.exclude_cv:
         _dir_suffix += "_ccOnly"
     if args.skip_shape:
@@ -2205,27 +1706,6 @@ def main():
 
     print("완료!")
 
-
-# ── hi_compute 위임 ──────────────────────────────────────────────────────────
-# HI 계산 로직의 단일 소스는 5_model/hi_compute.py.
-# 아래 import가 이 파일 내 동명 함수 정의를 덮어써, 새 @hi 함수가
-# _seg_stat/_seg_diff/_seg_lfp 를 통해 자동으로 포함된다.
-import sys as _hc_sys
-from pathlib import Path as _HCPath
-_hc_root = str(_HCPath(__file__).resolve().parent.parent / "5_model")
-if _hc_root not in _hc_sys.path:
-    _hc_sys.path.insert(0, _hc_root)
-from hi_compute import (    # noqa: E402
-    _seg_stat,
-    _seg_diff,
-    _seg_lfp,
-    _build_vq_curve,
-    _build_ica_seg,
-    _peak_fwhm_asym,
-    _seg_morph_curves,
-    _dtw_distance,
-    _frechet_distance,
-)
 
 if __name__ == "__main__":
     main()

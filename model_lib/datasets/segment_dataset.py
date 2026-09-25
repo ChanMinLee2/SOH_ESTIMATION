@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
 
 import numpy as np
 import pandas as pd
@@ -125,7 +125,7 @@ def split_cells_per_dataset(
 def _get_native_hi_cols() -> list[str]:
     """66 HI column names in native seg format (no seg suffix).
 
-    2026-08-07: stat_q_abs/stat_energy_seg 포함(5_model/utils/hi_schema.py와 동일
+    2026-08-07: stat_q_abs/stat_energy_seg 포함(model_lib/utils/hi_schema.py와 동일
     변경 — 이 함수가 그 파일의 _STAT_EXCLUDE 로직을 별도로 복제해서 갖고 있었음).
     2026-08-08: EXCLUDE_STAT_LEAK도 hi_schema.py와 동일하게 반영(SOH_EXCLUDE_STAT_LEAK=1).
     2026-09-19: EXCLUDE_DQDV_LEAK도 동일하게 반영(SOH_EXCLUDE_DQDV_LEAK=1, diff_dqdv_area 제외).
@@ -521,7 +521,7 @@ class FastTensorLoader:
         if include_aux:
             keys += ["aux_scen_target", "aux_intensity_target"]
         if hasattr(ds, "x_kernel"):
-            # build_kernel_group_features.py 커널 융합 HI 블록(phase1_trainer_v2.py가
+            # kernel.py 커널 융합 HI 블록(train.py가
             # 학습 직전 ds.x_kernel로 붙여둠) — 있으면 자동으로 배치에 포함, 없으면
             # 기존과 완전히 동일 동작.
             keys.append("x_kernel")
@@ -753,30 +753,3 @@ def build_datasets(
     print(f"[dataset] segs   train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
     return train_ds, val_ds, test_ds, norm
-
-
-def build_random_seg_dataset(
-    seg_data_dir: Path,
-    datasets: list[str],
-    normalizer: SegmentNormalizer,
-    data_cfg: dict,
-    spec: ScenarioSpec | None = None,
-) -> "SegmentDataset":
-    """
-    랜덤 세그먼트(test_rs 등) PKL을 로드해 SegmentDataset 반환.
-
-    normalizer: 반드시 학습 체크포인트에서 복원한 것을 전달 (refit 없음).
-    spec: 랜덤 세그먼트 데이터의 ScenarioSpec (test_rs → n_scenarios=2).
-          None 이면 load_dataset_native_seg 기본값 사용.
-    """
-    root = PROJECT_ROOT
-    seg_dir  = root / seg_data_dir
-    wide_dir = seg_dir.parent / "cycle"   # test_rs/cycle/{MIT,HUST}/*.pkl
-
-    df = load_dataset_native_seg(seg_dir, datasets, wide_dir, spec=spec)
-    if len(df) == 0:
-        raise RuntimeError(f"[build_random_seg_dataset] 데이터 없음: {seg_dir}")
-
-    print(f"[dataset] random_seg: {len(df):,} 세그먼트 로드 ({seg_data_dir})")
-    ds = SegmentDataset(df, normalizer, fit_normalizer=False, data_cfg=data_cfg)
-    return ds

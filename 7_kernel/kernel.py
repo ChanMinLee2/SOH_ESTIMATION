@@ -1,27 +1,27 @@
 """
-5_model/experiments/phase1_lab/build_kernel_group_features.py
+7_kernel/kernel.py
 
-build_synergy_groups.py가 만든 그룹(다중공선성 배제 + 편상관계수 시너지 필터를 통과한
+synergy.py가 만든 그룹(다중공선성 배제 + 편상관계수 시너지 필터를 통과한
 시나리오별 HI 묶음, 크기 2 이상만 대상)을 "그룹당 새 HI 하나"로 물리적으로 융합하는 스크립트.
 그룹 멤버 HI들 -> SOH를 RBF 커널(Nystroem 근사 + Ridge)로 fit해서, 그 예측값을 그룹의
 "커널 HI"로 쓴다 — 편상관계수(선형)로는 못 잡는 비선형 시너지를 명시적으로 캡처하기 위함.
-raw HI는 대체하지 않고 그대로 둔 채 별도 블록으로 "추가"한다(phase1_trainer_v2.py가
+raw HI는 대체하지 않고 그대로 둔 채 별도 블록으로 "추가"한다(train.py가
 scr_model.py의 독립 게이트 scen_kernel_gates에 연결 — 설계 배경/이력은
 docs/260820_RESULTS.md 참고).
 
 이 스크립트가 하는 다중공선성 관리는 이제 3단계다(2026-09-18에 3차 추가):
-  1. (build_synergy_groups.py가 이미 함) 그룹 *내부* raw HI 중복 배제.
+  1. (synergy.py가 이미 함) 그룹 *내부* raw HI 중복 배제.
   2. 이 스크립트: 커널 HI *끼리*(시나리오 다른 그룹끼리도 원본 HI가 겹치면 커널값이
      비슷할 수 있어 전체 train pooled로 재검사) 다중공선성 배제(--redundancy-threshold).
   3. (신규) raw HI(64) + 이 시나리오가 만든 커널 HI를 합쳐서, **시나리오별로**(2차와 달리
      pooled 아님) |r|>=0.95인 각 쌍의 "패자"를 정해 제거한다 — degree(다른 HI와도
      0.95를 넘는 관계 개수)가 더 많은 쪽 우선 제거, 동일하면 타깃(SOH) 상관계수가 더
      낮은 쪽 제거 — `kernel_group_features_{tag}_combined_redundancy.json`으로 저장,
-     phase1_trainer_v2.py --combined-redundancy-json이 실제 배제를 적용한다.
+     train.py --combined-redundancy-json이 실제 배제를 적용한다.
   raw HI와 그걸로 만든 커널 HI 사이의 다중공선성은 이제 3차에서 검사한다(과거엔 검사하지
   않던 알려진 한계였음, docs/260820_RESULTS.md 참고).
 
-  또한 2026-09-18부터 x_kernel 소비 방식이 바뀌었다(phase1_trainer_v2.py의
+  또한 2026-09-18부터 x_kernel 소비 방식이 바뀌었다(train.py의
   _apply_kernel_features, 요구사항1) — 커널 HI 컬럼은 이제 "그 컬럼을 만든 시나리오"의
   행에만 값이 채워지고 다른 시나리오 행에서는 항상 0이다(전에는 모든 행에 모든 커널
   모델을 적용해 다른 시나리오용 모델을 분포 밖(OOD) 입력에 적용한 의미 없는 값이 섞여
@@ -52,9 +52,9 @@ docs/260820_RESULTS.md 참고).
 
 사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir은 표준 조합이면 생략 가능 —
 기본값 자동 적용, 다른 조합이면 넷 다 같이 오버라이드):
-  python 5_model/experiments/phase1_lab/build_kernel_group_features.py \
-      --model-config 5_model/config/main_qfref_S_p60.yaml \
-      --synergy-groups-json 5_model/experiments/phase1_lab/results/outputs/synergy_groups_k25_full_N2_groups_noleak.json \
+  python 7_kernel/kernel.py \
+      --model-config model_lib/config/main_qfref_S_p60.yaml \
+      --synergy-groups-json legacy_results/experiments/phase1_lab/results/outputs/synergy_groups_k25_full_N2_groups_noleak.json \
       --split-seed 42 --tag k25_full_N2_kernel
 """
 
@@ -68,31 +68,23 @@ from pathlib import Path
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-RESULTS_DIR = Path(__file__).resolve().parent / "results"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RESULTS_DIR = PROJECT_ROOT / "model_lib" / "results"
 
-sys.path.insert(0, str(PROJECT_ROOT / "5_model"))
+sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from log_utils import append_log_entry, current_command_str  # noqa: E402
+import parameters as P  # noqa: E402 — 축/실행 파라미터 단일 소스
 
-# 루트는 data_directories.py의 DATA_4_HI_ROOT_STR에서 가져온다(build_synergy_groups.py/
-# lambda_sweep.py와 동일 이유 — PC마다 실제 드라이브가 다름).
-from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
-
-_DATA_ROOT = f"{DATA_4_HI_ROOT_STR}/q_frac_ref/n1-35%_n2-20%_N-2_lag-0_noise-3%_ou-200"
-DEFAULT_DATA_DIR = f"{_DATA_ROOT}/cycle"
-DEFAULT_SEG_DATA_DIR = f"{_DATA_ROOT}/seg"
-
-# seg-axis/axis-config도 이 세션 전체에서 한 번도 안 바뀐 고정값 — 위 데이터 경로와 세트로
-# 묶인 값이라(다른 조합이면 데이터 경로도 같이 바뀌어야 함) 다른 조합을 쓰려면 셋 다
-# 함께 오버라이드해야 한다.
-DEFAULT_SEG_AXIS = "q_frac_ref"
-DEFAULT_AXIS_CONFIG = json.dumps({
-    "n1": 0.35, "n2": 0.20, "ref_lag": 0, "noise_amp": 0.03,
-    "noise_mode": "ou", "noise_period_cycles": 200, "n_samples": 2,
-})
+# seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
+# 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
+# lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다).
+DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS
+DEFAULT_AXIS_CONFIG = json.dumps(P.ACTIVE_AXIS_CONFIG)
+DEFAULT_DATA_DIR = P.FIXED_CANONICAL_DATA_DIR
+DEFAULT_SEG_DATA_DIR = P.FIXED_CANONICAL_SEG_DATA_DIR
 
 try:
     from tqdm import tqdm as _tqdm
@@ -121,37 +113,43 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로")
     p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로")
     p.add_argument("--datasets", nargs="+", default=["MIT", "HUST"])
-    p.add_argument("--split-seed", type=int, default=42)
+    p.add_argument("--split-seed", type=int,
+                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else 42)
     p.add_argument("--synergy-groups-json", required=True,
-                    help="build_synergy_groups.py 산출물 경로 — 이 그룹들을 융합 대상으로 씀")
-    p.add_argument("--alpha", type=float, default=1.0,
-                    help="Ridge 정규화 강도 (기본 1.0)")
-    p.add_argument("--gamma", type=float, default=None,
-                    help="RBF 커널 폭 (기본 None -> sklearn 기본값 1/n_features)")
-    p.add_argument("--n-components", type=int, default=100,
+                    help="synergy.py 산출물 경로 — 이 그룹들을 융합 대상으로 씀")
+    p.add_argument("--alpha", type=float, default=P.FIXED_KERNEL_ALPHA,
+                    help=f"Ridge 정규화 강도 (parameters.py 기본 {P.FIXED_KERNEL_ALPHA})")
+    p.add_argument("--gamma", type=float, default=P.FIXED_KERNEL_GAMMA,
+                    help="RBF 커널 폭 (parameters.py 기본 None -> sklearn 기본값 1/n_features)")
+    p.add_argument("--n-components", type=int, default=P.FIXED_KERNEL_N_COMPONENTS,
                     help="Nystroem 랜드마크(근사 차원) 개수 — 시나리오당 표본이 수만~수십만 "
                          "행이라 KernelRidge의 O(n^2) 그람 행렬 대신 Nystroem 근사를 쓴다 "
-                         "(기본 100, 그룹 표본 수보다 크면 자동으로 표본 수까지 줄어듦)")
-    p.add_argument("--redundancy-threshold", type=float, default=0.9,
-                    help="2차 다중공선성 배제 기준(커널 HI끼리) — build_synergy_groups.py와 "
+                         f"(parameters.py 기본 {P.FIXED_KERNEL_N_COMPONENTS}, 그룹 표본 수보다 "
+                         "크면 자동으로 표본 수까지 줄어듦)")
+    p.add_argument("--redundancy-threshold", type=float,
+                    default=P.FIXED_KERNEL_REDUNDANCY_THRESHOLD,
+                    help=f"2차 다중공선성 배제 기준(커널 HI끼리, parameters.py 기본 "
+                         f"{P.FIXED_KERNEL_REDUNDANCY_THRESHOLD}) — synergy.py와 "
                          "동일 임계값 재사용")
-    p.add_argument("--max-features", type=int, default=None,
-                    help="최종 커널 HI 개수 상한(기본 None=무제한, 다중공선성 배제 통과한 "
-                         "건 전부 유지). 주면 시나리오별 쿼터 라운드로빈으로 그 개수까지만 "
+    p.add_argument("--max-features", type=int, default=P.FIXED_KERNEL_MAX_FEATURES,
+                    help="최종 커널 HI 개수 상한(parameters.py 기본 None=무제한, 다중공선성 배제 "
+                         "통과한 건 전부 유지). 주면 시나리오별 쿼터 라운드로빈으로 그 개수까지만 "
                          "남김(특정 시나리오가 전역 랭킹에서 전부 밀려나는 것 방지)")
-    p.add_argument("--min-raw-partial-corr", type=float, default=None,
+    p.add_argument("--min-raw-partial-corr", type=float, default=P.FIXED_MIN_RAW_PARTIAL_CORR,
                     dest="min_raw_partial_corr",
                     help="v3 전용: 커널 예측값을 자기 그룹의 raw 멤버로 조건화한 편상관계수가 "
                          "이 값 미만이면 그 커널 후보를 버린다(raw로 이미 설명되는 걸 "
                          "커널로 한 번 더 만든 것에 불과하다는 뜻이라 raw-커널 간 중복으로 "
-                         "간주). 기본 None=필터 비활성(기존 v1/v2 동작과 100%% 동일). "
-                         "build_synergy_groups.py의 그룹 성장 문턱(0.02)을 그대로 재사용해도 "
+                         "간주). parameters.py 기본 None=필터 비활성(기존 v1/v2 동작과 100%% 동일). "
+                         "synergy.py의 그룹 성장 문턱(0.02)을 그대로 재사용해도 "
                          "되고 별도 값을 줘도 됨 — 이 값 자체가 별도로 튜닝된 적은 없음.")
-    p.add_argument("--combined-redundancy-threshold", type=float, default=0.95,
+    p.add_argument("--combined-redundancy-threshold", type=float,
+                    default=P.FIXED_COMBINED_REDUNDANCY_THRESHOLD,
                     dest="combined_redundancy_threshold",
                     help="3차(결합 raw+kernel, 시나리오별) 다중공선성 배제 기준(v4 요구사항2, "
                          "2026-09-18) — fig3(hi_design_rationale)/redundancy_gate_resolution.py와 "
-                         "동일 관례로 기본 0.95. 2026-09-19까지는 하드코딩된 모듈 상수였다가 "
+                         f"동일 관례로 parameters.py 기본 {P.FIXED_COMBINED_REDUNDANCY_THRESHOLD}. "
+                         "2026-09-19까지는 하드코딩된 모듈 상수였다가 "
                          "--redundancy-threshold/--min-raw-partial-corr처럼 CLI로 노출.")
     p.add_argument("--tag", required=True)
     p.add_argument("--out-dir", default=None, dest="out_dir",
@@ -209,7 +207,7 @@ def _fit_group_kernel(
 
 
 def _residualize(y: np.ndarray, conditioning: np.ndarray) -> np.ndarray:
-    """build_synergy_groups.py의 동명 함수와 동일 로직(중복 재구현이지만 두 스크립트가
+    """synergy.py의 동명 함수와 동일 로직(중복 재구현이지만 두 스크립트가
     서로 import하는 관계가 아니라 독립 유지 — 로직이 5줄짜리라 모듈 결합보다 낫다고 판단)."""
     if conditioning.shape[1] == 0:
         return y
@@ -235,7 +233,7 @@ def _round_robin_select(
 ) -> list[int]:
     """시나리오별 쿼터 라운드로빈으로 kept(다중공선성 배제를 통과한 후보 인덱스)에서
     최대 cap개를 고른다. 전역 train_r2 랭킹으로 한 번에 자르면 특정 시나리오의 그룹이
-    전부 R^2가 낮아 최종본에 하나도 안 남을 수 있다(build_synergy_groups.py로 어렵게 찾은
+    전부 R^2가 낮아 최종본에 하나도 안 남을 수 있다(synergy.py로 어렵게 찾은
     그 시나리오 그룹 정보가 통째로 버려짐) — 시나리오마다 "남은 후보 중 최선" 하나씩
     돌아가며 채워 최소 floor(cap/n_scenarios)개는 보장한다."""
     by_scenario: dict[int, list[int]] = {}
@@ -338,7 +336,7 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 2차 다중공선성 배제: 전체 train(모든 시나리오 pooled)에서 커널 값끼리 상관 계산.
-    # 그룹 내부 중복은 build_synergy_groups.py가 이미 걸렀지만, 시나리오가 다른 그룹끼리는
+    # 그룹 내부 중복은 synergy.py가 이미 걸렀지만, 시나리오가 다른 그룹끼리는
     # (원본 HI가 겹치면) 커널 변환 후에도 비슷한 값이 나올 수 있어 여기서 다시 검사.
     # ------------------------------------------------------------------
     kernel_vals = np.zeros((x_all.shape[0], len(candidates)), dtype=np.float64)
@@ -383,7 +381,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 정규화 통계 — 커널 예측값은 SOH를 직접 예측하도록 fit돼 스케일이 SOH 자체
     # (대략 0.7~1.05)를 따른다. 원래 x_hi는 z-score(평균0/표준편차1)라 스케일이 전혀
-    # 다름 — 여기서 train 기준 mean/std를 구해 저장해두고, 적용 시점(phase1_trainer_v2.py)
+    # 다름 — 여기서 train 기준 mean/std를 구해 저장해두고, 적용 시점(train.py)
     # 에서 (v - mean) / std로 표준화한다(val/test엔 이 train 통계를 그대로 적용, fit은 안 함
     # — 누수 없음).
     # ------------------------------------------------------------------
@@ -422,7 +420,7 @@ def main() -> None:
     #   2) degree가 같으면, 타깃(SOH)과의 단순상관 |target_corr|가 더 낮은 쪽을 제거
     #      ("자체 상관계수가 더 높은 HI를 살려").
     #   3) 그래도 같으면(초저확률) 인덱스가 더 큰 쪽을 제거(결정성 확보용 임의 규칙).
-    # 실제 반영(raw는 nan_mask, kernel은 x_kernel 0-강제)은 phase1_trainer_v2.py
+    # 실제 반영(raw는 nan_mask, kernel은 x_kernel 0-강제)은 train.py
     # --combined-redundancy-json이 담당 — scr_model.py는 무변경.
     # ------------------------------------------------------------------
     COMBINED_REDUNDANCY_THRESHOLD = args.combined_redundancy_threshold  # 기본 0.95,
@@ -516,14 +514,10 @@ def main() -> None:
     with open(out_path, "wb") as fh:
         pickle.dump(artifact, fh)
 
-    # plot_kernel_rejected.py용 — 어떤 HI 조합(그룹)이 왜 최종 커널에서 빠졌는지 별도 저장
-    # (raw_conditioned_filter/kernel_kernel_dedup/max_features_quota 3가지 사유).
-    rejected_out_path = out_dir / f"kernel_group_features_{args.tag}_rejected.json"
-    rejected_out_path.write_text(
-        json.dumps({"tag": args.tag, "n_rejected": len(rejected), "rejected": rejected},
-                   indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # 2026-09-21: 탈락 목록(raw_conditioned_filter/kernel_kernel_dedup/max_features_quota
+    # 사유별) 파일 저장은 제거 — 원래 읽던 plot_kernel_rejected.py가 이미 삭제돼 아무도
+    # 이 파일을 다시 읽지 않았다(파이프라인 실행 전 정리 커밋에서 함께 삭제됨). 개수
+    # 요약만 콘솔에 남기고 `rejected` 리스트 자체(사유 상세)는 저장하지 않는다.
 
     avg_r2 = float(np.mean([f["train_r2"] for f in final]))
     print(f"\n[kernel] 후보 {len(candidates)}개(크기1 그룹 {n_skipped_size1}개 스킵) "
@@ -533,7 +527,7 @@ def main() -> None:
     print("[kernel] 시나리오별 최종 커널 HI 개수: " +
           ", ".join(f"{k}={v}" for k, v in n_final_by_scenario.items()))
     print(f"[kernel] 저장: {out_path}")
-    print(f"[kernel] 탈락 목록 저장({len(rejected)}개, plot_kernel_rejected.py용): {rejected_out_path}")
+    print(f"[kernel] 탈락 {len(rejected)}개 (파일 저장 안 함 — 콘솔 요약만)")
 
     append_log_entry(
         tag=f"kernel_group_features_{args.tag}",
@@ -541,16 +535,16 @@ def main() -> None:
                 "+ 2차 다중공선성 배제 + 정규화 통계 저장 + 3차 결합(raw+kernel) 다중공선성 "
                 "배제(시나리오별, 2026-09-18 신규)",
         command=current_command_str(),
-        result_files=[str(out_path), str(rejected_out_path), str(combined_redundancy_out_path)],
+        result_files=[str(out_path), str(combined_redundancy_out_path)],
         key_metrics=(f"후보 {len(candidates)}개 -> 최종 {len(final)}개, "
                      f"평균 train R^2={avg_r2:.4f}, 시나리오별 개수={n_final_by_scenario}, "
                      f"결합 다중공선성 배제: raw {n_removed_raw_total}개/kernel {n_removed_kernel_total}개"),
         interpretation=(
-            "이 pkl은 phase1_trainer_v2.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 "
+            "이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 "
             "두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 "
             "— raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 "
             "상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. "
-            "_combined_redundancy.json은 phase1_trainer_v2.py --combined-redundancy-json으로 "
+            "_combined_redundancy.json은 train.py --combined-redundancy-json으로 "
             "넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다."
         ),
     )
