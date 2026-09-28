@@ -20,7 +20,6 @@ HI의 "상호작용 증거"로 삼고, 64개 HI에 대해 Benjamini-Hochberg로 
 사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir은 표준 조합이면 생략 가능 —
 기본값 자동 적용):
   python 5_interaction/interaction.py \
-      --model-config model_lib/config/main_qfref_S.yaml \
       --split-seed 42 --alpha 0.05 --tag k25_full_N2
 """
 
@@ -66,14 +65,13 @@ DEFAULT_SEG_DATA_DIR = P.FIXED_CANONICAL_SEG_DATA_DIR
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="HI x 시나리오 상호작용 통계 검정 (Fisher z, train만 사용)")
-    p.add_argument("--model-config", required=True)
     p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
     p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR)
-    p.add_argument("--datasets", nargs="+", default=["MIT", "HUST"])
+    p.add_argument("--datasets", nargs="+", default=P.FIXED_CANONICAL_DATASETS)
     p.add_argument("--split-seed", type=int,
-                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else 42)
+                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED)
     p.add_argument("--alpha", type=float, default=P.FIXED_INTERACTION_ALPHA,
                    help=f"BH 보정 후 유의성 판정 기준(parameters.py 기본 "
                         f"{P.FIXED_INTERACTION_ALPHA}) — 참고용, 표본이 "

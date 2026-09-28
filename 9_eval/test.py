@@ -267,8 +267,9 @@ def main() -> None:
     with_probe_mlp = lambda_scen > 0
     # regression_model은 항상 cfg["model"]의 저장값(v4는 항상 "mlp") 그대로 쓴다 — 다른
     # 아키텍처(transformer 등)는 sanity-check용으로만 쓰이던 옵션이라 여기서 오버라이드할
-    # 이유가 없다. with_raw_cnn/with_raw_flat도 v4에서 항상 비활성.
-    p1_model_cfg = {**cfg["model"], "with_raw_cnn": False, "with_raw_flat": False}
+    # 이유가 없다. with_raw_cnn/with_raw_flat도 v4에서 항상 비활성(SCRModel이 model_cfg에서
+    # 두 키를 아예 읽지 않으므로 강제 오버라이드는 2026-09-27부로 no-op이라 삭제).
+    p1_model_cfg = dict(cfg["model"])
 
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],

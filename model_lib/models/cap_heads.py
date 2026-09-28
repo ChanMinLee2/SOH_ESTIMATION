@@ -19,14 +19,12 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from utils.hi_schema import N_HI, RAW_CH, RAW_N
+from utils.hi_schema import N_HI
 
 _HEAD_IN = N_HI + N_HI + 1 + 1  # 64+64+1+1 = 130
 _D_CNN = 3  # RawCNN 출력 차원 — 3개 의미고정 스칼라 [h_scen,h_intensity,h_soh]
             # (docs/260803_RESULTS.md §10, 이전 d_out=64 "HI와 정렬" 설계에서 전환)
 _HEAD_IN_WITH_CNN = N_HI + N_HI + _D_CNN + 1 + 1  # 64+64+3+1+1 = 133
-_D_RAW_FLAT = RAW_CH * RAW_N  # 2*48=96 — 방안1(REGRESSION_UPGRADE.md §2 방안1): raw_v‖raw_i flatten
-_HEAD_IN_WITH_RAW_FLAT = N_HI + N_HI + _D_RAW_FLAT + 1 + 1  # 64+64+96+1+1 = 226
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +71,7 @@ class MLPHead(nn.Module):
 
 class TransformerHead(nn.Module):
     """
-    130-dim(with_raw_cnn=True면 133-dim, with_raw_flat=True면 226-dim) 입력을
+    130-dim(with_raw_cnn=True면 133-dim) 입력을
     semantic 토큰으로 분할해 Transformer Encoder에 입력한다.
       Token 0: probe_x  (64-dim)  — 방향별 probe gate 출력
       Token 1: scen_x   (64-dim)  — 시나리오 gate 출력
@@ -82,11 +80,6 @@ class TransformerHead(nn.Module):
                선형 투영(2026-09-08, v4를 transformer에서도 돌릴 수 있게 추가)
       Token 3: (with_raw_cnn=True) cnn_emb (3-dim) — raw V/I/t CNN 임베딩
                [h_scen,h_intensity,h_soh], 쪼개지 않고 통째로 한 토큰(docs/260803_RESULTS.md §10)
-               또는 (with_raw_flat=True) raw_flat(96-dim) — raw_v‖raw_i를 압축 없이
-               통째로 한 토큰으로 선형 투영(방안1, REGRESSION_UPGRADE.md §2). 96개
-               개별 스칼라 토큰화는 어텐션 비용이 급증해(§3.2) 피하고, cnn_emb와
-               동일하게 "토큰 1개" 취급으로 통일 — with_raw_cnn/with_raw_flat 동시
-               활성은 금지(build_cap_head에서 검증).
       마지막 Token: meta (2-dim) — direction + cap_init
 
     각 토큰을 d_model로 선형 투영 후 TransformerEncoder → mean pool → 스칼라 출력.
@@ -100,24 +93,19 @@ class TransformerHead(nn.Module):
         d_ff: int = 256,
         dropout: float = 0.1,
         with_raw_cnn: bool = False,
-        with_raw_flat: bool = False,
         n_kernel_hi: int = 0,
     ):
         super().__init__()
-        assert not (with_raw_cnn and with_raw_flat), \
-            "with_raw_cnn과 with_raw_flat을 동시에 켤 수 없습니다."
         self.with_raw_cnn = with_raw_cnn
-        self.with_raw_flat = with_raw_flat
         self.n_kernel_hi = n_kernel_hi
         self.probe_embed = nn.Linear(N_HI, d_model)
         self.scen_embed  = nn.Linear(N_HI, d_model)
         self.meta_embed  = nn.Linear(2, d_model)
         # 커널 융합 HI 블록(kernel.py 산출물) — probe/scen과 마찬가지로
         # 별도 semantic 토큰 1개로 투영한다. scr_model.py의 concat 순서(probe‖scen‖kernel‖
-        # cnn_emb/raw_flat‖meta)와 정확히 맞춰 forward()에서 슬라이싱한다.
+        # cnn_emb‖meta)와 정확히 맞춰 forward()에서 슬라이싱한다.
         self.kernel_embed = nn.Linear(n_kernel_hi, d_model) if n_kernel_hi > 0 else None
         self.cnn_embed   = nn.Linear(_D_CNN, d_model) if with_raw_cnn else None
-        self.raw_flat_embed = nn.Linear(_D_RAW_FLAT, d_model) if with_raw_flat else None
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -131,7 +119,7 @@ class TransformerHead(nn.Module):
         self.output  = nn.Linear(d_model, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 130) 또는 (B, 133)/(B, 226) — with_raw_cnn/with_raw_flat 여부에 따라
+        # x: (B, 130) 또는 (B, 133) — with_raw_cnn 여부에 따라
         probe_x = x[:, :N_HI]                                # (B, 64)
         scen_x  = x[:, N_HI: 2 * N_HI]                       # (B, 64)
 
@@ -149,10 +137,6 @@ class TransformerHead(nn.Module):
             cnn_emb = x[:, offset: offset + _D_CNN]           # (B, 3)
             offset += _D_CNN
             tokens.append(self.cnn_embed(cnn_emb).unsqueeze(1))
-        elif self.with_raw_flat:
-            raw_flat = x[:, offset: offset + _D_RAW_FLAT]     # (B, 96)
-            offset += _D_RAW_FLAT
-            tokens.append(self.raw_flat_embed(raw_flat).unsqueeze(1))
 
         meta = x[:, offset:]                                  # (B, 2)
         tokens.append(self.meta_embed(meta).unsqueeze(1))
@@ -383,7 +367,7 @@ class FTTransformerHead(nn.Module):
 # ---------------------------------------------------------------------------
 
 def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
-                    n_kernel_hi: int = 0, n_scen_onehot: int = 0) -> nn.Module:
+                    n_kernel_hi: int = 0) -> nn.Module:
     """
     model_cfg 의 regression_model 값에 따라 적절한 헤드를 반환한다.
     model_cfg 가 비어 있거나 키가 없으면 MLPHead (Phase 1 기본 동작).
@@ -396,31 +380,14 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
                       mlp/transformer/resnet_tab/i_transformer 지원(i_transformer는
                       2026-09-10 추가 — 커널 HI를 개별 토큰으로 넣음, 옵션1). ft_transformer는
                       아직 미지원 — 에러(설계 미정, 위 NotImplementedError 참고).
-        n_scen_onehot : SCRModel(scenario_onehot=True)의 zone/level 원-핫 폭(=n_classes,
-                      보통 3, 0=없음). 2026-09-17 안건2 "게이트 분리 대신 원샷 입력" 실험용
-                      — with_raw_flat과 동일한 선례로 mlp만 지원(그 외 NotImplementedError).
     """
     rtype = model_cfg.get("regression_model", "mlp").lower().replace("-", "_")
-    if n_scen_onehot > 0 and rtype != "mlp":
-        raise NotImplementedError(
-            f"n_scen_onehot(scenario_onehot 원-핫 입력)은 아직 mlp만 지원합니다 (rtype={rtype}). "
-            "Phase 1(scenario_onehot 실험)은 항상 mlp 헤드를 쓰므로 다른 헤드 지원은 필요할 때 추가."
-        )
 
     n_heads  = model_cfg.get("tr_n_heads",  4)
     n_layers = model_cfg.get("tr_n_layers", 2)
     d_ff     = model_cfg.get("tr_d_ff",     d_head * 2)
 
     with_raw_cnn  = bool(model_cfg.get("with_raw_cnn", False))
-    with_raw_flat = bool(model_cfg.get("with_raw_flat", False))
-    if with_raw_cnn and with_raw_flat:
-        raise ValueError("with_raw_cnn과 with_raw_flat을 동시에 켤 수 없습니다 (방안2 vs 방안1).")
-    if with_raw_flat and rtype not in ("mlp", "transformer", "resnet_tab"):
-        raise NotImplementedError(
-            f"with_raw_flat은 아직 mlp/transformer/resnet_tab만 지원합니다 (rtype={rtype}). "
-            "i_transformer/ft_transformer는 96개 raw 스칼라의 개별 토큰화 설계가 필요합니다 "
-            "(REGRESSION_UPGRADE.md §3.2)."
-        )
     if n_kernel_hi > 0 and rtype not in ("mlp", "transformer", "resnet_tab",
                                           "i_transformer", "itransformer"):
         raise NotImplementedError(
@@ -429,11 +396,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
             "다루는 구조라(feature-wise attention) 커널 블록을 같은 방식(n_kernel_hi개 토큰 "
             "추가 vs 1개 토큰으로 뭉치기)으로 넣을지 설계가 더 필요합니다."
         )
-    head_in = (
-        _HEAD_IN_WITH_CNN if with_raw_cnn else
-        _HEAD_IN_WITH_RAW_FLAT if with_raw_flat else
-        _HEAD_IN
-    ) + n_kernel_hi + n_scen_onehot
+    head_in = (_HEAD_IN_WITH_CNN if with_raw_cnn else _HEAD_IN) + n_kernel_hi
 
     if rtype == "mlp":
         return MLPHead(d_head=d_head, dropout=dropout,
@@ -444,7 +407,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
         return TransformerHead(
             d_model=d_head, n_heads=n_heads,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
-            with_raw_cnn=with_raw_cnn, with_raw_flat=with_raw_flat,
+            with_raw_cnn=with_raw_cnn,
             n_kernel_hi=n_kernel_hi,
         )
 

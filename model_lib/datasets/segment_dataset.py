@@ -215,14 +215,6 @@ def load_dataset_native_seg(
             df["direction"] = df["scen_idx"].map(_id_to_dir).astype(np.float32)
             df["level"]     = df["scen_idx"].map(_id_to_lvl).astype(np.int64)
 
-            # h_scen/h_intensity 보조손실 타깃 (docs/260803_RESULTS.md §10.8) — 이미
-            # x_hi(hi_XX)에 포함되는 기존 HI를 그대로 재사용하므로 rename 전에 원본
-            # 이름으로 복사해 보존한다(둘 다 세그먼트 내부 상대량이라 q_tot 불필요).
-            if "lfp_plateau_frac" in df.columns:
-                df["aux_scen_target"] = df["lfp_plateau_frac"]
-            if "stat_i_std" in df.columns:
-                df["aux_intensity_target"] = df["stat_i_std"]
-
             # Map native HI cols → hi_00..hi_64 (exclude stat_q_abs)
             available = [c for c in _NATIVE_HI_COLS if c in df.columns]
             rename_map = {old: f"hi_{i:02d}" for i, old in enumerate(available)}
@@ -236,14 +228,13 @@ def load_dataset_native_seg(
                     + _hi_cols)
             # 원시 곡선 컬럼(raw_v/raw_i/raw_t)이 있으면 함께 보존 (CNN 입력용)
             raw_cols = [c for c in ("raw_v", "raw_i", "raw_t") if c in df.columns]
-            aux_cols = [c for c in ("aux_scen_target", "aux_intensity_target") if c in df.columns]
             # q_frac_lo: 모든 시나리오 축(q_frac_wide/qfrac/rcs/test_rs/full_cycle)이 공통으로
             # 채우는 세그먼트 시작 위치 메타 -- 같은 scen_idx 안에 n_samples>1개 세그먼트가
             # 있을 때(예: q_frac_wide n_samples=2) 이 값으로 시간순 정렬해 세그먼트별 궤적
             # 플랏(capacity_curve_*.png)에서 n_samples를 뭉개지 않고 개별 라인으로 그릴 수
             # 있게 한다(2026-09-18, scr_evaluator.py._plot_capacity_curves).
             meta_cols = [c for c in ("q_frac_lo",) if c in df.columns]
-            df = df[keep + raw_cols + aux_cols + meta_cols].dropna(subset=["capacity_Ah"])
+            df = df[keep + raw_cols + meta_cols].dropna(subset=["capacity_Ah"])
             # HI 66개가 전부 NaN인 세그먼트 제외 — hi_correlation.py가 계산 자체를
             # 못한 경우(예: 충전 데이터 부족으로 q_tc < cap*0.6, _chg_incomplete)로,
             # SegmentNormalizer.fit()이 이미 nanmean/nanstd로 이런 행을 정규화 통계
@@ -438,19 +429,6 @@ class SegmentDataset(Dataset):
         cap_init_norm = normalizer.transform_cap_init(cap_init_raw)
         self.cap_init = torch.tensor(cap_init_norm, dtype=torch.float32)
 
-        # h_scen/h_intensity 보조손실 타깃 (docs/260803_RESULTS.md §10.8, Phase 1
-        # CNN 학습 전용 — 구 pkl에 컬럼이 없으면 NaN → 학습 시 마스킹 처리)
-        if "aux_scen_target" in df.columns:
-            self.aux_scen_target = torch.tensor(
-                df["aux_scen_target"].values.astype(np.float32), dtype=torch.float32)
-        else:
-            self.aux_scen_target = torch.full((len(df),), float("nan"), dtype=torch.float32)
-        if "aux_intensity_target" in df.columns:
-            self.aux_intensity_target = torch.tensor(
-                df["aux_intensity_target"].values.astype(np.float32), dtype=torch.float32)
-        else:
-            self.aux_intensity_target = torch.full((len(df),), float("nan"), dtype=torch.float32)
-
         # metadata (not returned by __getitem__, but useful for evaluation)
         self.cap_init_raw = cap_init_raw                          # SOH→Ah 변환용
         self.cell_ids = df["cell_id"].values.tolist()
@@ -476,14 +454,7 @@ class SegmentDataset(Dataset):
             "scen_idx":   self.scen_idx[idx],
             "target":    self.target[idx],
             "cap_init":  self.cap_init[idx],
-            "aux_scen_target":      self.aux_scen_target[idx],
-            "aux_intensity_target": self.aux_intensity_target[idx],
         }
-
-
-def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
-    keys = batch[0].keys()
-    return {k: torch.stack([b[k] for b in batch]) for k in keys}
 
 
 class FastTensorLoader:
@@ -495,9 +466,7 @@ class FastTensorLoader:
     그 오버헤드를 제거한다 (대규모 세그먼트 학습에서 에폭 시간 대폭 단축).
 
     SCRModel 회귀 forward(Phase 1/2)는 ``x_raw``를 사용하지 않으므로 기본 제외한다.
-    CNN 분류기 학습 등 ``x_raw``가 필요하면 ``include_raw=True``. ``h_scen``/
-    ``h_intensity`` 보조손실 타깃(docs/260803_RESULTS.md §10.8)이 필요하면
-    ``include_aux=True`` (Phase 1 CNN 학습 전용).
+    CNN 분류기 학습 등 ``x_raw``가 필요하면 ``include_raw=True``.
 
     트레이너의 ``_to_device``가 배치를 GPU로 옮기므로 텐서는 CPU에 유지한다
     (배치당 1회 연속 전송 → per-sample stack보다 훨씬 빠르고 GPU 메모리 상주 없음).
@@ -512,14 +481,11 @@ class FastTensorLoader:
         batch_size: int,
         shuffle: bool = False,
         include_raw: bool = False,
-        include_aux: bool = False,
         drop_last: bool = False,
     ) -> None:
         keys = list(self._MODEL_KEYS)
         if include_raw:
             keys.insert(1, "x_raw")
-        if include_aux:
-            keys += ["aux_scen_target", "aux_intensity_target"]
         if hasattr(ds, "x_kernel"):
             # kernel.py 커널 융합 HI 블록(train.py가
             # 학습 직전 ds.x_kernel로 붙여둠) — 있으면 자동으로 배치에 포함, 없으면
@@ -544,35 +510,6 @@ class FastTensorLoader:
             if self.drop_last and sel.numel() < self.bs:
                 break
             yield {k: self.tensors[k][sel] for k in self.keys}
-
-
-def filter_dataset_by_cells(ds: "SegmentDataset", cell_ids: list[str]) -> "SegmentDataset":
-    """SegmentDataset에서 지정된 cell_id 행만 추출해 새 Dataset 반환."""
-    cell_set = set(cell_ids)
-    indices  = [i for i, c in enumerate(ds.cell_ids) if c in cell_set]
-    return _subset_dataset(ds, indices)
-
-
-def _subset_dataset(ds: "SegmentDataset", indices: list[int]) -> "SegmentDataset":
-    new_ds = object.__new__(SegmentDataset)
-    new_ds.x_hi        = ds.x_hi[indices]
-    new_ds.x_raw        = ds.x_raw[indices]
-    new_ds.nan_mask     = ds.nan_mask[indices]
-    new_ds.direction    = ds.direction[indices]
-    new_ds.level        = ds.level[indices]
-    new_ds.scen_idx      = ds.scen_idx[indices]
-    new_ds.target       = ds.target[indices]
-    new_ds.cap_init     = ds.cap_init[indices]
-    new_ds.aux_scen_target      = ds.aux_scen_target[indices]
-    new_ds.aux_intensity_target = ds.aux_intensity_target[indices]
-    new_ds.dataset_id   = ds.dataset_id[indices]
-    new_ds.cap_init_raw = ds.cap_init_raw[indices]
-    new_ds.cell_ids     = [ds.cell_ids[i] for i in indices]
-    new_ds.cycles       = [ds.cycles[i] for i in indices]
-    new_ds.seg_names    = [ds.seg_names[i] for i in indices]
-    new_ds.q_frac_lo    = [ds.q_frac_lo[i] for i in indices]
-    new_ds.capacity_raw = ds.capacity_raw[indices]
-    return new_ds
 
 
 # ---------------------------------------------------------------------------

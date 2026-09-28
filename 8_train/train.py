@@ -26,16 +26,17 @@ L0LambdaScheduler)하고, "에폭을 몇 번 돌고 어느 시점을 최종본�
 gates/regression_HIs.json, scenario_spec.json, logs/train_log_v2.csv) — 그래야
 analyze_convergence.py / materialize_ensemble_gates.py를 무수정으로 재사용할 수 있다.
 
-사용 예(--model-config/--seg-axis/--axis-config는 미지정 시 parameters.py: P1_MODEL_CONFIG/
-ACTIVE_AXIS_CONFIG를 그대로 쓴다 — 다른 프리셋/조합이면 직접 지정, 이때 --data-dir/
+사용 예(--seg-axis/--axis-config는 미지정 시 parameters.py: P1_MODEL_CONFIG/
+ACTIVE_AXIS_CONFIG를 그대로 쓴다 — 다른 조합이면 직접 지정, 이때 --data-dir/
 --seg-data-dir도 같이 줘야 함):
   python 8_train/train.py \
       --scen-k 25 --seed 42 --split-seed 42 --beta-min 0.1 --tag stage12_k25
 
-  # 다른 프리셋(예: patience=60 버전)을 재현하려면:
-  python 8_train/train.py \
-      --model-config model_lib/config/main_qfref_S_p60.yaml \
-      --scen-k 25 --seed 42 --split-seed 42 --beta-min 0.1 --tag stage12_k25
+2026-09-27: --model-config(프리셋 yaml 선택) 폐기 — parameters.py: P1_MODEL_CONFIG가
+유일한 학습 설정 소스다. 과거 main_qfref_S_*.yaml 프리셋들(dataset subset/
+regression_model 교체 ablation)은 이번 리팩토링 이전(폴더 구조·train.py 개명 전)
+코드를 전제로 했고 이후 한 번도 재검증되지 않았다 — 재현이 필요해지면 그때 다시
+설계할 것(docs/REFATORING.md 2026-09-27 항목 참고).
 """
 
 from __future__ import annotations
@@ -66,7 +67,7 @@ for _stream in (sys.stdout, sys.stderr):
 import numpy as np
 import torch
 
-from utils.io_utils import load_config, save_config  # noqa: E402
+from utils.io_utils import save_config  # noqa: E402
 from utils.hi_schema import N_HI, get_hi_cols_for_seg, EXCLUDE_STAT_LEAK, EXCLUDE_DQDV_LEAK  # noqa: E402
 from utils.metrics import rmse as _rmse, r2 as _r2  # noqa: E402
 from utils.tqdm_utils import trange, write as tqdm_write  # noqa: E402
@@ -86,16 +87,11 @@ import parameters as P  # noqa: E402 — 축 설정 단일 소스(P.ACTIVE_AXIS_
 # seg-axis/axis-config/data-dir/seg-data-dir 전부 이번 v3/v4/v-ctrl 검증 전체에서 한 번도
 # 안 바뀐 고정 조합(q_frac_ref, n1=0.35/n2=0.20/n_samples=2) — synergy.py 등
 # 나머지 phase1_lab 스크립트와 동일한 기본값을 준다. 이 스크립트는 train_scr.py의 자동
-# 경로계산(_axis_dir)을 재사용하지 않아서 --data-dir/--seg-data-dir을 안 주면(yaml도
-# null) 즉시 RuntimeError였다 — lambda_sweep.py가 이미 겪은 문제와 동일(그쪽 주석 참고).
-# 네 값은 항상 세트로 움직이므로, 표준 조합이 아니면 넷 다 함께 오버라이드해야 한다.
-#
-# 2026-09-23: parameters.py를 단일 소스로 통일 — 이 폴백은 --model-config yaml에
-# scenario.axis/axis_config/data.data_dir/data.seg_data_dir이 전부 없을 때만 실행되는
-# 죽은 경로지만(main_qfref_S.yaml은 넷 다 명시함), 예전엔 여기 하드코딩된 값이
-# parameters.py: ACTIVE_AXIS_CONFIG(ref_lag=1, min_pts/calibration/offset 포함)와
-# 어긋나 있었다(ref_lag=0, min_pts/calibration/offset 없음, 경로도 lag-0) — 조용한
-# 지뢰였음. 이제 parameters.py 값을 그대로 참조해 두 소스가 절대 어긋날 수 없다.
+# 경로계산(_axis_dir)을 재사용하지 않아서 --data-dir/--seg-data-dir을 안 주면 즉시
+# RuntimeError였다 — lambda_sweep.py가 이미 겪은 문제와 동일(그쪽 주석 참고). 네 값은
+# 항상 세트로 움직이므로, 표준 조합이 아니면 넷 다 함께 오버라이드해야 한다.
+# parameters.py: ACTIVE_AXIS_CONFIG/FIXED_CANONICAL_DATA_DIR/SEG_DATA_DIR이 유일한
+# 소스다(2026-09-23 통일, 2026-09-27 --model-config yaml 폴백 자체를 제거해 확정).
 DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS
 DEFAULT_AXIS_CONFIG = json.dumps(P.ACTIVE_AXIS_CONFIG)
 DEFAULT_DATA_DIR = P.FIXED_CANONICAL_DATA_DIR
@@ -109,27 +105,17 @@ RESULTS_DIR = PROJECT_ROOT / "model_lib" / "results" / "p1v2_runs"
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Phase1 v2 — 체크포인트 기준 변경 + temperature annealing")
-    p.add_argument("--model-config", default=None,
-                   help="yaml 설정 파일 경로. 미지정 시(기본) parameters.py: P1_MODEL_CONFIG "
-                        "(fixed.yaml+main_qfref_S.yaml 병합과 100%% 동일한 값, 단일 소스)를 "
-                        "그대로 쓴다. all4/hust_only/noscen/p60/transformerL 등 다른 프리셋을 "
-                        "재현하려면 그 yaml 경로(model_lib/config/<preset>.yaml)를 명시할 것 — "
-                        "그 경우엔 기존처럼 파일을 읽는다.")
     p.add_argument("--seg-axis", default=None,
-                   help="미지정 시 --model-config yaml의 scenario.axis를 쓰고, "
-                        "그마저 없으면 DEFAULT_SEG_AXIS(q_frac_ref)로 폴백")
+                   help="미지정 시 DEFAULT_SEG_AXIS(parameters.py: FIXED_SEG_AXIS)로 폴백")
     p.add_argument("--axis-config", default=None,
-                   help="미지정 시 --model-config yaml의 scenario.axis_config를 쓰고, "
-                        "그마저 없으면 DEFAULT_AXIS_CONFIG로 폴백 — 예전엔 CLI 기본값이 "
-                        "항상 DEFAULT_AXIS_CONFIG라 yaml에 뭘 적어놔도 조용히 무시됐다 "
-                        "(2026-09-04 수정 — yaml만으로 축 설정을 완결시킬 수 있게 함).")
+                   help="미지정 시 DEFAULT_AXIS_CONFIG(parameters.py: ACTIVE_AXIS_CONFIG)로 폴백")
     p.add_argument("--charge-m", type=int, default=None)
     p.add_argument("--discharge-m", type=int, default=None)
     p.add_argument("--scen-k", type=int, default=None)
     p.add_argument("--seed", type=int,
-                   default=P.ACTIVE_SEED if P.ACTIVE_SEED is not None else 42)
+                   default=P.ACTIVE_SEED if P.ACTIVE_SEED is not None else P.FIXED_DEFAULT_SEED)
     p.add_argument("--split-seed", type=int,
-                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else 42)
+                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED)
     p.add_argument("--train-cycle-frac", type=float,
                    default=P.FIXED_TRAIN_CYCLE_FRAC if P.FIXED_TRAIN_CYCLE_FRAC is not None else 1.0,
                    help="진단용 — train split만 cell당 cycle 단위로 이 비율만큼 "
@@ -183,7 +169,7 @@ def _parse_args() -> argparse.Namespace:
                         "{timestamp}_p1v2_{tag}_seed{seed} 폴더를 새로 만들지 않는다. "
                         "run_pipeline.py가 Step 6~8(상호작용/시너지/커널) 산출물과 같은 "
                         "폴더에 학습 결과를 모으려고 씀(2026-09-19) — 단독 실행 시 기본"
-                        "(미지정)이면 기존과 100% 동일하게 타임스탬프 폴더를 새로 만든다.")
+                        "(미지정)이면 기존과 100%% 동일하게 타임스탬프 폴더를 새로 만든다.")
     p.add_argument("--lambda-l0-override", type=float, default=P.ACTIVE_LAMBDA_L0_OVERRIDE,
                    dest="lambda_l0_override",
                    help="loss.lambda_l0을 이 값으로 강제 고정(lambda_l0_auto/yaml 값 무시, 최우선순위). "
@@ -403,34 +389,17 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    if args.model_config is not None:
-        cfg = load_config(str(PROJECT_ROOT / args.model_config))
-    else:
-        import copy
-        cfg = copy.deepcopy(P.P1_MODEL_CONFIG)
+    import copy
+    cfg = copy.deepcopy(P.P1_MODEL_CONFIG)
 
-    # 우선순위: CLI 명시 > yaml 값 > 이 파일의 DEFAULT_* 상수. 예전엔 --seg-axis/
-    # --axis-config/--data-dir/--seg-data-dir 전부 CLI 기본값이 DEFAULT_*로 고정돼
-    # 있어서(None이 아님) yaml에 뭘 적어놔도 매번 조용히 덮어썼다 — 이 4개를 한 번에
-    # 고쳐 yaml만으로 축 설정을 완결시킬 수 있게 한다(2026-09-04).
-    scenario_cfg = cfg.get("scenario", {}) or {}
-    seg_axis = args.seg_axis if args.seg_axis is not None else scenario_cfg.get("axis", DEFAULT_SEG_AXIS)
-    if args.axis_config is not None:
-        axis_cfg = json.loads(args.axis_config)
-    else:
-        axis_cfg = scenario_cfg.get("axis_config") or json.loads(DEFAULT_AXIS_CONFIG)
-    cfg.setdefault("scenario", {})["axis"] = seg_axis
-    cfg["scenario"]["axis_config"] = axis_cfg
-    cfg.setdefault("data", {})["split_seed"] = args.split_seed
+    # 우선순위: CLI 명시 > 이 파일의 DEFAULT_*(=parameters.py) 상수.
+    seg_axis = args.seg_axis if args.seg_axis is not None else DEFAULT_SEG_AXIS
+    axis_cfg = json.loads(args.axis_config) if args.axis_config is not None else json.loads(DEFAULT_AXIS_CONFIG)
+    cfg["scenario"] = {"axis": seg_axis, "axis_config": axis_cfg}
+    cfg["data"]["split_seed"] = args.split_seed
     cfg["data"]["train_cycle_frac"] = args.train_cycle_frac
-    if args.data_dir is not None:
-        cfg["data"]["data_dir"] = args.data_dir
-    elif not cfg["data"].get("data_dir"):
-        cfg["data"]["data_dir"] = DEFAULT_DATA_DIR
-    if args.seg_data_dir is not None:
-        cfg["data"]["seg_data_dir"] = args.seg_data_dir
-    elif not cfg["data"].get("seg_data_dir"):
-        cfg["data"]["seg_data_dir"] = DEFAULT_SEG_DATA_DIR
+    cfg["data"]["data_dir"] = args.data_dir if args.data_dir is not None else DEFAULT_DATA_DIR
+    cfg["data"]["seg_data_dir"] = args.seg_data_dir if args.seg_data_dir is not None else DEFAULT_SEG_DATA_DIR
 
     cls_cfg = cfg.setdefault("classifier", {})
     reg_cfg = cfg.setdefault("regression", {})
@@ -442,15 +411,6 @@ def main() -> None:
     scen_k = reg_cfg.get("scen_k_count", 5)
 
     spec = get_segmenter(seg_axis, {seg_axis: axis_cfg}).get_spec()
-
-    # 데이터 경로: train_scr.py의 자동 경로계산(_axis_dir) 로직을 재사용하지 않으므로,
-    # yaml에 없으면 --data-dir/--seg-data-dir로 직접 줘야 한다.
-    if not cfg["data"].get("data_dir") or not cfg["data"].get("seg_data_dir"):
-        raise RuntimeError(
-            "cfg['data']['data_dir']/['seg_data_dir']가 비어 있습니다 — "
-            "이 v2 트레이너는 train_scr.py의 자동 경로계산 로직을 재사용하지 않으므로, "
-            "--model-config에 이미 박혀있지 않다면 --data-dir/--seg-data-dir을 직접 넘겨주세요."
-        )
 
     train_ds, val_ds, _test_ds, norm = build_datasets(cfg, spec=spec)
 
@@ -489,7 +449,9 @@ def main() -> None:
     with_probe_mlp = lambda_scen > 0
     # regression_model은 cfg["model"]에 저장된 값(v4는 항상 "mlp") 그대로 쓴다 — 다른
     # 아키텍처(transformer 등)는 sanity-check용으로만 쓰이던 오버라이드라 제거함.
-    p1_model_cfg = {**cfg["model"], "with_raw_cnn": False, "with_raw_flat": False}
+    # (2026-09-27: with_raw_cnn/with_raw_flat 강제 오버라이드 삭제 — SCRModel이 이제
+    # model_cfg에서 두 키를 아예 읽지 않으므로 의미 없는 no-op이었다.)
+    p1_model_cfg = dict(cfg["model"])
 
     shared_hi_mask = None
     if args.interaction_json:

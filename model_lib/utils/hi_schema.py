@@ -69,12 +69,6 @@ MORPH_KEYS: list[str] = [
     "vt_dtw", "vq_dtw", "ve_dtw", "vt_frec", "vq_frec", "ve_frec",
 ]
 
-# 2026-08-07: 더 이상 자동 제외하지 않음(위 모듈 docstring 참고) — 실제 제외 로직은
-# get_hi_cols_for_seg/get_hi_cost_vector의 _STAT_EXCLUDE였는데 그것도 비웠다.
-# 이 세트는 과거 이력 참고용으로만 남겨둔다(현재 어디서도 참조 안 함).
-LEAK_COLS: set[str] = set()
-
-
 # ── 원시 세그먼트 곡선 (CNN 입력) ────────────────────────────────────────────
 # 세그먼트의 V/I 시계열을 q_frac [0,1] 그리드에 리샘플한 고정 길이.
 # hi_correlation.py(데이터 생성)와 segment_dataset.py(로더)가 공유하는 단일 상수.

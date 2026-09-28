@@ -310,8 +310,6 @@ def _parse_batch(args):
                         "I":  _load_cycle_field(f, c_grp, "I",  j),
                         "V":  _load_cycle_field(f, c_grp, "V",  j),
                         "T":  _load_cycle_field(f, c_grp, "T",  j),
-                        "Qd": _load_cycle_field(f, c_grp, "Qd", j),
-                        "Qc": _load_cycle_field(f, c_grp, "Qc", j),
                         "t":  _load_cycle_field(f, c_grp, "t",  j),
                     }
                     for j in range(n_cycles)

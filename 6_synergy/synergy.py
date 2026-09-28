@@ -33,7 +33,6 @@ Phase1 학습 이전에 실행하는 "시너지 그룹" 사전 구성 스크립�
 사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir 전부 표준 조합(q_frac_ref,
 n1=0.35/n2=0.20/n_samples=2)이면 생략 가능 — 기본값 자동 적용, 다른 조합이면 넷 다 같이 오버라이드):
   python 6_synergy/synergy.py \
-      --model-config model_lib/config/main_qfref_S_p60.yaml \
       --split-seed 42 --tag k25_full_N2_groups
 """
 
@@ -85,14 +84,13 @@ except ImportError:  # pragma: no cover
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Phase1 이전 HI 시너지 그룹 사전 구성 (다중공선성 배제 필터 통합)")
-    p.add_argument("--model-config", required=True)
     p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
     p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로")
     p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로")
-    p.add_argument("--datasets", nargs="+", default=["MIT", "HUST"])
+    p.add_argument("--datasets", nargs="+", default=P.FIXED_CANONICAL_DATASETS)
     p.add_argument("--split-seed", type=int,
-                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else 42)
+                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED)
     p.add_argument("--max-group-size", type=int, default=P.ACTIVE_MAX_GROUP_SIZE,
                    help=f"그룹당 최대 HI 개수 (parameters.py 기본 {P.ACTIVE_MAX_GROUP_SIZE})")
     p.add_argument("--redundancy-threshold", type=float,
@@ -131,13 +129,12 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _load_all_scenarios(args) -> tuple:
-    from utils.io_utils import load_config
+    import copy
     from datasets.segment_dataset import build_datasets
     from common.scenario import get_segmenter
     from utils.hi_schema import get_hi_cols_for_seg
 
-    cfg = load_config(args.model_config)
-    cfg.setdefault("data", {})
+    cfg = copy.deepcopy(P.P1_MODEL_CONFIG)
     cfg["data"]["data_dir"] = args.data_dir
     cfg["data"]["seg_data_dir"] = args.seg_data_dir
     cfg["data"]["datasets"] = args.datasets

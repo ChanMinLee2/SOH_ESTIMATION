@@ -1,23 +1,14 @@
 """
 SCR Evaluator.
 
-Produces per run folder:
-  figures/
-    scatter_test.png
-    capacity_curve_*.png
-    confusion_matrix_test.png
-  metrics/
-    metrics.json          capacity + breakdown + scenario + efficiency
-  routing/
-    routing_heatmap.png   scen(6) x HI(65) activation map
-    routing_table.csv     selected HI list per scenario
-  predictions/
-    test_predictions.csv
+figures/scatter_*.png, capacity_curve_*.png, confusion_matrix_*.png는 이 모듈의
+_plot_scatter/_plot_capacity_curves/_plot_confusion_matrix를 9_eval/test.py가 호출해
+생성한다. metrics/metrics.json은 save_metrics()가 만든다. routing/, predictions/ 산출물은
+test.py가 자체 로직으로 직접 쓴다(이 모듈은 관여하지 않음).
 """
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Sequence
@@ -28,7 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from utils.metrics import compute_metrics
-from utils.hi_schema import get_hi_cost_vector, get_hi_cols_for_seg, N_HI
+from utils.hi_schema import get_hi_cost_vector, N_HI
 from datasets.segment_dataset import SegmentDataset, SegmentNormalizer
 
 
@@ -105,18 +96,12 @@ class SCREvaluator:
         ds: SegmentDataset,
         batch_size: int = 512,
         routing_mode: str = "none",
-        direction_routing: bool = False,
     ) -> dict:
         """
         routing_mode:
           "none" — 방향(direction)만으로 헤드 선택, 분류기 우회 (기본)
           "hard" — 분류기 argmax → 단일 시나리오 헤드 (분류기 활성화 필요)
           "soft" — 분류기 확률 가중 평균 (분류기 활성화 필요)
-
-        direction_routing:
-          True  — routing_mode="none"일 때 방향별 첫 번째 시나리오로 scen_idx 보정
-                  (test_rs처럼 scen_idx 0/1만 있어 모델 시나리오 ID와 불일치할 때 사용)
-          False — scen_idx 그대로 사용 (qfrac 정규 테스트 기본값)
         """
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=_collate)
         self.model.eval()
@@ -139,23 +124,9 @@ class SCREvaluator:
                 for _c, _sid in enumerate(_row):
                     _routing_t[_d, _c] = _sid
 
-        # direction-only fallback: routing_mode="none"일 때 방향별 첫 시나리오로 보정
-        # (test_rs: scen_idx 0/1 → 모델 시나리오 ID 불일치 해소)
-        _dir_t = None
-        if direction_routing and routing_mode == "none" and hasattr(self._spec, "routing"):
-            _dir_t = torch.tensor(
-                [row[0] for row in self._spec.routing],
-                dtype=torch.long, device=self.device,
-            )  # (n_dir,): charge→routing[0][0], discharge→routing[1][0]
-
         for batch in loader:
             batch_d = {k: v.to(self.device) for k, v in batch.items()}
             B = batch_d["x_hi"].size(0)
-
-            if _dir_t is not None:
-                # direction_routing 보정: 방향에 맞는 첫 번째 모델 시나리오로 재매핑
-                dir_idx = (batch_d["direction"] <= 0).long()   # 0=charge, 1=discharge
-                batch_d["scen_idx"] = _dir_t[dir_idx]
 
             if _use_clf and _routing_t is not None:
                 x_hi    = batch_d["x_hi"]
@@ -240,50 +211,6 @@ class SCREvaluator:
         }
 
     # ------------------------------------------------------------------
-    # Full evaluation
-    # ------------------------------------------------------------------
-    def plot_for_dataset(
-        self,
-        pred_dict: dict,
-        out_dir: Path,
-        rep_cells: list[str],
-        tag: str = "random_seg",
-    ) -> None:
-        """
-        pred_dict에 대한 scatter + 용량 곡선 + confusion matrix를 out_dir에 저장.
-        self.figures_dir / self.rep_cells를 임시 교체하여 기존 메서드를 재활용한다.
-        """
-        out_dir.mkdir(parents=True, exist_ok=True)
-        _orig_figs = self.figures_dir
-        _orig_rep  = self.rep_cells
-        self.figures_dir = out_dir
-        self.rep_cells   = rep_cells
-        self._plot_scatter(pred_dict, tag=tag)
-        self._plot_capacity_curves(pred_dict)
-        self._plot_confusion_matrix(pred_dict, tag=tag)
-        self.figures_dir = _orig_figs
-        self.rep_cells   = _orig_rep
-
-    def evaluate(
-        self,
-        train_ds: SegmentDataset,
-        val_ds: SegmentDataset,
-        test_ds: SegmentDataset,
-        batch_size: int = 512,
-    ) -> dict[str, dict]:
-        results = {}
-        for split_name, ds in [("train", train_ds), ("val", val_ds), ("test", test_ds)]:
-            pred = self.predict_dataset(ds, batch_size)
-            metrics = compute_metrics(pred["cap_true_raw"], pred["cap_pred_raw"])
-            results[split_name] = {**metrics, **pred}
-            print(f"[eval] {split_name}: " + " ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
-
-        self._plot_scatter(results["test"], tag="test")
-        self._plot_capacity_curves(results["test"])
-        self._plot_confusion_matrix(results["test"], tag="test")
-        return results
-
-    # ------------------------------------------------------------------
     # 통합 평가: 학습된 분류기로 분류 → 라우팅 → 회귀 (oracle/hard/soft)
     # ------------------------------------------------------------------
     _MODE_ROUTING = {"oracle": "none", "hard": "hard", "soft": "soft"}
@@ -293,7 +220,6 @@ class SCREvaluator:
         ds: SegmentDataset,
         modes: Sequence[str] = ("oracle", "hard", "soft"),
         batch_size: int = 512,
-        direction_routing_for_oracle: bool = False,
     ) -> dict:
         """각 라우팅 모드로 분류→회귀 평가.
 
@@ -307,10 +233,7 @@ class SCREvaluator:
         out: dict = {}
         for mode in modes:
             rmode = self._MODE_ROUTING[mode]
-            dr = direction_routing_for_oracle and (rmode == "none")
-            pred = self.predict_dataset(
-                ds, batch_size, routing_mode=rmode, direction_routing=dr
-            )
+            pred = self.predict_dataset(ds, batch_size, routing_mode=rmode)
             entry = {
                 "capacity":  self._capacity_metrics(pred),
                 "breakdown": self._compute_breakdown(pred),
@@ -517,231 +440,6 @@ class SCREvaluator:
             "max_cost":         max_cost,
             "cost_reduction_pct": float((1 - avg_cost / max_cost) * 100),
         }
-
-    # ------------------------------------------------------------------
-    # UQ predict + plot
-    # ------------------------------------------------------------------
-
-    @torch.no_grad()
-    def predict_dataset_uq(self, ds, uq, batch_size: int = 512) -> dict:
-        """
-        LaplaceUQ를 사용해 (mean, std) 예측을 수행한다.
-
-        Returns:
-            predict_dataset()과 동일한 dict에 'cap_std_raw' 키 추가.
-        """
-        from torch.utils.data import DataLoader
-
-        pred = self.predict_dataset(ds, batch_size)
-
-        loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
-                            collate_fn=_collate)
-        all_stds = []
-        for batch in loader:
-            _, std = uq.predict(batch)   # (B,)
-            all_stds.append(std.numpy())
-        pred["cap_std_raw"] = np.concatenate(all_stds)
-        return pred
-
-    def save_uq_metrics(self, pred_dict: dict, metrics_dir: Path) -> None:
-        """UQ 캘리브레이션 지표를 metrics/uq_metrics.json 에 저장한다."""
-        from utils.uncertainty import calibration_metrics
-
-        stds = pred_dict.get("cap_std_raw")
-        if stds is None:
-            return
-        m = calibration_metrics(
-            means=pred_dict["cap_pred_raw"],
-            stds=stds,
-            targets=pred_dict["cap_true_raw"],
-        )
-        metrics_dir.mkdir(parents=True, exist_ok=True)
-        path = metrics_dir / "uq_metrics.json"
-        import json as _json
-        with open(path, "w", encoding="utf-8") as f:
-            _json.dump(m, f, indent=2)
-        print(f"[eval] saved {path}")
-        print(f"[eval] UQ - picp_90={m['picp_90']:.3f}  mpiw_90={m['mpiw_90']:.5f}"
-              f"  nll={m['nll']:.4f}  mean_std={m['mean_std']:.5f}")
-
-    def plot_uq(self, pred_dict: dict, figures_dir: Path) -> None:
-        """캘리브레이션 곡선 + σ 분포 히스토그램을 figures/calibration.png 에 저장한다."""
-        from utils.uncertainty import plot_calibration
-
-        stds = pred_dict.get("cap_std_raw")
-        if stds is None:
-            return
-        plot_calibration(
-            means=pred_dict["cap_pred_raw"],
-            stds=stds,
-            targets=pred_dict["cap_true_raw"],
-            path=figures_dir / "calibration.png",
-        )
-
-    # ------------------------------------------------------------------
-    # Save predictions CSV
-    # ------------------------------------------------------------------
-    def save_predictions(
-        self, pred_dict: dict, predictions_dir: Path, tag: str = "test"
-    ) -> None:
-        predictions_dir.mkdir(parents=True, exist_ok=True)
-        path = predictions_dir / f"{tag}_predictions.csv"
-
-        probe_active_n = (pred_dict["probe_z"] > 0).sum(axis=1)
-        scen_active_n  = (pred_dict["scen_z"]  > 0).sum(axis=1)
-        cap_init_ah    = pred_dict["cap_init_raw"]   # Ah per sample
-
-        soh_true = pred_dict["cap_true_raw"]
-        soh_pred = pred_dict["cap_pred_raw"]
-        cap_true_ah = soh_true * cap_init_ah
-        cap_pred_ah = soh_pred * cap_init_ah
-
-        has_uq = "cap_std_raw" in pred_dict
-        std_col = pred_dict["cap_std_raw"].tolist() if has_uq else None
-
-        rows = zip(
-            pred_dict["cell_ids"],
-            pred_dict["cycles"],
-            pred_dict["seg_names"],
-            soh_true.tolist(),
-            soh_pred.tolist(),
-            cap_true_ah.tolist(),
-            cap_pred_ah.tolist(),
-            cap_init_ah.tolist(),
-            pred_dict["level_true"].tolist(),
-            pred_dict["level_pred"].tolist(),
-            probe_active_n.tolist(),
-            scen_active_n.tolist(),
-            std_col if has_uq else [None] * len(soh_true),
-        )
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            header = [
-                "cell_id", "cycle", "seg_name",
-                "soh_true", "soh_pred", "soh_error",
-                "cap_true_Ah", "cap_pred_Ah", "cap_init_Ah",
-                "level_true", "level_pred",
-                "probe_active_n", "scen_active_n",
-            ]
-            if has_uq:
-                header.append("soh_std")
-            w.writerow(header)
-            for cell, cyc, seg, st, sp, ct, cp, ci, lt, lp, pa, sa, sg in rows:
-                row = [
-                    cell, cyc, seg,
-                    f"{st:.6f}", f"{sp:.6f}", f"{sp - st:.6f}",
-                    f"{ct:.6f}", f"{cp:.6f}", f"{ci:.6f}",
-                    lt, lp, pa, sa,
-                ]
-                if has_uq:
-                    row.append(f"{sg:.6f}")
-                w.writerow(row)
-        print(f"[eval] saved {path}")
-
-    # ------------------------------------------------------------------
-    # Routing heatmap + table
-    # ------------------------------------------------------------------
-    def plot_routing_heatmap(
-        self,
-        routing_dir: Path,
-        probe_sel: list[int] | None = None,
-        scen_sel: dict[int, list[int]] | None = None,
-    ) -> None:
-        routing_dir.mkdir(parents=True, exist_ok=True)
-
-        # Use JSON-provided selections if available; fall back to model gate values
-        if probe_sel is None:
-            probe_sel = self.model.get_selected_probe_his()
-        if scen_sel is None:
-            scen_sel = self.model.get_selected_scen_his()
-
-        n_scen = self._n_scenarios
-        act_matrix = np.zeros((n_scen, N_HI), dtype=np.float32)
-        for s in range(n_scen):
-            for i in scen_sel.get(s, []):
-                act_matrix[s, i] = 1.0
-
-        probe_row = np.zeros(N_HI, dtype=np.float32)
-        for i in probe_sel:
-            probe_row[i] = 1.0
-
-        full_matrix = np.vstack([probe_row[np.newaxis, :], act_matrix])
-        row_labels  = ["probe"] + self._seg_names
-
-        # HI short names (strip seg suffix, keep category+key)
-        hi_cols = get_hi_cols_for_seg("dis_hi")  # reference seg
-        hi_short = [c.rsplit("_dis_hi", 1)[0] for c in hi_cols]
-
-        # --- PNG ---
-        if _HAS_MPL:
-            fig, ax = plt.subplots(figsize=(max(14, N_HI * 0.18), 4))
-            im = ax.imshow(full_matrix, aspect="auto", cmap="Blues", vmin=0, vmax=1)
-            ax.set_yticks(range(len(row_labels)))
-            ax.set_yticklabels(row_labels, fontsize=9)
-            ax.set_xticks(range(N_HI))
-            ax.set_xticklabels(hi_short, rotation=90, fontsize=5.5)
-            ax.set_title("SCR Routing: probe + scenario × HI activation")
-            fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
-            fig.tight_layout()
-            path_png = routing_dir / "routing_heatmap.png"
-            fig.savefig(path_png, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            print(f"[eval] saved {path_png}")
-
-        # --- CSV ---
-        path_csv = routing_dir / "routing_table.csv"
-        with open(path_csv, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["gate"] + hi_short)
-            for row_name, row in zip(row_labels, full_matrix):
-                w.writerow([row_name] + [int(v) for v in row])
-        print(f"[eval] saved {path_csv}")
-
-    # ------------------------------------------------------------------
-    # HI 카테고리 랭킹 히트맵 — 시나리오별 상위 HI가 어느 카테고리(A=stat/B=diff/
-    # C=lfp/D=morph)에 속하는지 랭크 순으로 시각화 (docs/260811_RESULTS.md 참고)
-    # ------------------------------------------------------------------
-    _CAT_PREFIX = {"stat": "A", "diff": "B", "lfp": "C", "morph": "D"}
-    _CAT_COLOR  = ["#d62728", "#1f77b4", "#2ca02c", "#7f7f7f", "#ffffff"]  # A/B/C/D/(빈칸)
-    _CAT_LABELS = ["A: stat(통계)", "B: diff(미분)", "C: lfp(LFP특징)", "D: morph(형태)"]
-
-    def plot_hi_category_heatmap(
-        self,
-        routing_dir: Path,
-        scen_ranked_names: dict[int, list[str]],   # {scen_idx: [rank순 HI이름, ...]}
-        top_k: int | None = None,
-    ) -> None:
-        """행=HI 랭크 순위, 열=시나리오, 셀 색=HI 카테고리(A/B/C/D)."""
-        if not _HAS_MPL:
-            return
-        n_scen   = self._n_scenarios
-        max_rank = top_k or max((len(v) for v in scen_ranked_names.values()), default=0)
-        if max_rank == 0:
-            return
-        cat_idx = {"A": 0, "B": 1, "C": 2, "D": 3}
-        mat = np.full((max_rank, n_scen), 4, dtype=int)   # 4 = 빈칸(랭크 부족/미분류)
-        for s in range(n_scen):
-            for rank, name in enumerate(scen_ranked_names.get(s, [])[:max_rank]):
-                prefix = name.split("_", 1)[0]
-                mat[rank, s] = cat_idx.get(self._CAT_PREFIX.get(prefix, ""), 4)
-
-        from matplotlib.colors import ListedColormap
-        from matplotlib.patches import Patch
-
-        cmap = ListedColormap(self._CAT_COLOR)
-        fig, ax = plt.subplots(figsize=(max(4, n_scen * 1.3), max(6, max_rank * 0.16)))
-        ax.imshow(mat, aspect="auto", cmap=cmap, vmin=0, vmax=4)
-        ax.set_xticks(range(n_scen))
-        ax.set_xticklabels(self._seg_names, rotation=45, ha="right", fontsize=9)
-        ax.set_ylabel("HI 랭크 (0=최상위)")
-        ax.set_title("시나리오별 HI 랭킹 — 카테고리 구성")
-        handles = [Patch(color=self._CAT_COLOR[i], label=l) for i, l in enumerate(self._CAT_LABELS)]
-        ax.legend(handles=handles, bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
-        fig.tight_layout()
-        path = routing_dir / "hi_category_heatmap.png"
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"[eval] saved {path}")
 
     # ------------------------------------------------------------------
     # Confusion matrix

@@ -53,7 +53,6 @@ docs/260820_RESULTS.md 참고).
 사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir은 표준 조합이면 생략 가능 —
 기본값 자동 적용, 다른 조합이면 넷 다 같이 오버라이드):
   python 7_kernel/kernel.py \
-      --model-config model_lib/config/main_qfref_S_p60.yaml \
       --synergy-groups-json legacy_results/experiments/phase1_lab/results/outputs/synergy_groups_k25_full_N2_groups_noleak.json \
       --split-seed 42 --tag k25_full_N2_kernel
 """
@@ -107,14 +106,13 @@ def _parse_args() -> argparse.Namespace:
         description="시너지 그룹(크기 2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, "
                      "추가로 넣음) + 2차 다중공선성 배제 + 정규화 통계 저장"
     )
-    p.add_argument("--model-config", required=True)
     p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
     p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로")
     p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로")
-    p.add_argument("--datasets", nargs="+", default=["MIT", "HUST"])
+    p.add_argument("--datasets", nargs="+", default=P.FIXED_CANONICAL_DATASETS)
     p.add_argument("--split-seed", type=int,
-                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else 42)
+                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED)
     p.add_argument("--synergy-groups-json", required=True,
                     help="synergy.py 산출물 경로 — 이 그룹들을 융합 대상으로 씀")
     p.add_argument("--alpha", type=float, default=P.FIXED_KERNEL_ALPHA,
@@ -127,10 +125,10 @@ def _parse_args() -> argparse.Namespace:
                          f"(parameters.py 기본 {P.FIXED_KERNEL_N_COMPONENTS}, 그룹 표본 수보다 "
                          "크면 자동으로 표본 수까지 줄어듦)")
     p.add_argument("--redundancy-threshold", type=float,
-                    default=P.FIXED_KERNEL_REDUNDANCY_THRESHOLD,
+                    default=P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD,
                     help=f"2차 다중공선성 배제 기준(커널 HI끼리, parameters.py 기본 "
-                         f"{P.FIXED_KERNEL_REDUNDANCY_THRESHOLD}) — synergy.py와 "
-                         "동일 임계값 재사용")
+                         f"{P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD}) — synergy.py 1차 배제와 "
+                         "동일 상수 재사용(2026-09-25 통합)")
     p.add_argument("--max-features", type=int, default=P.FIXED_KERNEL_MAX_FEATURES,
                     help="최종 커널 HI 개수 상한(parameters.py 기본 None=무제한, 다중공선성 배제 "
                          "통과한 건 전부 유지). 주면 시나리오별 쿼터 라운드로빈으로 그 개수까지만 "
@@ -159,13 +157,12 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _load_train_split(args) -> tuple:
-    from utils.io_utils import load_config
+    import copy
     from datasets.segment_dataset import build_datasets
     from common.scenario import get_segmenter
     from utils.hi_schema import get_hi_cols_for_seg
 
-    cfg = load_config(args.model_config)
-    cfg.setdefault("data", {})
+    cfg = copy.deepcopy(P.P1_MODEL_CONFIG)
     cfg["data"]["data_dir"] = args.data_dir
     cfg["data"]["seg_data_dir"] = args.seg_data_dir
     cfg["data"]["datasets"] = args.datasets

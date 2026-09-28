@@ -11,15 +11,15 @@ analysis imports ``_seg_stat/_seg_diff/_seg_lfp`` adapters from here — single 
 
 Groups: stat (20) + diff (20) + lfp (20) + morph (6) = 66.
 Morph = DTW/Fréchet of the window's V-t/V-Q/V-E shape vs the cell's fresh-state (BOL)
-curve; needs ``compute_his(..., bol=...)`` (factory data, not a leak). Without it the 6
-morph HIs are NaN (masked).
+curve (factory data, not a leak). hi_correlation.py computes these itself with its own
+batched `_dtw_batch()` (not via this module — see `_curve_buf` in `_extract_one_cell`),
+since the real extraction scale needs the vectorized version, not a per-sample one.
 
 HI names match the existing hi_schema.py keys (stat_v_mean_cw, diff_v_trend_slope, …)
 for backward compatibility with saved PKL files and model checkpoints.
 """
 
 from __future__ import annotations
-import time
 from functools import cached_property
 import numpy as np
 from scipy.signal import find_peaks, savgol_filter
@@ -739,40 +739,6 @@ def lfp_v_ent_plateau(w):
 _MORPH_NAMES = [f"morph_{k}" for k in MORPH_KEYS]
 
 
-def morph_curves(v, i, t) -> dict:
-    """A window's (V-t, V-Q, V-E) shape curves on a [0,1] grid — for BOL reference."""
-    w = v if isinstance(v, W) else W(v, i, t)
-    vt, vq, ve = _seg_morph_curves(w.v, w.ai, w.dt)
-    return {"vt": vt, "vq": vq, "ve": ve}
-
-
-def _morph_dict(w, bol) -> dict:
-    out = {n: np.nan for n in _MORPH_NAMES}
-    if bol is None:
-        return out
-    cur = morph_curves(w, None, None)
-    for ct in ("vt", "vq", "ve"):
-        a = cur.get(ct); b = bol.get(ct)
-        if a is not None and b is not None and len(a) == len(b):
-            try:
-                out[f"morph_{ct}_dtw"]  = float(_dtw_distance(a, b))
-                out[f"morph_{ct}_frec"] = float(_frechet_distance(a, b))
-            except Exception:
-                pass
-    return out
-
-
-def morph_reference(samples) -> dict:
-    """Build a BOL reference curve set ({vt,vq,ve}) by averaging fresh-window shape curves."""
-    acc = {"vt": [], "vq": [], "ve": []}
-    for v, i, t in samples:
-        cur = morph_curves(v, i, t)
-        for ct in acc:
-            if cur[ct] is not None:
-                acc[ct].append(cur[ct])
-    return {ct: (np.mean(arrs, axis=0) if arrs else None) for ct, arrs in acc.items()}
-
-
 # ═══════════════════════════ 세그먼트 어댑터 (hi_correlation 소비자용) ═══════════════════════════
 # 개별 @hi 함수를 세그먼트 배열에 적용해 "{hi_name}_{seg}" 키 dict로 반환.
 # hi_correlation.py의 _seg_stat/_seg_diff/_seg_lfp 와 동일한 인터페이스.
@@ -801,48 +767,9 @@ def _seg_lfp(vs, ims, dts, qcs, seg):
 
 # ═══════════════════════════ 엔트리포인트 ═══════════════════════════
 
-def compute_his(v, i, t, bol=None) -> dict:
-    """All HIs (stat+diff+lfp via @hi, + morph) from raw window samples.
-    ``bol`` = the cell's fresh-state shape curves ({vt,vq,ve}); None → morph = NaN."""
-    w = W(v, i, t)
-    d = {}
-    for name, fn in _HI.items():
-        try:
-            d[name] = float(fn(w))
-        except Exception:
-            d[name] = np.nan
-    d.update(_morph_dict(w, bol))
-    return d
-
-
 def hi_names(*_) -> list:
     """등록된 HI 이름 목록 (stat+diff+lfp + morph 고정 6개)."""
     return list(_HI) + _MORPH_NAMES
-
-
-def benchmark_cost(samples, reps: int = 20) -> tuple:
-    """Measured per-HI compute time (μs) — marginal cost given shared curves exist.
-    Curves are pre-warmed OUTSIDE timing; morph timed as a group over its 6."""
-    names = hi_names()
-    ws = []
-    for v, i, t in samples:
-        w = W(v, i, t); _ = (w.vq, w.ica, w.q_rel, w.t_norm); ws.append(w)
-    cost = {}
-    for name, fn in _HI.items():
-        t0 = time.perf_counter()
-        for _ in range(reps):
-            for w in ws:
-                fn(w)
-        cost[name] = (time.perf_counter() - t0) / (reps * len(ws)) * 1e6
-    ref = morph_reference(samples)
-    t0  = time.perf_counter()
-    for _ in range(reps):
-        for w in ws:
-            _morph_dict(w, ref)
-    per = (time.perf_counter() - t0) / (reps * len(ws)) / max(1, len(_MORPH_NAMES)) * 1e6
-    for n in _MORPH_NAMES:
-        cost[n] = per
-    return names, np.array([cost[n] for n in names])
 
 
 if __name__ == "__main__":

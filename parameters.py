@@ -37,13 +37,26 @@ ACTIVE_DATASET = "all"                  # Step 1~2(convert_unified.py/preprocess
 FIXED_DATASET_GROUP = "lfp"             # 구 hi_correlation.py --dataset-group 하드코딩
                                          # 기본값(lfp|ncm|all) — run_pipeline.py는 이 플래그를
                                          # 아직 CLI로 노출하지 않음(2026-09-24 단일화).
+FIXED_CANONICAL_DATASETS = ["MIT", "HUST"]  # 구 interaction.py/synergy.py/kernel.py
+                                         # --datasets 하드코딩(2026-09-25 통합) +
+                                         # P1_MODEL_CONFIG["data"]["datasets"] 단일 소스.
+                                         # FIXED_DATASET_GROUP="lfp"가 뜻하는 것과 같은
+                                         # 조합(MIT+HUST)이지만 값 형식(그룹 이름 문자열 vs
+                                         # 실제 데이터셋 리스트)이 달라 Step 4는 통합 대상이
+                                         # 아님 — Step 5~9(정식 q_frac_ref 축)에서만 쓰는
+                                         # "실제 로드할 데이터셋 리스트".
 
 # ── 커널/다중공선성 파이프라인 설정(Step 6~8 산출물, Step 9가 소비) ───────
 ACTIVE_KERNEL_FEATURES_PKL = None       # 구 --kernel-features-pkl (None=자동 경로/fallback)
 ACTIVE_INTERACTION_JSON = None          # 구 --interaction-json (None=자동 경로/fallback)
 ACTIVE_COMBINED_REDUNDANCY_JSON = None  # 구 --combined-redundancy-json (None=자동 경로)
 ACTIVE_MAX_GROUP_SIZE = 4               # 구 --max-group-size (시너지 그룹 크기 상한)
-ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD = 0.9  # 구 --synergy-redundancy-threshold (1차 배제)
+ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD = 0.9  # 구 --synergy-redundancy-threshold — synergy.py
+                                         # 1차 배제(그룹 내부)와 kernel.py 2차 배제(커널HI끼리,
+                                         # 구 FIXED_KERNEL_REDUNDANCY_THRESHOLD)가 "동일 임계값
+                                         # 재사용"이라고 서로의 독스트링에 명시하고 있었고 실제
+                                         # RESULTS_LOG.md 36회 호출 전부 0.9로 일치해 2026-09-25
+                                         # 하나로 통합 — kernel.py도 이제 이 상수를 그대로 쓴다.
 
 # ── 학습(Step 9) ─────────────────────────────────────────────────────────
 ACTIVE_MAX_EPOCHS = None                # 구 --max-epochs (None=yaml training.epochs)
@@ -87,10 +100,10 @@ ACTIVE_SEG_DATA_DIR = None              # 구 --seg-data-dir (위와 동일 이�
 # 하위 스크립트(Step 4~9)에 전달하는 것 외에 축 파라미터를 다루지 않는다. 값을
 # 바꾸려면 이 딕셔너리를 직접 수정하거나, run_pipeline.py --axis-config로 통째로
 # 오버라이드할 것(부분 오버라이드 없음 — 그것도 "경우의 수"이므로).
-ACTIVE_AXIS_CONFIG: dict = {            # model_lib/config/main_qfref_S.yaml: scenario.axis_config
-    "n1": 0.35,                         # 와 100% 동일(단일 소스) — 이 값이 곧 train.py의
-    "n2": 0.20,                         # 하드코딩 fallback data_dir(n1-35%_n2-20%_N-2_minpts5_lag-1_
-    "n_samples": 2,                     # noise-3%_ou-200_calib-100_offA-5mA)을 만든 실제 축 설정이다.
+ACTIVE_AXIS_CONFIG: dict = {            # 이 값이 곧 train.py의 하드코딩 fallback
+    "n1": 0.35,                         # data_dir(n1-35%_n2-20%_N-2_minpts5_lag-1_
+    "n2": 0.20,                         # noise-3%_ou-200_calib-100_offA-5mA)을 만든
+    "n_samples": 2,                     # 실제 축 설정이다.
     "ref_lag": 1,                       # ⚠️ "scen_lag1zone"류 실험 변형(tile_scope=zone, min_pts/
     "noise_amp": 0.03,                  # calibration/offset 없음)과 혼동 금지 — 그건 별도 실험이고
     "noise_mode": "ou",                 # 이게 정식(canonical) 설정이다(2026-09-23 정정).
@@ -101,17 +114,22 @@ ACTIVE_AXIS_CONFIG: dict = {            # model_lib/config/main_qfref_S.yaml: sc
 }
 
 # ── 모델/재현성 ──────────────────────────────────────────────────────────
-ACTIVE_REGRESSION_MODEL = None          # 구 --regression-model (None=train.py 기본 mlp)
-ACTIVE_SEED = None                      # 구 --seed (None→내부적으로 42로 해석)
-ACTIVE_SPLIT_SEED = None                # 구 --split-seed (None→내부적으로 42로 해석)
+FIXED_DEFAULT_SEED = 42                 # 2026-09-25 통합 — ACTIVE_SEED/ACTIVE_SPLIT_SEED가
+                                         # None일 때의 폴백 값과 FIXED_SHUFFLE_SEED(아래)가
+                                         # 전부 여기저기 흩어진 리터럴 42였던 걸 하나로 모음.
+                                         # ⚠️ 이 세 시드는 서로 다른 무작위성을 제어한다(모델
+                                         # 초기화 RNG / 셀 분할 / v-ctrl 대조군 재배정) —
+                                         # 값이 같은 건 관례일 뿐, 멀티시드 실험에서는 여전히
+                                         # --seed/--split-seed/--shuffle-seed를 각자 다른
+                                         # 값으로 독립적으로 줄 수 있다(이 상수는 "아무것도 "
+                                         # "안 줬을 때"의 공통 기본값일 뿐).
+ACTIVE_SEED = None                      # 구 --seed (None→FIXED_DEFAULT_SEED로 해석)
+ACTIVE_SPLIT_SEED = None                # 구 --split-seed (None→FIXED_DEFAULT_SEED로 해석)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 거의 안 바꾸는 파라미터 — CLI 노출 없음, 이 값 그대로 하위 스크립트에 전달됨
 # ═══════════════════════════════════════════════════════════════════════════
-
-# ── 공통 모델 설정 파일 ──────────────────────────────────────────────────
-FIXED_PHASE1_MODEL_CONFIG = "model_lib/config/main_qfref_S.yaml"   # 구 --phase1-model-config
 
 # ── 세그멘테이션 축 종류(q_frac_ref 고정 — 이번 세션 전부 이 축만 사용) ────
 FIXED_SEG_AXIS = "q_frac_ref"           # 구 --seg-axis. vwindow 등 다른 축을 쓰려면
@@ -119,10 +137,10 @@ FIXED_SEG_AXIS = "q_frac_ref"           # 구 --seg-axis. vwindow 등 다른 축
                                          # 종류 자체를 못 바꿈).
 
 # ── ACTIVE_AXIS_CONFIG로 Step4가 실제 추출한 데이터의 저장 경로 ────────────
-# train.py 등이 --data-dir/--seg-data-dir도 없고 --model-config yaml에도
-# 없을 때 쓰는 최종 폴백(2026-09-23 — 예전엔 이 값이 train.py 안에 별도로
-# 하드코딩돼 있다가 ACTIVE_AXIS_CONFIG와 조용히 어긋난 적이 있었다). ACTIVE_AXIS_CONFIG를
-# 바꾸면 Step4가 만드는 실제 경로도 바뀌므로 이 상수도 반드시 같이 갱신할 것.
+# train.py 등이 --data-dir/--seg-data-dir이 없을 때 쓰는 최종 폴백(2026-09-23 —
+# 예전엔 이 값이 train.py 안에 별도로 하드코딩돼 있다가 ACTIVE_AXIS_CONFIG와 조용히
+# 어긋난 적이 있었다). ACTIVE_AXIS_CONFIG를 바꾸면 Step4가 만드는 실제 경로도
+# 바뀌므로 이 상수도 반드시 같이 갱신할 것.
 FIXED_CANONICAL_DATA_DIR = (
     "D:/chanminLee/LFP_SOH_prediction_v2/_4_data_hi/q_frac_ref/"
     "n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA/cycle"
@@ -145,9 +163,10 @@ FIXED_GLOBAL_DEDUP = False              # 구 --global-dedup — ⚠️ docs 상
                                          # noscen/scen/HI63/64/66 run은 전부 이 플래그를
                                          # 안 줘서 False로 실행됐다 — 실측 동작을 그대로
                                          # 기본값으로 고정(2026-09-21).
-FIXED_SHUFFLE_SEED = 42                 # 구 --shuffle-seed (v-ctrl 무작위 대조군 전용 —
+FIXED_SHUFFLE_SEED = FIXED_DEFAULT_SEED # 구 --shuffle-seed (v-ctrl 무작위 대조군 전용 —
                                          # synergy.py/interaction.py 공용,
-                                         # 2026-09-24 하드코딩 기본값에서 이전)
+                                         # 2026-09-24 하드코딩 기본값에서 이전, 2026-09-25
+                                         # FIXED_DEFAULT_SEED 참조로 통합)
 FIXED_SYNERGY_TAG = None                # 구 --synergy-tag (None=--p1-tag에서 자동 파생)
 
 # ── Step 8(커널 HI 피처 생성) ────────────────────────────────────────────
@@ -155,7 +174,8 @@ FIXED_KERNEL_SYNERGY_GROUPS_JSON = None # 구 --kernel-synergy-groups-json (None
 FIXED_KERNEL_ALPHA = 1.0                # 구 --kernel-alpha (Ridge 정규화 강도)
 FIXED_KERNEL_GAMMA = None               # 구 --kernel-gamma (None=sklearn 기본 1/n_features)
 FIXED_KERNEL_N_COMPONENTS = 100         # 구 --kernel-n-components (Nystroem 랜드마크 수)
-FIXED_KERNEL_REDUNDANCY_THRESHOLD = 0.9 # 구 --kernel-redundancy-threshold (2차 배제, 커널끼리 pooled)
+# 구 --kernel-redundancy-threshold(2차 배제, 커널끼리 pooled)는 2026-09-25부터
+# ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD(위)를 그대로 재사용 — 별도 상수 없음.
 FIXED_KERNEL_MAX_FEATURES = None        # 구 --kernel-max-features (None=무제한)
 FIXED_MIN_RAW_PARTIAL_CORR = None       # 구 --min-raw-partial-corr (None=비활성)
 FIXED_COMBINED_REDUNDANCY_THRESHOLD = 0.95  # 구 --combined-redundancy-threshold (3차 배제, 시나리오별)
@@ -175,28 +195,25 @@ FIXED_SKIP_SHAPE = False                # 구 --skip-shape (형상 이상치 필
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Step 9(train.py) 모델/학습 설정 — yaml 흡수
+# Step 5~9(interaction.py/synergy.py/kernel.py/train.py) 공통 모델/학습 설정
 # ═══════════════════════════════════════════════════════════════════════════
-# model_lib/config/fixed.yaml + main_qfref_S.yaml을 유틸리티(utils/io_utils.py:
-# load_config, _deep_merge)로 실제로 병합한 결과를 그대로 옮긴 것(2026-09-23,
-# 실 환경에서 load_config() 호출 출력을 그대로 사용 — 손으로 옮기며 생길 수 있는
-# 오탈자 방지). train.py는 --model-config를 안 주면 이 딕셔너리를
-# deepcopy해서 cfg로 쓴다. all4/hust_only/noscen/p60/transformerL 등 다른 프리셋을
-# 재현하려면 지금처럼 --model-config model_lib/config/<preset>.yaml을 명시하면 된다
-# (기존 yaml 로딩 경로 그대로 유지 — 이스케이프 해치).
+# 유일한 소스 — 2026-09-27부로 yaml 프리셋(model_lib/config/*.yaml, --model-config
+# 플래그)을 전부 폐기하고 이 딕셔너리 하나로 통일했다. main_qfref_S_all4/hust_only/
+# noscen/p60/transformerL 등 과거 프리셋들은 이번 세션의 폴더 재편·train.py 개명
+# 이전 코드를 전제로 한 채 한 번도 재검증되지 않았고, 그중 하나(--regression-model)는
+# 이미 run_pipeline.py -> train.py 전달 경로가 끊겨 있었다(train.py가 그 플래그
+# 자체를 안 받은 지 오래) — 재현이 필요해지면 그때 다시 설계할 것
+# (docs/REFATORING.md 2026-09-27 항목 참고).
 #
-# scenario.axis/axis_config는 별도로 안 쓰고 FIXED_SEG_AXIS/ACTIVE_AXIS_CONFIG를
+# scenario.axis/axis_config는 별도로 안 두고 FIXED_SEG_AXIS/ACTIVE_AXIS_CONFIG를
 # 그대로 참조한다 — 축 설정이 여기 또 복사되면 두 값이 다시 어긋날 수 있기 때문
-# (이번 정리를 시작하게 만든 바로 그 문제). data.data_dir/seg_data_dir도 마찬가지로
+# (예전에 실제로 있었던 문제). data.data_dir/seg_data_dir도 마찬가지로
 # FIXED_CANONICAL_DATA_DIR/SEG_DATA_DIR을 참조한다.
 P1_MODEL_CONFIG: dict = {
     "data": {
-        "is_real_input": False,
         "data_dir": FIXED_CANONICAL_DATA_DIR,
         "seg_data_dir": FIXED_CANONICAL_SEG_DATA_DIR,
-        "output_dir": "_5_data_model_scr",
         "is_cross_dataset_evaluate": False,
-        "split_seed": 42,
         "train_ratio": 0.6,
         "val_ratio": 0.2,
         "test_ratio": 0.2,
@@ -204,8 +221,7 @@ P1_MODEL_CONFIG: dict = {
         "io_workers": 16,
         "use_initial_capacity": True,
         "nominal_capacities": {"MIT": 1.1, "HUST": 1.2},
-        "gates_from": None,
-        "datasets": ["MIT", "HUST"],
+        "datasets": FIXED_CANONICAL_DATASETS.copy(),
     },
     "classifier": {
         # 2026-09-25: type/is_auto_mk_selection/probe_m_count 삭제 — 전부 구 시나리오
@@ -226,10 +242,11 @@ P1_MODEL_CONFIG: dict = {
         "resnet_d_hidden_factor": 2.0,
         "regression_model": "mlp",
         "mlp_hidden_dims": [128, 64],
-        "with_raw_flat": False,
         # 2026-09-25: with_raw_cnn/raw_cnn_pretrained_from 삭제 — 의존하는
         # models/raw_cnn.py 자체가 repo에 없었고(있었어도 train.py/test.py가 v4에서
         # 항상 강제 False), scr_model.py의 RawCNN 로딩 분기도 같이 제거했다.
+        # 2026-09-27: with_raw_flat도 완전히 죽어있어(train.py/test.py가 항상 강제
+        # False) scr_model.py/cap_heads.py의 스캐폴딩과 함께 이 키도 삭제.
     },
     "loss": {
         "lambda_scen": 0.01,
@@ -238,32 +255,31 @@ P1_MODEL_CONFIG: dict = {
         "lambda_l0_schedule": "delayed_warmup",
         "lambda_l0_warmup_epochs": 50,
         "lambda_l0_ramp_epochs": 100,
-        "leak_cols": ["stat_q_abs", "stat_energy_seg"],
+        # 2026-09-27: leak_cols 삭제 — train.py/scr_loss.py 어디서도 안 읽는다. 실제
+        # leakage 제외는 SOH_EXCLUDE_STAT_LEAK 환경변수(ACTIVE_N_HI 토글, hi_schema.py)
+        # 하나로만 이뤄진다 — 이 키는 그 이전 방식의 흔적이었다.
     },
     "training": {
+        # 2026-09-25: scheduler/log_interval/run_overfit_test/overfit_test_samples/
+        # overfit_test_epochs/early_stop_patience 삭제 — 전부 구 SCRTrainer.fit()
+        # (model_lib/training/scr_trainer.py, 삭제됨) 전용 키였고 train.py 자체
+        # 학습 루프는 어디서도 읽지 않았다(scheduler는 실제로 항상
+        # CosineAnnealingLR 하나만 씀 — 값 분기 자체가 없었음).
         "epochs": 500,
         "batch_size": 2048,
-        "scheduler": "cosine",
         "warmup_epochs": 10,
         "grad_clip": 1.0,
-        "log_interval": 10,
-        "run_overfit_test": False,
-        "overfit_test_samples": 1024,
-        "overfit_test_epochs": 300,
         "lr": 2.0e-4,
         "weight_decay": 1.0e-3,
-        "early_stop_patience": 100,
     },
     "evaluation": {
         "metrics": ["rmse", "mae", "r2", "mape"],
         "rep_cells_per_dataset": 5,
     },
-    "uq": {
-        "enabled": True,
-        "prior_precision": 1.0,
-        "optimize_prior": True,
-        "noise_std": None,
-    },
+    # 2026-09-25: "uq" 섹션(Laplace UQ) 삭제 — train.py가 UQ를 fit한 적이 없고
+    # (유일한 경로였던 SCRTrainer.fit_laplace()가 삭제됨) test.py도 UQ 예측/
+    # 캘리브레이션을 소비하지 않는다(model_lib/utils/uncertainty.py 전체 삭제,
+    # scr_evaluator.py의 predict_dataset_uq/save_uq_metrics/plot_uq도 같이 삭제).
     "scenario": {
         "axis": FIXED_SEG_AXIS,
         "axis_config": ACTIVE_AXIS_CONFIG.copy(),

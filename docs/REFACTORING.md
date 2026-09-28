@@ -4,6 +4,44 @@
 새 작업을 마칠 때마다 "진행 이력"에 절을 추가한다. 과거 절은 그 시점 기준 사실이므로
 이후 작업이 내용을 뒤집어도 수정하지 않고, 새 절에 "N월N일 항목 정정" 식으로 남긴다.
 
+## 결론 요약 (TL;DR)
+
+아래 "진행 이력"(2026-09-22~09-27, 총 18개 라운드)을 한 문장씩으로 압축하면:
+
+1. **파라미터 단일화** — 9개 스크립트에 흩어져 있던 CLI 기본값·yaml 프리셋
+   (`model_lib/config/*.yaml`, `--model-config` 플래그)을 전부 폐기하고
+   `parameters.py` 하나로 모았다. 그 과정에서 발견한 의미 중복/완전히 죽은 값
+   (시드 3종, `--datasets`, redundancy threshold, `leak_cols`, `is_real_input` 등)도
+   전부 통합·삭제.
+2. **폴더 구조 = 파이프라인 스텝 번호** — `5_model/`이라는 단일 폴더에 모든 스텝이
+   뒤섞여 있던 구조를 `1_convert/`~`9_eval/` + 공유 라이브러리 `model_lib/`로
+   재배치해, 폴더 번호만 보면 실행 순서를 알 수 있게 만들었다.
+3. **죽은 코드 전량 제거** — v0~v3 옛 버전, 미채택 v5 실험, CNN 분류기/임베딩,
+   `SCRTrainer`/Laplace UQ 체인, 비-정식 시나리오 축 8종, "Bucket A" 죽은 코드
+   15항목 + yaml 설정 체계 전체까지 — "지금 정식 학습 레시피가 실제로 타는 경로"
+   기준으로 안 쓰는 코드를 전부 걷어냈다. 반대로 논문의 실제 ablation 실험
+   경로("Bucket B" — 대체 회귀 헤드, 축 파라미터 변형 등)는 의도적으로 보존.
+4. **모델 로직 설명 문서 신규 작성** — `docs/PIPELINE.md`(데이터 변환부터 SOH
+   출력까지 9단계 전체 설명) + 인포그래픽, 처음 보는 사람 기준으로 새로 작성.
+
+**코드 절감**(git 기준, 리팩토링 시작 직전 커밋 `b5ae262` 대비 현재 작업트리,
+`.py` 파일만 집계):
+
+| 지표 | 리팩토링 전 | 현재 | 변화 |
+|---|---|---|---|
+| Python 파일 수 | 110개 | 72개 | **-38개 (-35%)** |
+| Python 코드 총 줄 수 | 38,791줄 | 26,247줄 | **-12,544줄 (-32%)** |
+| 완전 삭제된 파일 | — | — | **46개** (그 외 다수 파일이 이름 바뀌며 내용도 축소) |
+
+**검증 신뢰도** — 학습 루프(`model_lib/models/scr_model.py`, `8_train/train.py`
+등)에 손댈 때마다 동일 조건(seed=0/split-seed=0) 전체 재학습을 돌려 체크포인트
+MD5를 비교했고, **지금까지 6회 전부 원본(`32c2cd84216510655ce3c9f15072ee70`)과
+바이트 단위로 완전히 일치**했다 — 리팩토링이 실제 학습 결과에 아무 영향도 주지
+않았음을 반복적으로 확인.
+
+**남은 일**: `1_convert/`~`3_integrity/`는 아직 이번 정리 대상에 포함되지 않음
+(아래 "진행 상황" 표 참고).
+
 ## 최종 목적
 
 논문과 함께 코드를 공개했을 때, 처음 보는 사람도 구조만 보고 바로 이해하고 실행해볼 수
@@ -631,3 +669,315 @@ CNN 잔재가 아직 남아있었음을 확인하고 정리:
   일치(불일치 0개), **체크포인트 MD5 완전 일치**(`32c2cd84216510655ce3c9f15072ee70`,
   9월 24일 검증본·원본 셋 다 동일). CNN 분류기/CNN 임베딩 삭제도 학습 결과에
   실제로 아무 영향이 없었음을 바이트 단위로 확인.
+
+### 2026-09-25 — `--datasets` 단일화 + `parameters.py` 의미 중복 파라미터 통합
+
+사용자가 "각 스텝이 자기만의 파라미터를 안 가지는 게 맞냐"고 물어서 전체 9개
+스텝의 argparse 기본값을 재점검한 결과 `--datasets nargs="+" default=["MIT",
+"HUST"]`가 `interaction.py`/`synergy.py`/`kernel.py` 세 곳에 하드코딩으로 남아있던
+걸 발견(그 자리에서 정리 예고) — 이어서 "parameters.py 안에서 의미가 같아 통합할
+수 있는 파라미터가 있는지" 감사 요청을 받아 같이 처리:
+
+- **`FIXED_CANONICAL_DATASETS = ["MIT", "HUST"]` 신설**: `interaction.py`/
+  `synergy.py`/`kernel.py`의 `--datasets` 기본값 + `P1_MODEL_CONFIG["data"]
+  ["datasets"]`(기존엔 별도로 `["MIT","HUST"]` 리터럴 반복) 4곳을 이 상수 하나로
+  통합. `P1_MODEL_CONFIG` 쪽은 값 변형 방지를 위해 `.copy()`로 참조(다른 축
+  설정 필드와 동일 관례). `FIXED_DATASET_GROUP="lfp"`(Step 4 전용, 값 형식이
+  "그룹 이름"이라 다름)는 의미상 겹치지만 통합 대상에서 제외 — 근거를 주석으로
+  남김.
+- **`ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`/`FIXED_KERNEL_REDUNDANCY_THRESHOLD`
+  통합**: 둘 다 값이 `0.9`였고, `kernel.py`/`synergy.py` 양쪽 독스트링에 이미
+  "동일 임계값 재사용"이라고 명시돼 있던 걸 발견 — `docs/phase1_lab/
+  RESULTS_LOG.md`의 실제 호출 36회 전부 `--redundancy-threshold 0.9`로 일치하는
+  것까지 확인 후 `FIXED_KERNEL_REDUNDANCY_THRESHOLD` 삭제, `kernel.py`가
+  `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`를 직접 참조하도록 변경.
+  `run_pipeline.py`의 Step 7(kernel.py) 주입부도 상수 직접 참조 대신
+  `args.synergy_redundancy_threshold`(Step 6 synergy.py와 동일 CLI 플래그로 이미
+  해석된 값)를 쓰도록 바꿔서, 이제 `--synergy-redundancy-threshold` CLI 플래그
+  하나가 두 스텝을 동시에 제어한다(전에는 우연히 같은 값일 뿐 서로 독립적으로
+  바꿀 수 있어 드리프트 위험이 있었음).
+- **통합하지 않기로 한 것들(검토 후 기각, 근거)**: `ACTIVE_SEED`/`ACTIVE_SPLIT_SEED`/
+  `FIXED_SHUFFLE_SEED`가 셋 다 기본값 42로 같지만, 서로 다른 무작위성(모델 초기화
+  RNG / 셀 분할 / v-ctrl 대조군 재배정)을 제어해 통합하면 "시드 3개를 독립적으로
+  바꾸는 멀티시드 실험"이 불가능해짐 — 값이 같은 건 관례일 뿐 의미가 다름.
+  `ACTIVE_MAX_EPOCHS`/`ACTIVE_PATIENCE`/`ACTIVE_BATCH_SIZE`(모두 `None`=오버라이드
+  없음) vs `P1_MODEL_CONFIG["training"]`의 `epochs`/`batch_size` 등은 "CLI
+  오버라이드값 vs 실제 기본값"의 의도된 계층 구조라 통합 대상 아님.
+- **부수 발견(이번엔 안 건드림)**: 같은 감사 중에 `model_lib/training/scr_trainer.py`의
+  `SCRTrainer` 클래스 자체가 이제 아무 데서도 인스턴스화되지 않는다는 걸 확인
+  (`train.py`는 그 파일의 `L0LambdaScheduler`만 import) — Stage0(`train_scr.py`)가
+  삭제되면서 유일한 호출자가 사라진 것. 그래서 `P1_MODEL_CONFIG["training"]`의
+  `early_stop_patience`/`log_interval`/`run_overfit_test`/`overfit_test_samples`/
+  `overfit_test_epochs`(전부 grep 0회, `SCRTrainer.__init__`에서만 읽힘)와
+  `"scheduler": "cosine"`(값은 기록되지만 `train.py`가 실제로는 분기 없이 항상
+  `CosineAnnealingLR`만 씀)도 죽은 값으로 보인다 — 이번 "파라미터 통합" 스코프는
+  아니라 정리 안 하고 기록만 남김(다음 라운드 후보).
+- **검증**: `py_compile`/실제 import 재현 + 세 스크립트 `--help` 실행으로 새 기본값이
+  반영된 것 확인. 순수 인자 배선 변경(어느 실제 실행에서도 값 자체는 안 바뀜 —
+  `--datasets`는 항상 `["MIT","HUST"]`였고 `--redundancy-threshold`도 항상 `0.9`였음)
+  이라 전체 재학습 재검증은 하지 않음.
+
+### 2026-09-25 — 시드 3종 통합 + `SCRTrainer`/Laplace UQ 체인 전체 삭제
+
+사용자가 "시드도 그냥 통합하자"(위 라운드에서 의미가 달라 기각했던 것)와 "SCR
+트레이너/SCR 테스트도 이제 안 쓰는데 다 제거"를 명시적으로 지시.
+
+**시드 통합**: `ACTIVE_SEED`/`ACTIVE_SPLIT_SEED`가 `None`일 때의 인라인 폴백 `42`와
+`FIXED_SHUFFLE_SEED = 42`가 6개 파일(`interaction.py`/`synergy.py`/`kernel.py`/
+`train.py`/`run_pipeline.py` 2곳)에 리터럴로 반복되던 걸 `FIXED_DEFAULT_SEED = 42`
+하나로 통합 — 세 시드가 서로 다른 무작위성(모델 초기화/셀 분할/v-ctrl 재배정)을
+제어한다는 사실 자체는 그대로 두고(각 CLI 플래그는 계속 독립적으로 오버라이드
+가능, 멀티시드 실험 영향 없음), "아무것도 안 줬을 때 쓰는 공통 기본값"만 한
+군데로 모음.
+
+**`SCRTrainer`/Laplace UQ 체인 삭제**: `SCRTrainer`(옛 `fit()`/`fit_laplace()`/
+`run_overfit_test()` 루프, `model_lib/training/scr_trainer.py`)의 유일한 호출자가
+이미 삭제된 `train_scr.py`(Stage0)였다는 걸 grep으로 재확인(`train.py`는 같은
+파일의 `L0LambdaScheduler`만 import) — 삭제 과정에서 딸려있던 죽은 사슬을 끝까지
+추적:
+- `SCRTrainer` 클래스 전체(`fit`/`fit_laplace`/`run_overfit_test`/`_train_epoch`/
+  `_val_epoch`/`_build_scheduler`/`_lr_warmup`/`_collect_small_batch` + 모듈
+  헬퍼 `_save_model`/`_load_model`/`_init_log_csv`/`_append_log_csv`) 삭제,
+  `L0LambdaScheduler`만 남김. `model_lib/training/__init__.py`의
+  `from training.scr_trainer import SCRTrainer`도 같이 고침(어차피 아무도
+  `training.SCRTrainer`로 접근 안 했지만 그대로 두면 이제 ImportError).
+- `fit_laplace()`의 유일한 소비자가 사라지면서 `model_lib/utils/uncertainty.py`
+  (`LaplaceUQ`/`calibration_metrics`/`plot_calibration`, 444줄) 전체가 고아가 된
+  것도 grep으로 확인(`train.py`/`test.py` 어디에도 `uq` 관련 코드 0줄) — 파일
+  통째로 삭제.
+- `model_lib/evaluation/scr_evaluator.py`의 `predict_dataset_uq`/
+  `save_uq_metrics`/`plot_uq` 3개 메서드도 같은 이유로 삭제(`test.py`가 호출한
+  적 없음 — `SCREvaluator` 나머지 부분은 `test.py`가 실제로 쓰는 살아있는
+  클래스라 그대로 유지).
+- `parameters.py: P1_MODEL_CONFIG`에서 `"uq"` 섹션 전체와 `"training"`의
+  `scheduler`/`log_interval`/`run_overfit_test`/`overfit_test_samples`/
+  `overfit_test_epochs`/`early_stop_patience`(전부 `SCRTrainer.__init__`
+  에서만 읽히던 값, `train.py` 자체 루프는 0회 참조 — `scheduler`는 특히
+  "cosine"이라고 적혀만 있을 뿐 분기 코드 자체가 없었음, 항상
+  `CosineAnnealingLR` 고정) 삭제.
+- **`model_lib/legacy/test_scr.py`는 이미 이전 라운드(Stage0 삭제)에서 지워진
+  상태** — "SCR 테스트"는 그 재확인으로 처리(추가로 지울 파일 없음).
+- **삭제하지 않고 확인만 한 것**: `SCREvaluator`(`scr_evaluator.py`)와
+  `SCRLoss`(`scr_loss.py`)는 `test.py`/`train.py`가 각각 실제로 쓰는 살아있는
+  클래스라 전혀 안 건드림. `hard_concrete.py`도 무관.
+- **검증**: `py_compile`/`compileall` 전체 통과, `train.py`/`test.py`/
+  `visualize_results.py` 세 파일 전부 `importlib`로 모듈 전체 실행 재현(모듈
+  레벨 import 경로 전부 통과), `SCREvaluator`에 `predict_dataset_uq` 속성이
+  없어진 것 확인. 그 뒤 원본과 동일 조건으로 네 번째 전체 재학습 실행
+  (`p1v4_scen_lag1zone_redunfix_verify4_seed0`) — 조기종료 416에폭·선택 epoch
+  355·gate_saturation=0.0041 전부 동일, `p1v2_summary.json` 전 필드 완전
+  일치(불일치 0개), **체크포인트 MD5 완전 일치**(`32c2cd84216510655ce3c9f15072ee70`,
+  이번까지 네 번째 검증본 전부 원본과 동일). 시드 통합과 SCRTrainer/UQ 체인
+  삭제 둘 다 학습 결과에 실제로 아무 영향이 없었음을 바이트 단위로 확인.
+
+### 2026-09-26 — `4_hi_analysis/`(hi_correlation/hi_compute) 죽은 코드 재감사
+
+사용자가 "4_hi_correlation부터 엄밀하게" 지금 안 쓰는 로직이 있는지 재검사해달라고
+요청 — 지금까지의 CNN/UQ/SCRTrainer 삭제 사슬이 hi_correlation.py 쪽까지 이어지는지
+확인. 이번엔 함수 단위 reachability(전체 repo grep)로 찾아서 보고 후 사용자가 3개
+전부 승인해 실행:
+
+1. **`hi_correlation.py` 안 쓰는 import 4개 삭제**: `ThreadPoolExecutor`,
+   `find_peaks`, `sp_kurtosis`(`scipy.stats.kurtosis`), `sp_skew`(`scipy.stats.skew`)
+   — import문 외엔 파일 어디서도 안 쓰임(아마 예전에 실제 계산 로직을
+   `hi_compute.py`로 옮기면서 남은 흔적).
+2. **`_resample_segment()` + `raw_v`/`raw_i`/`raw_t` 컬럼 삭제(CNN/UQ 삭제 사슬의
+   연장)**: `_extract_one_cell` 안 2곳에서 모든 세그먼트마다 실제로 계산·저장하던
+   원시 곡선 데이터인데, 소비 경로가 `with_raw_cnn`(이미 삭제)과 `with_raw_flat`
+   뿐이었고 **`train.py:492`/`test.py:271`가 `with_raw_flat`도 `with_raw_cnn`과
+   똑같이 항상 강제 `False`로 덮어쓰고 있었다**(지난 CNN 정리 때는 놓쳤던 부분,
+   이번에 발견). `RAW_N` 상수도 이 함수 전용이라 같이 삭제.
+3. **`hi_compute.py`의 `compute_his()`/`benchmark_cost()`/`morph_reference()` +
+   연쇄로 고아가 된 `morph_curves()`/`_morph_dict()` 삭제**: `hi_correlation.py`는
+   이 "전체를 한 번에 계산하는 편의 API"를 애초에 쓴 적이 없고 — 자기 자신의
+   `_curve_buf`/`_dtw_batch()`(배치 최적화 버전)로 DTW/Fréchet morph HI를 독립적으로
+   계산한다. 5개 함수 전부 서로만 호출하는 닫힌 죽은 루프였고(`hi_names()`만
+   `__main__` 자체 테스트에서 살아있어 유지), 외부 호출자 0곳을 grep으로 확인.
+   `benchmark_cost()`만 쓰던 `import time`도 같이 삭제. 모듈 독스트링의 stale
+   `compute_his(..., bol=...)` 예시도 실제 구조(hi_correlation.py의 자체 배치
+   구현)를 설명하도록 갱신.
+- **검증**: `py_compile` 전체 통과. `hi_compute` 모듈 재현 import로 삭제된 3개
+  함수가 실제로 없어진 것, `hi_names()`는 여전히 66개를 정확히 반환하는 것 확인.
+  **가장 중요한 검증**: 이 변경은 추출(Step 4) 로직 자체를 건드려서, 캐시된
+  기존 데이터로 도는 학습 재현 검증(MD5)으로는 못 잡는 종류라 — MIT `b1c0` 셀
+  하나를 실제로 처음부터 재추출해서(`_extract_one_cell` 직접 호출) 기존 캐시된
+  결과와 비교: 세그먼트 행 수 완전 일치(21828건), `raw_v` 컬럼이 새 추출본에는
+  의도대로 없어진 것 확인, `stat_*` 8개 컬럼 전부 완전 일치(불일치 0/8) — 남은
+  계산 로직은 전혀 안 건드렸다는 걸 실측으로 증명.
+
+### 2026-09-27 — "현재 검증 버전 조건" 기준 Bucket A 죽은 코드 전량 삭제
+
+사용자가 "지금 검증수행하는 버전 조건대로 실행하는데 있어서 실행되지 않는 코드
+모두 찾아서 보고" 요청 → repo 전체를 두 개 병렬 Explore 서브에이전트로 감사해
+**Bucket A**(현재 config로는 어떤 경로로도 절대 안 타는 코드 — 삭제 안전)와
+**Bucket B**(non-canonical yaml/CLI 오버라이드로만 닿는, 이 프로젝트의 실제
+ablation 실험 인프라 — 논문용이라 보존 필수, 예: `TransformerHead` 계열
+회귀 헤드, `assign="none"`/`tile_scope`/`random_segment` 등 축 파라미터,
+`--hi-cost-weighted-l0`)로 분리해 보고 → 사용자가 Bucket A 전량 삭제 승인.
+
+**`model_lib/models/cap_heads.py`**: `with_raw_flat` 스캐폴딩 전체 삭제 —
+`_D_RAW_FLAT`/`_HEAD_IN_WITH_RAW_FLAT` 상수, `TransformerHead`의
+`with_raw_flat` 파라미터/`raw_flat_embed`/forward 분기, `build_cap_head()`의
+`n_scen_onehot`/`with_raw_flat` 파라미터와 관련 검증 로직 전부 삭제.
+`with_raw_cnn`은 이미 지난 라운드에 `train.py:492`/`test.py:271`가 항상 강제
+`False`로 덮어써서 죽어있는 게 확인됐었는데, **`with_raw_flat`도 정확히 같은
+이유로 100% 죽어있었다**(이번 라운드에서 새로 발견).
+
+**`model_lib/models/scr_model.py`**: 3개 항목 삭제.
+- `n_gate_groups`/`scenario_onehot` 생성자 파라미터와 관련 초기화 로직(게이트
+  뱅크 축소 + "웜스타트 후 분기" 커리큘럼 메커니즘) 전체 삭제 — 이 기능을 켜는
+  CLI 플래그가 애초에 존재한 적이 없었음(grep으로 외부 호출자 0곳 확인).
+  `build_cap_head()` 호출의 `n_scen_onehot` 인자, `train()` 메서드 오버라이드
+  (raw_cnn 동결용이었는데 조건이 영구 `False`라 상속 기본 동작과 100% 동일),
+  `with_raw_flat` 스캐폴딩(`raw_flat_norm`/forward elif 분기)도 함께 삭제.
+- `_apply_scen_gate()`/`_apply_scen_kernel_gate()` 안의
+  `if self._gate_group_map is not None: scen_idx = self._gate_group_map[scen_idx]`
+  가드 2곳 삭제 — 위 항목에서 `_gate_group_map`을 대입하는 코드를 지웠는데 이
+  가드를 놓치면 첫 forward 호출에서 `AttributeError`가 나는 걸 자체 재현
+  테스트로 잡아서 즉시 수정.
+- `branch_scen_gates()` 메서드 전체 삭제(위 게이트-그룹 메커니즘의 일부, 외부
+  호출자 0곳).
+- **연쇄 발견**: `model_lib/utils/gate_io.py`의 `_save_scen_masks_to_json`/
+  `_plot_gate_probs` 2곳이 `getattr(model, "_gate_group_map", None)`으로 이제
+  영구 `None`인 속성을 방어적으로 읽고 있던 것도 함께 단순화(`g = s` 직접 대입).
+  `8_train/train.py`/`9_eval/test.py`의
+  `p1_model_cfg = {**cfg["model"], "with_raw_cnn": False, "with_raw_flat": False}`
+  강제 오버라이드도 — `SCRModel`이 이제 두 키를 `model_cfg`에서 아예 안 읽으므로
+  완전한 no-op이 됨 — `dict(cfg["model"])`로 단순화. `parameters.py`의
+  `P1_MODEL_CONFIG["model"]["with_raw_flat"]` 키도 같이 삭제.
+
+**`model_lib/datasets/segment_dataset.py`**: `aux_scen_target`/
+`aux_intensity_target`(h_scen/h_intensity 보조손실 타깃 — 소비하던 CNN 분류기
+학습 경로가 이미 삭제됨) 계산·저장·`__getitem__` 반환·`FastTensorLoader`의
+`include_aux` 옵션까지 전부 삭제. `filter_dataset_by_cells`/`_subset_dataset`
+(외부 호출자 0곳), 모듈 레벨 `collate_fn`(표준 `DataLoader` 미사용 —
+`FastTensorLoader`가 대체)도 삭제. `datasets/__init__.py`의 재수출도 정리.
+
+**`model_lib/evaluation/scr_evaluator.py`**: `evaluate()`/`plot_for_dataset()`
+(둘 다 `test.py`가 직접 `evaluate_modes()`/`_plot_*` private 메서드를 쓰지
+이 래퍼들은 호출한 적 없음), `save_predictions()`/`plot_routing_heatmap()`
+(`test.py`가 자체 `_write_predictions_csv`/routing_table.csv 저장 로직을
+따로 갖고 있어서 완전히 중복·미사용), `plot_hi_category_heatmap()`(전용 색상
+상수 `_CAT_PREFIX`/`_CAT_COLOR`/`_CAT_LABELS`와 함께) 삭제. `predict_dataset()`의
+`direction_routing`/`_dir_t` 분기(예전 `test_rs` 축의 scen_idx 0/1 체계 전용,
+그 축 자체가 이미 삭제됨)와 `evaluate_modes()`의 `direction_routing_for_oracle`
+파라미터(호출부 `test.py`가 넘긴 적 없어 항상 `False`)도 삭제. 안 쓰는
+`import csv`/`get_hi_cols_for_seg` 정리, 모듈 독스트링을 실제 산출 책임
+기준으로 갱신.
+
+**기타 단일 함수/상수 삭제**: `model_lib/utils/metrics.py`의 `routing_stats()`
+(외부 호출자 0곳), `model_lib/utils/hi_schema.py`의 `LEAK_COLS`(주석에 이미
+"현재 어디서도 참조 안 함"이라고 적혀 있던 세트), `model_lib/utils/io_utils.py`의
+`save_checkpoint`/`load_checkpoint`/`save_json`/`save_pickle`/`load_pickle`
+(전부 `utils/__init__.py` 재수출 외 실제 호출자 0곳 — `torch.save`/`json.dump`류를
+직접 쓰는 `train.py`/`test.py`가 실제 체크포인트 저장을 담당), `1_convert/
+convert_unified.py`의 `Qd`/`Qc` HDF5 필드 파싱(`_build_cell_df`가 애초에
+안 읽음), `common/scenario/q_frac_wide.py`의 `cv_v_thresh`/`cv_cc_frac`
+생성자 파라미터(자기 파일 주석에 "더 이상 쓰이지 않음"이라고 이미 적혀있던 것)
+삭제.
+
+- **검증**: 위 모든 파일 `py_compile` 통과 + 실제 가상환경(`LFP_SOH_ESTIMATION`
+  conda env)에서 `importlib`로 `models.scr_model`/`models.cap_heads`/
+  `datasets.segment_dataset`/`evaluation.scr_evaluator`/`utils.*` 전체 모듈
+  재현 로드 성공. `SCRModel`을 실제로 생성해 forward(train/eval 둘 다)·
+  backward·`get_selected_scen_his()`/`get_selected_probe_his()`까지 직접
+  실행해 `_gate_group_map` 관련 `AttributeError`가 없는 것을 실측으로 확인(수정
+  전 재현 시도에서 실제로 해당 에러가 났던 것도 확인 후 수정). 그 뒤 원본과
+  동일 조건으로 다섯 번째 전체 재학습(`p1v4_scen_lag1zone_redunfix_verify5_seed0`)
+  실행 — 조기종료 416에폭·선택 epoch 355·gate_saturation=0.0041 전부 이전
+  검증본들과 동일, `p1v2_summary.json` 전 필드 완전 일치(run tag/output_dir
+  문자열 자체 차이 제외 불일치 0개), **체크포인트 MD5 완전 일치**
+  (`32c2cd84216510655ce3c9f15072ee70`) — 이번까지 다섯 번째 검증본 전부 원본과
+  바이트 단위로 동일. Bucket A 15개 항목 전량 삭제 + 2개 연쇄 발견(gate_io.py,
+  train.py/test.py/parameters.py의 no-op `with_raw_cnn`/`with_raw_flat`
+  오버라이드) 모두 학습 결과에 실제로 아무 영향이 없었음을 확인.
+
+### 2026-09-27 — yaml 설정 프리셋(`--model-config`) 전면 폐기 + `parameters.py` 잔여 중복 정리
+
+사용자 질문("parameters.py 중복 다 제거했나? yaml을 파라미터로 받는 것도 이제
+안 해도 되지 않아?")을 계기로 재감사.
+
+**`parameters.py` 잔여 중복/죽은 값 4건 발견 및 정리**(전부 grep으로 "실제로 어디서도
+안 읽음"을 먼저 확인 후 삭제):
+- `P1_MODEL_CONFIG["data"]["split_seed"] = 42` — 하드코딩 리터럴. `train.py`/
+  `synergy.py`/`kernel.py` 전부 cfg 생성 직후 `args.split_seed`로 무조건 덮어써서
+  이 초기값은 애초에 한 번도 실제로 쓰인 적이 없었다(시드 통합 라운드에서
+  `FIXED_DEFAULT_SEED`를 만들 때 이 중첩 딕셔너리 안쪽 값은 놓쳤던 것) — 키 자체를
+  삭제(덮어쓰기 로직이 `cfg.setdefault`/직접 대입이라 키가 없어도 안전).
+- `P1_MODEL_CONFIG["data"]["is_real_input"/"output_dir"/"gates_from"]` — `model_lib/`
+  어디서도 읽지 않는 완전히 죽은 키. 삭제.
+- `P1_MODEL_CONFIG["loss"]["leak_cols"]` — `train.py`/`scr_loss.py` 어디서도 안 읽음.
+  실제 leakage 제외는 `SOH_EXCLUDE_STAT_LEAK` 환경변수(`ACTIVE_N_HI` 토글,
+  `hi_schema.py`) 하나로만 이뤄지는데, 이 키는 그 이전 방식의 흔적이었다. 삭제.
+- `ACTIVE_REGRESSION_MODEL`/`FIXED_PHASE1_MODEL_CONFIG` — 아래 yaml 폐기와 함께 삭제
+  (사용처가 아래에서 같이 없어짐).
+
+**yaml 설정 프리셋(`model_lib/config/*.yaml`, `--model-config` CLI 플래그) 전면 폐기**.
+재감사 결과, "다른 프리셋 재현용 이스케이프 해치"라는 기존 설명이 더 이상 사실이
+아니었다:
+- `main_qfref_S_all4/mit_only/hust_only/calce_tju/tju_only/p60/transformerL.yaml`
+  전부 파일 내부에 `5_model/config/...`, `phase1_trainer_v2.py`, `run_pipeline.py
+  Step 6`, `SCRTrainer.fit()` 같은 이번 세션 리팩토링(폴더 재편 · `train.py` 개명 ·
+  `SCRTrainer` 삭제) **이전** 용어가 그대로 남아 있었다 — 리팩토링 이후 한 번도
+  재검증되지 않은 프리셋들이었다는 뜻.
+- 결정적으로 `run_pipeline.py`가 `--regression-model`을 받아 `train.py` 호출에
+  그대로 전달하고 있었는데, `train.py` 자신의 `--regression-model` 플래그는 이미
+  예전 라운드에 삭제돼 있었다(`regression_model`은 이제 항상 cfg 값 그대로 사용,
+  주석: "다른 아키텍처는 sanity-check용 오버라이드라 제거함") — 즉
+  `main_qfref_S_transformerL.yaml`을 CLI로 재현하는 경로는 **이미 조용히 깨져
+  있었다**(`run_pipeline.py 8 --regression-model transformer`를 실행하면 `train.py`가
+  "unrecognized arguments"로 즉시 죽는 상태). 아무도 최근에 이 경로를 실제로
+  실행한 적이 없다는 직접 증거.
+- 사용자 확인: 이 ablation 프리셋들(데이터셋 subset 조합, 회귀 헤드 교체)을 논문에
+  다시 쓸 계획 없음 → 전량 폐기 승인.
+
+**삭제/변경 내역**:
+- `model_lib/config/` 디렉터리 전체 삭제(34개 파일 — `*.yaml`/`*.txt`라 애초에
+  `.gitignore`로 추적 대상이 아니었음, `git rm` 불필요).
+- `model_lib/utils/io_utils.py`: `_deep_merge`/`_substitute_data_root`(yaml
+  프리셋 병합 + `${DATA_4_HI_ROOT}` 토큰 치환 전용) 삭제, `load_config()`를
+  "그 run 자신이 저장한 `config.yaml`을 그대로 읽기"만 하는 1줄짜리로 단순화
+  (`save_config()`로 남기는 run 기록용 — `9_eval/test.py`가 유일한 소비자 — 은
+  전혀 다른 용도라 그대로 유지).
+- `8_train/train.py`: `--model-config` 플래그 삭제, `cfg = load_config(...) if
+  ... else deepcopy(P.P1_MODEL_CONFIG)` 분기를 무조건 `deepcopy(P.P1_MODEL_CONFIG)`로
+  단순화. yaml 유무에 따라 갈리던 `--seg-axis`/`--axis-config`/`--data-dir`/
+  `--seg-data-dir` 폴백 체인(`scenario_cfg.get(...)`)도 CLI-vs-DEFAULT_* 2단
+  우선순위로 단순화 — yaml 경로가 사라져 cfg 자신의 값이 항상 DEFAULT_*와 이미
+  동일했으므로 동작 변화 없음. 이제 항상 통과하는 `data_dir`/`seg_data_dir` 빈 값
+  체크(RuntimeError)도 같이 삭제.
+- `5_interaction/interaction.py`: `--model-config`가 `required=True`였는데
+  **코드 어디서도 `args.model_config`를 쓰지 않는 완전한 죽은 인자**였음을 확인 —
+  삭제.
+- `6_synergy/synergy.py`, `7_kernel/kernel.py`: `--model-config`(각각 `required=True`)
+  삭제, `cfg = load_config(args.model_config)` → `cfg =
+  copy.deepcopy(P.P1_MODEL_CONFIG)`로 교체(train.py와 동일 패턴). `interaction.py`가
+  `synergy.py`의 `_load_all_scenarios()`를 그대로 재사용하므로 이 함수 하나만
+  고치면 두 스크립트 모두 해결됐다.
+- `run_pipeline.py`: `--regression-model` 플래그(이미 깨져 있던 죽은 경로) 삭제,
+  Step 8 호출부의 pass-through 삭제. Step 5~7 전용 `--model-config` 주입 로직
+  (`_config_flag`/`_step_model_config`, `P.FIXED_PHASE1_MODEL_CONFIG` 참조)
+  삭제 — `run_step()` 함수 시그니처에서 이제 아무도 안 쓰는 `model_config`/
+  `config_flag` 파라미터도 제거.
+- **부수 발견**: 위 변경들을 `--help` 출력으로 검증하다가 `train.py`의
+  `--output-dir` 도움말 문자열에 이스케이프 안 된 리터럴 `%`(`"100% 동일하게..."`)가
+  있어 `argparse`가 도움말을 조합할 때마다 `ValueError: unsupported format
+  character`로 죽는 잠재 버그를 발견(이번 변경과 무관한 기존 버그, 우연히
+  검증 과정에서 발견) — `%%`로 이스케이프해 같이 수정.
+- **검증**: 변경된 전 파일 `py_compile` 통과, `--help` 전부 정상 출력(플래그
+  삭제 확인). `5_interaction/interaction.py`를 실제 canonical 데이터로 재실행해
+  기존 검증 레퍼런스 run(`0921_1953_..._seed0`)의
+  `hi_scenario_interaction_*.json`과 `tag` 필드를 제외한 전체 내용을
+  완전히 동일하게 재현함을 확인(`synergy.py`의 `_load_all_scenarios()`를 그대로
+  재사용하므로 이 결과가 `synergy.py` 쪽 데이터 로딩 경로도 함께 검증한다).
+  `7_kernel/kernel.py`도 같은 데이터·같은 시너지 그룹으로 실행해 시나리오별 커널
+  HI 폭(`[16,15,16,16,15,15]`)과 평균 train R²(0.3887) 전부 레퍼런스와 정확히
+  일치함을 확인(끝에 붙는 진단 print 한 줄이 기존부터 있던 cp949 em-dash
+  인코딩 문제로 죽지만, 두 산출물 파일은 그 전에 이미 정상 저장 완료 — 이번
+  변경과 무관한 기존 환경 이슈라 이번에도 손대지 않음). 마지막으로 원본과 동일
+  조건으로 여섯 번째 전체 재학습(`p1v4_scen_lag1zone_redunfix_verify6_seed0`) 실행 —
+  조기종료 416에폭·선택 epoch 355·gate_saturation=0.0041 전부 이전 검증본들과
+  동일, `p1v2_summary.json` 전 필드 완전 일치(run tag 문자열 제외), **체크포인트
+  MD5 완전 일치**(`32c2cd84216510655ce3c9f15072ee70`) — 이번까지 여섯 번째
+  검증본 전부 원본과 바이트 단위로 동일. yaml 설정 프리셋 전면 폐기가 학습
+  결과에 실제로 아무 영향이 없었음을 확인.

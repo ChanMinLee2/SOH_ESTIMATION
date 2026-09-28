@@ -201,15 +201,11 @@ def run_step(
     extra_args: list,
     use_workers: bool,
     workers: int,
-    model_config: str | None,
-    config_flag: str | None = None,
     extra_env: dict | None = None,
 ) -> bool:
     cmd = [sys.executable, str(ROOT / script)] + extra_args
     if use_workers:
         cmd += ["--workers", str(workers)]
-    elif config_flag and config_flag not in extra_args:
-        cmd += [config_flag, model_config]
 
     print(f"\n{'='*60}")
     print(f"  Step {num}  {name}")
@@ -303,8 +299,9 @@ def main():
     parser.add_argument(
         "--synergy-redundancy-threshold", type=float,
         default=P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD, dest="synergy_redundancy_threshold",
-        help="Step 6 전용 — synergy.py --redundancy-threshold(그룹 내부 raw HI "
-             f"다중공선성 배제 기준, 기본 {P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD}).",
+        help="Step 6+7 공용(2026-09-25 통합) — synergy.py 1차 배제(그룹 내부 raw HI)와 "
+             f"kernel.py 2차 배제(커널 HI끼리, pooled)가 같은 값을 쓴다(기본 "
+             f"{P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD}).",
     )
     parser.add_argument(
         "--max-epochs", type=int, default=P.ACTIVE_MAX_EPOCHS, dest="p1_max_epochs",
@@ -363,10 +360,6 @@ def main():
                              f"{P.ACTIVE_LAMBDA_L0_OVERRIDE}, train.py "
                              "--lambda-l0-override 그대로 전달, Step 8 전용). None으로 끄면 "
                              "yaml의 lambda_l0_auto 로직으로 되돌아간다(레거시, 비권장).")
-    parser.add_argument("--regression-model", default=P.ACTIVE_REGRESSION_MODEL, dest="regression_model",
-                        choices=["mlp", "transformer", "i_transformer", "resnet_tab", "ft_transformer"],
-                        help="Phase1 cap_head 종류(기본 미지정 시 train.py 자체 기본값 "
-                             "'mlp' 사용, Step 8/9 전달)")
     parser.add_argument("--seed",        type=int, default=P.ACTIVE_SEED,
                         help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (Step 8 전달, 기본 42)")
     parser.add_argument("--split-seed",  type=int, default=P.ACTIVE_SPLIT_SEED,
@@ -388,7 +381,7 @@ def main():
     # 폴더명에 필요해서 여기서 한 번만 해석한다(train.py는 --seed/--split-seed가
     # 필수라 미지정 시 42로 채우는 것과 동일 규칙). run_ts도 여기서 한 번만 찍어서 Step 5~8
     # 내내 같은 타임스탬프를 쓴다.
-    _seed = args.seed if args.seed is not None else 42
+    _seed = args.seed if args.seed is not None else P.FIXED_DEFAULT_SEED
     run_ts = datetime.now().strftime("%m%d_%H%M")
     run_dir = _run_dir_for(run_ts, args.p1_tag, _seed)
     if any(s[0] in (5, 6, 7, 8, 9) for s in selected):
@@ -426,7 +419,7 @@ def main():
         print(f"  kernel-tag  : {kernel_tag}  (Step 7 출력 -> {kernel_pkl_out.name})")
         print(f"  max-group-size: {args.max_group_size}  (Step 6)")
     if any(s[0] == 8 for s in selected):
-        print(f"  Phase1 설정 : {P.FIXED_PHASE1_MODEL_CONFIG}  (Step 8, train.py)")
+        print(f"  Phase1 설정 : parameters.py: P1_MODEL_CONFIG  (Step 8, train.py)")
         print(f"  Phase1 tag  : {args.p1_tag}")
         print(f"  n-hi        : {args.n_hi}")
         print(f"  kernel-pkl  : {resolved_kernel_pkl or '(미사용)'}"
@@ -456,7 +449,7 @@ def main():
     if p1_run_dir is None and (run_dir / "checkpoints").exists():
         p1_run_dir = run_dir
     run_src: str | None = None
-    _split_seed = args.split_seed if args.split_seed is not None else 42
+    _split_seed = args.split_seed if args.split_seed is not None else P.FIXED_DEFAULT_SEED
 
     for num, name, script, extra, use_workers in selected:
         step_extra = list(extra)
@@ -514,7 +507,10 @@ def main():
             if P.FIXED_KERNEL_GAMMA is not None:
                 step_extra += ["--gamma", str(P.FIXED_KERNEL_GAMMA)]
             step_extra += ["--n-components", str(P.FIXED_KERNEL_N_COMPONENTS)]
-            step_extra += ["--redundancy-threshold", str(P.FIXED_KERNEL_REDUNDANCY_THRESHOLD)]
+            # 2026-09-25: synergy.py(Step 6) 1차 배제와 동일 상수로 통합 — args.synergy_
+            # redundancy_threshold를 그대로 재사용해 --synergy-redundancy-threshold
+            # 하나로 두 스텝을 동시에 제어(구 FIXED_KERNEL_REDUNDANCY_THRESHOLD 삭제).
+            step_extra += ["--redundancy-threshold", str(args.synergy_redundancy_threshold)]
             if P.FIXED_KERNEL_MAX_FEATURES is not None:
                 step_extra += ["--max-features", str(P.FIXED_KERNEL_MAX_FEATURES)]
             if P.FIXED_MIN_RAW_PARTIAL_CORR is not None:
@@ -531,8 +527,6 @@ def main():
         if num == 8:
             if args.lambda_l0_override is not None:
                 step_extra += ["--lambda-l0-override", str(args.lambda_l0_override)]
-            if args.regression_model is not None:
-                step_extra += ["--regression-model", args.regression_model]
             # train.py는 --seed/--split-seed가 required=True라 항상 값을
             # 넘겨야 한다 — 미지정 시 42로 채운다(_seed는 run_dir 이름을 정할 때 이미
             # 동일 규칙으로 계산해뒀다 — 여기서 다시 계산하면 값이 어긋날 위험이 있어 재사용).
@@ -648,14 +642,10 @@ def main():
         # 못박아 호출 셸 상태와 무관하게 만든다(2026-09-20 버그 수정 — 예전엔 "필요할
         # 때만 추가"라 호출 셸에 이미 SOH_EXCLUDE_STAT_LEAK=1이 켜져 있으면 --n-hi 66을
         # 줘도 못 지워서 조용히 무시됐음).
-        # Step 8는 2026-09-23부터 제외 — train.py가 --model-config 없이
-        # 실행되면 자기 자신의 기본값(parameters.py: P1_MODEL_CONFIG, fixed.yaml+
-        # main_qfref_S.yaml 병합과 100% 동일한 값)을 쓰도록 바뀌어서, 여기서 굳이
-        # yaml 경로를 넘겨줄 필요가 없어졌다(단일 소스 원칙 — Step 8는 이제 yaml을
-        # 아예 거치지 않는다). Step 5~7은 아직 --model-config가 필수(required=True)라
-        # 그대로 유지.
-        _config_flag = "--model-config" if num in (5, 6, 7) else None
-        _step_model_config = P.FIXED_PHASE1_MODEL_CONFIG if num in (5, 6, 7) else None
+        # 2026-09-27: Step 5~7의 --model-config(프리셋 yaml) 요구사항 폐기 — interaction.py/
+        # synergy.py/kernel.py 전부 train.py와 동일하게 parameters.py: P1_MODEL_CONFIG를
+        # 직접 참조하도록 바뀌어서, 파이프라인 전 스텝이 yaml을 아예 거치지 않는다
+        # (단일 소스 원칙 완성).
         _extra_env = None
         if num in (5, 6, 7, 8, 9):
             _exclude_stat_leak, _exclude_dqdv_leak = P.N_HI_TO_ENV[args.n_hi]
@@ -664,7 +654,7 @@ def main():
                 "SOH_EXCLUDE_DQDV_LEAK": _exclude_dqdv_leak,
             }
         ok = run_step(num, name, script, step_extra, use_workers, args.workers,
-                       _step_model_config, config_flag=_config_flag, extra_env=_extra_env)
+                       extra_env=_extra_env)
 
         if num == 8:
             if ok:

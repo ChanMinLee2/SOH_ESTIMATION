@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils.hi_schema import N_HI, RAW_CH, RAW_N, spec_from_qfrac
+from utils.hi_schema import N_HI, spec_from_qfrac
 from models.cap_heads import build_cap_head
 
 # model_lib/models/scr_model.py → repo root (train_scr.py/test_scr.py의 PROJECT_ROOT와 동일 계산)
@@ -71,18 +71,6 @@ class SCRModel(nn.Module):
             # scen_group_ids와 동시 사용 가능: shared_hi_mask가 있으면 scen_gate_width가
             # specific 폭으로 좁아지고, scen_group_ids[s]도 그 좁은 폭(len(specific_idx))
             # 기준 로컬 인덱스여야 한다.
-        n_gate_groups: int | None = None,  # 2026-09-17: docs/260917_REPORT.md 안건2
-            # "게이트 분리 대신 시나리오를 원샷 입력으로" 실험용 — scen_gates(+
-            # scen_kernel_gates)의 폭을 n_scenarios 대신 이 값으로 줄이고, 각
-            # scenario_id를 spec.scenario_to_dir_class(sid)[0](방향, 0/1)로 묶어서
-            # 그 방향의 게이트로 라우팅한다. None(기본)이면 기존과 100% 동일
-            # (게이트 폭 = n_scenarios). noscen(assign=none)과 게이트 파편화 프로필을
-            # 맞추면서, 라벨은 position_bin(진짜 zone 정보)을 그대로 쓰는 조합에 사용.
-        scenario_onehot: bool = False,  # 2026-09-17: 위와 짝을 이루는 옵션 — batch["level"]
-            # (zone/latent_class, n_classes 범주)의 원-핫을 cap_head 입력에 direction/
-            # cap_init처럼 그냥 이어붙인다. 게이트 라우팅과는 완전히 독립된 별도 경로 —
-            # "시나리오 정보를 게이트로 나눠서 전달"이 아니라 "그냥 입력으로 알려주기"를
-            # 테스트하기 위함. False(기본)면 기존과 100% 동일(head_in 안 바뀜).
         kernel_hi_counts: Optional[list[int]] = None,  # 2026-09-18(v4 로직 수정, 요구사항1을
             # "데이터에서 0으로 죽이기"가 아니라 게이트 구조 자체로 강제): 길이 n_scenarios,
             # 시나리오별 실제 own 커널 HI 개수(K_s). 주어지면 scen_kernel_gates[s]의 폭이
@@ -93,8 +81,7 @@ class SCRModel(nn.Module):
             # max(kernel_hi_counts)로 고정하고(배치 텐서는 폭이 균일해야 하므로), 각
             # 시나리오는 자기 폭 K_s만큼만 앞쪽에 채우고 나머지는 0-패딩한다(다른 시나리오
             # 폭이 더 넓어서 생기는 여유 슬롯일 뿐 — 이전의 "다른 시나리오 것을 빌려옴"과는
-            # 다름, 그냥 존재하지 않는 슬롯의 0-채움). n_gate_groups(방향 축소)와는 동시
-            # 사용 불가(어느 시나리오의 K_s를 대표로 쓸지 불명확) — 동시 사용 시 assert.
+            # 다름, 그냥 존재하지 않는 슬롯의 0-채움).
             # None(기본)이면 기존과 100% 동일(n_kernel_hi 균일 폭).
         kernel_hi_costs: Optional[dict[int, list[float]]] = None,  # 2026-09-18(L0 비용
             # 가중치): {scenario_idx: [비용, ...]} — 길이는 kernel_hi_counts[s]와 동일해야
@@ -130,29 +117,7 @@ class SCRModel(nn.Module):
         self.n_scenarios = spec.n_scenarios
         self.n_classes   = spec.n_classes
 
-        # n_gate_groups: scen_gates(+scen_kernel_gates)의 실제 게이트 뱅크 크기를
-        # n_scenarios 대신 이 값으로 줄이고, scenario_idx -> group_idx로 라우팅한다.
-        # n_gate_groups=1: 전체 시나리오가 단일 공유 게이트 하나로(방향 구분도 없음) —
-        # "웜스타트 후 분기"(docs/260917_REPORT.md, branch_scen_gates() 참고) Phase 1 전용.
-        # n_gate_groups=2: 방향(충전/방전)별로만 묶음 — scenario_to_dir_class 기반.
-        self.n_gate_groups = n_gate_groups
-        if n_gate_groups is not None:
-            if n_gate_groups == 1:
-                _group_of = [0] * self.n_scenarios
-            else:
-                _group_of = [spec.scenario_to_dir_class(s)[0] for s in range(self.n_scenarios)]
-                assert max(_group_of) + 1 <= n_gate_groups, (
-                    f"n_gate_groups={n_gate_groups}인데 scenario_to_dir_class가 만든 그룹 "
-                    f"인덱스 최대값이 {max(_group_of)} — n_gate_groups를 그룹 수 이상으로 주세요."
-                )
-            self.register_buffer("_gate_group_map",
-                                  torch.tensor(_group_of, dtype=torch.long), persistent=False)
-            _gate_bank_size = n_gate_groups
-        else:
-            self._gate_group_map = None
-            _gate_bank_size = self.n_scenarios
-
-        self.scenario_onehot = scenario_onehot
+        _gate_bank_size = self.n_scenarios
 
         if redundancy_mask is not None:
             assert redundancy_mask.shape == (self.n_scenarios, N_HI), (
@@ -164,13 +129,6 @@ class SCRModel(nn.Module):
             self.redundancy_mask = None
 
         from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate
-
-        if n_gate_groups is not None and scen_group_ids:
-            raise ValueError(
-                "n_gate_groups(게이트 뱅크 축소)와 scen_group_ids(전역 scenario_idx로 키된 "
-                "GroupedHardConcreteGate)는 동시에 쓸 수 없습니다 — scen_group_ids의 키가 "
-                "축소된 그룹 인덱스와 안 맞습니다."
-            )
 
         # ----------------------------------------------------------------
         # Stage A — direction-aware probe gates
@@ -225,11 +183,6 @@ class SCRModel(nn.Module):
         # raw HI와 나란히 쓰고 싶을 때). n_kernel_hi=0이면 완전히 비활성(기존과 동일 동작).
         # ----------------------------------------------------------------
         if kernel_hi_counts is not None:
-            assert n_gate_groups is None, (
-                "kernel_hi_counts(시나리오별 커널 게이트 폭 축소)와 n_gate_groups(방향 축소)는 "
-                "동시에 쓸 수 없습니다 — 그룹으로 묶인 여러 시나리오 중 어느 K_s를 대표로 "
-                "쓸지가 불명확합니다."
-            )
             assert len(kernel_hi_counts) == self.n_scenarios, (
                 f"kernel_hi_counts 길이({len(kernel_hi_counts)})가 n_scenarios"
                 f"({self.n_scenarios})와 다릅니다."
@@ -282,8 +235,7 @@ class SCRModel(nn.Module):
         #   mlp / transformer / i_transformer / resnet_tab / ft_transformer
         # ----------------------------------------------------------------
         self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout,
-                                        n_kernel_hi=self.n_kernel_hi,
-                                        n_scen_onehot=(self.n_classes if scenario_onehot else 0))
+                                        n_kernel_hi=self.n_kernel_hi)
 
         # ----------------------------------------------------------------
         # raw_cnn — 2026-09-25 삭제. 회귀 헤드용 원시 V/|I| 곡선 CNN 임베딩 실험
@@ -292,29 +244,14 @@ class SCRModel(nn.Module):
         # 한 번도 실행된 적 없이 방치된 깨진 코드였음 — 켰으면 ModuleNotFoundError).
         # v4는 train.py/test.py가 with_raw_cnn을 항상 강제 False로 덮어써서 애초에
         # 실사용 경로도 아니었다. self.raw_cnn/self._raw_cnn_frozen은 forward()/
-        # train() 오버라이드/visualize_results.py가 여전히 참조하므로 "항상 없음"
-        # 상태로 남겨둔다.
+        # visualize_results.py가 여전히 참조하므로 "항상 없음" 상태로 남겨둔다.
+        # (2026-09-27: 같은 이유로 with_raw_flat도 train.py/test.py가 항상 강제
+        # False로 덮어써서 완전히 죽어있었다 — raw_flat_norm/BatchNorm1d 생성 코드
+        # 자체를 삭제. forward()의 elif 분기도 같이 제거했다.)
         # ----------------------------------------------------------------
-        _mcfg = model_cfg or {}
         self.with_raw_cnn = False
         self._raw_cnn_frozen = False
         self.raw_cnn = None
-
-        # ----------------------------------------------------------------
-        # raw_flat — 방안1(REGRESSION_UPGRADE.md §2 방안1): raw V/|I| 곡선을 압축 없이
-        # flatten(RAW_CH*RAW_N=96)해 그대로 concat. with_raw_cnn과 동시 사용 불가(택1).
-        # HI는 이미 z-score(mean0/std1)인데 raw_v(~3-4V)/raw_i(~0-5A)는 스케일이 전혀
-        # 다르므로, 문서 원안(단순 reshape concat)에 BatchNorm1d를 하나 더해 정규화한다
-        # — RawCNN이 stem에서 BatchNorm1d로 채널 스케일을 흡수하는 것과 동등한 처리를
-        # 주지 않으면 raw 블록이 gradient를 불공정하게 지배해 비교가 왜곡된다.
-        # ----------------------------------------------------------------
-        self.with_raw_flat = bool(_mcfg.get("with_raw_flat", False))
-        if self.with_raw_cnn and self.with_raw_flat:
-            raise ValueError("with_raw_cnn과 with_raw_flat을 동시에 켤 수 없습니다 (방안2 vs 방안1).")
-        if self.with_raw_flat:
-            self.raw_flat_norm = nn.BatchNorm1d(RAW_CH * RAW_N)
-        else:
-            self.raw_flat_norm = None
 
         # ----------------------------------------------------------------
         # probe_mlp — Phase 1 dual-objective CE head
@@ -335,22 +272,6 @@ class SCRModel(nn.Module):
             )
         else:
             self.probe_mlp = None
-
-    # ------------------------------------------------------------------
-    # train()/eval() 오버라이드 — 얼린 raw_cnn은 BatchNorm 통계도 절대 갱신되면 안 됨
-    # ------------------------------------------------------------------
-    def train(self, mode: bool = True):
-        """부모 train(mode)를 호출한 뒤, raw_cnn이 얼려져 있으면 항상 eval()로 되돌린다.
-
-        requires_grad_(False)는 그래디언트만 막을 뿐 BatchNorm의 러닝 통계
-        갱신(forward 시 버퍼 업데이트, 그래디언트와 무관)은 막지 못한다 —
-        model.train()이 재귀적으로 raw_cnn.training=True를 만들면 frozen CNN의
-        BatchNorm이 Phase2 데이터 분포로 계속 오염된다. 그걸 막기 위한 오버라이드.
-        """
-        super().train(mode)
-        if self._raw_cnn_frozen and self.raw_cnn is not None:
-            self.raw_cnn.eval()
-        return self
 
     # ------------------------------------------------------------------
     # Gate helpers
@@ -426,19 +347,10 @@ class SCRModel(nn.Module):
         재조립하므로 반환 shape/컬럼 순서는 shared_gate 유무와 무관하게 항상 (B,N_HI) 그대로라
         cap_head 등 하위 코드는 변경이 필요 없다.
 
-        n_gate_groups가 설정된 경우(고정 마스크 scen_masks와는 동시에 안 씀 — Phase1 학습
-        전용) scen_idx를 여기서 그룹 인덱스로 먼저 치환한다 — 아래 모든 분기가
-        치환된 scen_idx만 보면 되도록.
-
         redundancy_mask(2026-09-18, 요구사항2를 raw HI에도 게이트 구조로 강제)가 있으면,
-        위 세 분기 중 무엇을 타든 상관없이 마지막에 한 번만 적용한다 — **원본**(그룹
-        치환 전) scen_idx로 인덱싱해야 한다(마스크는 진짜 시나리오 기준으로 만들어졌지,
-        n_gate_groups로 묶인 그룹 기준이 아니므로). False인 자리는 masked/z_out 둘 다
-        무조건 0이 된다 — log_alpha가 뭐라고 하든 "고른 결과 자체가 0"이라 커널 쪽
-        (kernel_hi_counts로 슬롯을 아예 없앤 것)과 동일한 강도의 보장이다."""
-        orig_scen_idx = scen_idx
-        if self._gate_group_map is not None:
-            scen_idx = self._gate_group_map[scen_idx]
+        위 세 분기 중 무엇을 타든 상관없이 마지막에 한 번만 적용한다. False인 자리는
+        masked/z_out 둘 다 무조건 0이 된다 — log_alpha가 뭐라고 하든 "고른 결과 자체가
+        0"이라 커널 쪽(kernel_hi_counts로 슬롯을 아예 없앤 것)과 동일한 강도의 보장이다."""
         if self.shared_gate is not None:
             masked = torch.zeros_like(x)
             z_out = torch.zeros_like(x)
@@ -465,7 +377,7 @@ class SCRModel(nn.Module):
             masked, z_out = self._apply_gate_list(self.scen_gates, x, scen_idx)
 
         if self.redundancy_mask is not None:
-            row_mask = self.redundancy_mask[orig_scen_idx]  # (B, N_HI)
+            row_mask = self.redundancy_mask[scen_idx]  # (B, N_HI)
             masked = masked * row_mask
             z_out = z_out * row_mask
         return masked, z_out
@@ -482,8 +394,6 @@ class SCRModel(nn.Module):
         각 행은 자기 시나리오 own 슬롯 [0:K_s)만 실값이고 나머지는 train.py가
         이미 0-패딩해둔 상태)를 시나리오별로 [0:K_s) 구간만 잘라 그 폭의 게이트에 넣고,
         결과를 다시 max_k 폭으로 되돌린다(뒤쪽은 항상 0)."""
-        if self._gate_group_map is not None:
-            scen_idx = self._gate_group_map[scen_idx]
         if self.kernel_hi_counts is None:
             return self._apply_gate_list(self.scen_kernel_gates, x, scen_idx)
 
@@ -531,7 +441,7 @@ class SCRModel(nn.Module):
         # Stage B: scenario-conditioned gate (MSE gradient only)
         scen_x, scen_z = self._apply_scen_gate(x, scen_idx) # (B, N_HI)
 
-        # Capacity head: probe_x + scen_x [+ 커널 융합 HI] [+ raw CNN 임베딩 | raw flat]
+        # Capacity head: probe_x + scen_x [+ 커널 융합 HI] [+ raw CNN 임베딩]
         #                + direction + cap_init
         feat_parts = [probe_x, scen_x]
         if self.scen_kernel_gates is not None:
@@ -547,18 +457,8 @@ class SCRModel(nn.Module):
             else:
                 cnn_emb = self.raw_cnn(batch["x_raw"])           # (B, 3) — Phase2와 함께 학습
             feat_parts.append(cnn_emb)
-        elif self.with_raw_flat:
-            x_raw = batch["x_raw"]                                # (B, RAW_CH, RAW_N)
-            raw_flat = self.raw_flat_norm(x_raw.reshape(x_raw.size(0), -1))  # (B, 96)
-            feat_parts.append(raw_flat)
-        if self.scenario_onehot:
-            # 2026-09-17 안건2: 게이트 라우팅과 무관하게 "진짜 zone/level"을 그냥
-            # 입력으로 이어붙인다 — batch["level"]은 segment_dataset.py가 만든 0/1/2
-            # ground-truth(CE 라벨과 동일 소스), n_classes 폭 원-핫.
-            level_onehot = F.one_hot(batch["level"], num_classes=self.n_classes).to(x.dtype)
-            feat_parts.append(level_onehot)
         feat_parts += [direction.unsqueeze(1), batch["cap_init"].unsqueeze(1)]
-        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+3+2)/(B, 2*N_HI+96+2)
+        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+3+2)
         cap_pred = self.cap_head(feat)                       # (B,)
 
         # CE head: [probe_x || direction] → class logits (Phase 1 dual-objective only)
@@ -622,42 +522,3 @@ class SCRModel(nn.Module):
                 for s in range(self.n_scenarios)
             }
         return {s: gate.active_indices() for s, gate in enumerate(self.scen_gates)}
-
-    def branch_scen_gates(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
-        """웜스타트 후 분기(docs/260917_REPORT.md 안건2 다음 단계, train.py의
-        --warmstart-branch-epoch T 전용): n_gate_groups=1로 학습된 단일 공유 scen_gates[0]
-        (모든 시나리오 데이터로 학습됨, L0/이산화 압력 없음)을 n_scenarios개의 독립
-        HardConcreteGate로 복제해 분기한다. 각 새 게이트의 log_alpha는 공유 게이트의
-        log_alpha를 detach().clone()해 초기화하고(그 시점 이후로는 완전히 독립적으로,
-        자기 시나리오 데이터만으로 학습됨), 호출 이후 이 모델은 n_gate_groups=None인
-        평범한 6-게이트 SCRModel과 완전히 동일하게 동작한다(_gate_group_map도 해제).
-
-        Returns (old_params, new_params) — 호출자(트레이너)가 옵티마이저 상태를 old는
-        제거하고(momentum 폐기) new는 새로 추가(모멘텀 0부터 재시작)하는 데 쓴다
-        (docs/260917_REPORT.md: "Adam 모멘텀 재시작" 결정).
-
-        scen_group_ids(그룹 계층 게이팅)와는 아직 함께 쓸 수 없다(단일 공유 게이트가
-        일반 HardConcreteGate여야 한다는 가정)."""
-        assert self.n_gate_groups == 1, (
-            "branch_scen_gates()는 n_gate_groups=1(전체 시나리오 공유 게이트 1개)로 만든 "
-            f"모델에서만 호출할 수 있습니다 (현재 n_gate_groups={self.n_gate_groups})."
-        )
-        assert self.shared_gate is None, "branch_scen_gates()는 shared_hi_mask(v4)와 함께 쓸 수 없습니다."
-
-        from models.hard_concrete import HardConcreteGate
-
-        old_gate = self.scen_gates[0]
-        old_params = list(old_gate.parameters())
-        width = old_gate.log_alpha.numel()
-        device = old_gate.log_alpha.device
-
-        new_gates = nn.ModuleList([HardConcreteGate(width) for _ in range(self.n_scenarios)]).to(device)
-        with torch.no_grad():
-            for g in new_gates:
-                g.log_alpha.copy_(old_gate.log_alpha)
-
-        self.scen_gates = new_gates
-        self.n_gate_groups = None
-        self._gate_group_map = None
-        new_params = list(self.scen_gates.parameters())
-        return old_params, new_params

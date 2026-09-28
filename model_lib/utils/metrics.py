@@ -1,4 +1,4 @@
-"""Regression and routing metrics."""
+"""Regression metrics."""
 
 from __future__ import annotations
 import numpy as np
@@ -35,19 +35,3 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray,
     if names is None:
         return all_metrics
     return {k: v for k, v in all_metrics.items() if k in names}
-
-
-def routing_stats(gates: np.ndarray, group_names: list[str]) -> Dict[str, float]:
-    """Compute routing statistics from gate activations.
-
-    gates: (N, n_groups) binary or continuous gate values.
-    """
-    stats: Dict[str, float] = {}
-    stats["mean_active_groups"] = float(gates.mean(axis=1).sum() / len(gates))
-
-    # Per-group activation rate
-    for i, name in enumerate(group_names):
-        stats[f"gate_{name}"] = float(gates[:, i].mean())
-
-    stats["sparsity"] = float(1.0 - gates.mean())
-    return stats

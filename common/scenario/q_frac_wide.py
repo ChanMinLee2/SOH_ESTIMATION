@@ -85,8 +85,6 @@ class QFracWideSegmenter(Segmenter):
         n2: float = 0.2,       # 세그먼트 길이 (q_frac 비율, 0 < n2 < n1)
         n_samples: int = 4,    # 구간당 세그먼트 수
         min_pts: int = 10,
-        cv_v_thresh: float = 3.59,
-        cv_cc_frac: float = 0.80,
         random_segment: bool = False,   # True: 구간 내 고정길이 랜덤 창 (설계 A)
         seg_len_pts: int = 20,          # 랜덤 창의 고정 관측 포인트 수 (q_tot 무관)
         random_seed: int = 42,          # 랜덤 재현성 시드
@@ -134,8 +132,6 @@ class QFracWideSegmenter(Segmenter):
         self.n2 = n2
         self.n_samples = n_samples
         self.min_pts = min_pts
-        self.cv_v_thresh = cv_v_thresh
-        self.cv_cc_frac = cv_cc_frac
         self.random_segment = bool(random_segment)
         self.seg_len_pts = int(seg_len_pts)
         self.random_seed = int(random_seed)
@@ -519,7 +515,7 @@ class QFracWideSegmenter(Segmenter):
             yield from recs
 
         # 충전 (CC+CV 전체 사용 — 100% = 해당 사이클 실제 완충 용량과 일치시키기 위해
-        # CV 구간 제거 로직을 비활성화함. cv_v_thresh/cv_cc_frac는 더 이상 쓰이지 않음.)
+        # CV 구간 제거 로직을 비활성화함.)
         if chg_v is not None and len(chg_v) >= self.min_pts:
             recs, seg_local = self._extract(
                 chg_v, chg_i, chg_dt, chg_q, +1, cell_id, cycle, seg_local,

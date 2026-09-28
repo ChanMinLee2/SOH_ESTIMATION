@@ -48,7 +48,7 @@ import pickle
 import sys
 import warnings
 from collections import OrderedDict
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
@@ -58,9 +58,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks, savgol_filter
-from scipy.stats import kurtosis as sp_kurtosis
-from scipy.stats import skew as sp_skew
+from scipy.signal import savgol_filter
 from scipy.stats import spearmanr
 from tqdm.auto import tqdm
 
@@ -344,51 +342,6 @@ _DTW_BAND   = 5    # Sakoe-Chiba 밴드 (그리드의 10% = 위상 이동 허용
 # 동시 실행 시 압박 가중). N을 이 크기로 잘라 처리해 피크 메모리를 셀 크기와 무관하게
 # 상한선 이하로 유지한다.
 _DTW_CHUNK  = 2000
-
-# ── 원시 세그먼트 곡선 리샘플 (CNN 입력용) ──────────────────────────────────
-# model_lib/utils/hi_schema.py 의 RAW_N 과 동일해야 함 (단일 소스: 값 48).
-RAW_N = 48
-
-
-def _resample_segment(vs: np.ndarray, ims: np.ndarray, qcs: np.ndarray, dts: np.ndarray):
-    """세그먼트 V / |I| / 상대시간 시계열 → q_frac [0,1] 그리드에 RAW_N 포인트로 보간.
-
-    build_dataset.py 의 _resample 규칙과 동일: 세그먼트 내 상대 누적전하(q_rel)를
-    [0,1]로 정규화한 그리드에 V, |I|, t_rel 을 선형보간한다. 세그먼트 길이(포인트 수)가
-    셀·사이클·데이터셋마다 달라도 동일 해상도로 CNN에 입력할 수 있게 한다.
-
-    raw_i는 절댓값이 아니라 부호가 남는다(양수=충전/음수=방전, DATASET_HUST_README.md의
-    current_A 부호 컨벤션과 동일) — 부호 자체는 호출부에서 direction을 곱해 사후 적용한다
-    (여기서는 절댓값 보간까지만 수행; docs/260803_RESULTS.md §10.1 참고).
-
-    raw_t는 (t-t[0])/(t[-1]-t[0]) 로 세그먼트 내부에서 시프팅+스케일링한 상대시간이다
-    (docs/REGRESSION_UPGRADE.md §8.1 / docs/260803_RESULTS.md §10.10 의 안전 공식과 동일
-    — 절대 지속시간이 아니라 상대값이라 SOH 대리 변수 누출을 피한다). 좌표축은 V/I와
-    동일하게 q_rel 기반 x를 그대로 쓴다.
-
-    Returns:
-        (raw_v, raw_i, raw_t) — 각 (RAW_N,) float32. 전하량이 0에 가까우면 zero 배열.
-    """
-    grid = np.linspace(0.0, 1.0, RAW_N)
-    if len(vs) < 2:
-        z = np.zeros(RAW_N, np.float32)
-        return z, z.copy(), z.copy()
-    q_rel = np.asarray(qcs, float) - float(qcs[0])
-    q_tot = float(q_rel[-1])
-    if q_tot < 1e-6:
-        # 전하 진행이 없는 세그먼트: 시간 순서(인덱스) 기준 균등 보간으로 대체
-        x = np.linspace(0.0, 1.0, len(vs))
-    else:
-        x = q_rel / q_tot
-    rv = np.interp(grid, x, np.asarray(vs, float)).astype(np.float32)
-    ri = np.interp(grid, x, np.abs(np.asarray(ims, float))).astype(np.float32)
-    t = np.cumsum(np.asarray(dts, float))
-    t = t - t[0]
-    t_span = float(t[-1])
-    t_rel = (t / t_span) if t_span > 1e-9 else np.zeros_like(t)
-    rt = np.interp(grid, x, t_rel).astype(np.float32)
-    return rv, ri, rt
-
 
 def _dtw_batch(queries: np.ndarray, bol: np.ndarray) -> np.ndarray:
     """N개 쿼리 곡선을 단일 참조 곡선에 대해 배치 DTW 계산.
@@ -713,11 +666,6 @@ def _extract_one_cell(args) -> tuple:
                 _srow.update(_strip_seg_suffix(_seg_stat(vs_s, ims_s, dts_s, qcs_s, seg), seg))
                 _srow.update(_strip_seg_suffix(_seg_diff(vs_s, ims_s, dts_s, qcs_s, seg), seg))
                 _srow.update(_strip_seg_suffix(_seg_lfp(vs_s, ims_s, dts_s, qcs_s, seg), seg))
-                _rv, _ri, _rt = _resample_segment(vs_s, ims_s, qcs_s, dts_s)   # CNN 원시 곡선
-                _sign = 1.0 if _rec.direction > 0 else -1.0
-                _srow["raw_v"] = _rv.tolist()
-                _srow["raw_i"] = (_ri * _sign).tolist()   # 부호 있는 전류 (docs/260803_RESULTS.md §10.1)
-                _srow["raw_t"] = _rt.tolist()
                 _mc = _seg_morph_curves(vs_s, ims_s, dts_s)
                 for _ct, _arr in zip(("vt", "vq", "ve"), _mc):
                     if _arr is not None:
@@ -804,11 +752,6 @@ def _extract_one_cell(args) -> tuple:
                         _srow_c.update(_strip_seg_suffix(_seg_stat(vs_c, ims_c, dts_c, qcs_c, seg), seg))
                         _srow_c.update(_strip_seg_suffix(_seg_diff(vs_c, ims_c, dts_c, qcs_c, seg), seg))
                         _srow_c.update(_strip_seg_suffix(_seg_lfp(vs_c, ims_c, dts_c, qcs_c, seg), seg))
-                        _rv_c, _ri_c, _rt_c = _resample_segment(vs_c, ims_c, qcs_c, dts_c)   # CNN 원시 곡선
-                        _sign_c = 1.0 if _rec.direction > 0 else -1.0
-                        _srow_c["raw_v"] = _rv_c.tolist()
-                        _srow_c["raw_i"] = (_ri_c * _sign_c).tolist()   # 부호 있는 전류
-                        _srow_c["raw_t"] = _rt_c.tolist()
                         _mc_c = _seg_morph_curves(vs_c, ims_c, dts_c)
                         for _ct, _arr in zip(("vt", "vq", "ve"), _mc_c):
                             if _arr is not None:
