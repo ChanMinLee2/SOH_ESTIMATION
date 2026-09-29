@@ -1,4 +1,4 @@
-# REFATORING.md
+# REFACTORING.md
 
 2026-09-22부터 진행 중인 코드베이스 리팩토링 기록. **계속 업데이트되는 살아있는 문서** —
 새 작업을 마칠 때마다 "진행 이력"에 절을 추가한다. 과거 절은 그 시점 기준 사실이므로
@@ -981,3 +981,396 @@ convert_unified.py`의 `Qd`/`Qc` HDF5 필드 파싱(`_build_cell_df`가 애초�
   MD5 완전 일치**(`32c2cd84216510655ce3c9f15072ee70`) — 이번까지 여섯 번째
   검증본 전부 원본과 바이트 단위로 동일. yaml 설정 프리셋 전면 폐기가 학습
   결과에 실제로 아무 영향이 없었음을 확인.
+
+### 2026-09-28 — `pyproject.toml` 도입: 진입점 스크립트의 sys.path 부트스트랩 제거
+
+사용자 질문("`hi_correlation.py`의 `PROJECT_ROOT`/`sys.path.insert`, `data_directories`에
+있는데 그냥 가져다 쓰면 안 되나?")을 계기로 확인 — `data_directories.py`가 저장소
+루트에 있는 이상, 그걸 import하려면 저장소 루트가 먼저 `sys.path`에 들어가 있어야
+하는 "닭과 달걀" 문제라 그 자체로는 못 없앤다고 답했으나, 이어진 "이 구조가
+어색한데 방법이 없냐"는 재질문에 근본 해결책(패키지화)을 검토해 적용.
+
+**해결책**: 저장소를 `pip install -e .`로 설치 가능한 패키지로 만들었다
+(`pyproject.toml` 신설, setuptools 백엔드). 이후 `data_directories`/`parameters`/
+`log_utils`(모듈)과 `common`/`models`/`datasets`/`training`/`evaluation`/`utils`
+(패키지, 뒤 5개는 실제로는 `model_lib/` 밑에 있지만 그 내부 코드가 이미
+`from models.xxx import` 같은 절대경로 스타일로 서로를 import하고 있어 그 관례를
+그대로 유지하도록 `package-dir`만 재매핑) 전부 **실행 위치(cwd)나 스크립트 파일
+위치와 무관하게** 어디서든 바로 import된다.
+
+- `model_lib/log_utils.py` → 저장소 루트 `log_utils.py`로 이동(다른 top-level
+  모듈들과 같은 위치에 있어야 동일한 방식으로 잡힘). 내부 `PROJECT_ROOT` 계산도
+  이동한 깊이에 맞게 `.parent`로 수정.
+- 파이프라인 진입점 스크립트 전부(`1_convert/`~`9_eval/`, `model_lib/tools/
+  visualize_results.py`, `model_lib/datasets/segment_dataset.py`,
+  `model_lib/utils/hi_schema.py`, `docs/figures/_style.py`/`fig1`/`fig2` 등
+  22개 파일)에서 "저장소 루트를 계산해 sys.path에 넣는" 부트스트랩 코드를
+  제거. `hi_correlation.py`에 중복으로 남아있던 완전히 동일한
+  `sys.path.insert` 블록 2개도 이 김에 정리.
+- **건드리지 않은 것**: 같은 폴더가 아닌 다른 스크립트 폴더의 형제 스크립트를
+  가져다 쓰는 패턴(예: `interaction.py`가 `6_synergy/synergy.py`를,
+  `test.py`가 `8_train/train.py`를, `profile_hi_timing.py`가 부모 폴더의
+  `hi_correlation.py`를 import하는 것)은 그대로 유지 — 이 폴더들은 의도적으로
+  패키지가 아니라 "직접 실행하는 스크립트" 취급이라 패키지화 대상이 아니고,
+  이런 사이트 지정 `sys.path.insert`는 여전히 필요하다.
+- **검증**: 22개 파일 전부 `py_compile` 통과. `pip install -e . --no-deps`로
+  실제 설치 후, 저장소와 전혀 무관한 디렉터리(`/tmp`)에서 `data_directories`/
+  `parameters`/`common.scenario`/`models.hard_concrete`/`datasets.segment_dataset`/
+  `training.scr_loss`/`evaluation.scr_evaluator`/`utils.hi_schema` import가 전부
+  성공하는 것을 직접 실행해 확인. 8개 핵심 스크립트(`convert_unified`/
+  `preprocess`/`check_integrity`/`interaction`/`synergy`/`kernel`/`train`/`test`)
+  전부 `/tmp`를 cwd로 두고 `--help`를 실행해도 정상 종료함을 확인(전부 exit 0)
+  — 더는 어디서 실행하든 저장소 루트 sys.path 하드코딩에 의존하지 않는다는 뜻.
+  일곱 번째 전체 재학습(`p1v4_scen_lag1zone_redunfix_verify7_seed0`)도 원본과
+  동일 조건으로 시작해 12에폭까지 정상 진행 중이었으나(설정 로그 완전 일치),
+  사용자 요청으로 완료 전에 중단 — import 경로만 바뀌고 `segment_dataset.py`/
+  `hi_schema.py`의 실제 계산 로직은 한 줄도 안 건드렸으므로 위험은 낮다고 판단,
+  MD5 재검증은 다음 기회로 미룸(아래 표에 미완료로 표기).
+- `.gitignore`에 `*.egg-info/`/`build/` 추가(editable install이 만드는 빌드
+  메타데이터, 커밋 대상 아님).
+
+### 2026-09-28 — `hi_correlation.py`의 STAT/DIFF/LFP/MORPH_KEYS·THETA_FLAT 중복 제거
+
+사용자 질문("117~300행은 parameters.py로 보내도 되지 않아?")을 계기로 확인 —
+`parameters.py`(실행 파라미터 전용)로 보낼 내용은 아니었지만, 대신 진짜 중복
+2건을 발견했다: 위 editable install 덕분에 이제서야 발견/해결 가능해진 것들이다.
+
+- **`STAT_KEYS`/`DIFF_KEYS`/`LFP_KEYS`/`MORPH_KEYS`**: `model_lib/utils/hi_schema.py`
+  ("66-HI schema" 단일 소스 자처)에 있는 것과 66개 키 전부 완전히 동일한 로컬
+  복사본이 `hi_correlation.py`에도 있었다 — 예전엔 Step4가 `model_lib`를 import할
+  경로가 없어서 어쩔 수 없이 복사했던 것으로 추정. `from utils.hi_schema import
+  STAT_KEYS, DIFF_KEYS, LFP_KEYS, MORPH_KEYS`로 교체(로컬 정의 4개 삭제, 옆의
+  `_STAT_LABELS`/`_DIFF_LABELS`/`_LFP_LABELS`/`_MORPH_LABELS`는 hi_schema.py에
+  없는 플롯 전용 레이블이라 그대로 둠). `hi_segment_viz.py`/`tools/
+  profile_hi_timing.py`/`tools/seg_corr_analysis.py`가 `from hi_correlation
+  import STAT_KEYS, ...`로 재수출을 받아 쓰고 있어 이 셋의 import 문은 무수정으로
+  계속 동작(hi_correlation 모듈 자신이 이제 import로 이 이름들을 갖고 있으므로).
+- **`THETA_FLAT = 0.25`**: `hi_correlation.py`는 정의만 해두고 실제로는 어디서도
+  안 읽고 있었다(정작 쓰는 곳은 `hi_compute.py`/`common/scenario/_curves.py`).
+  4곳에 흩어진 중복 중 하나였고(나머지 `_curves.py`/`tools/plateau_soc_stats.py`는
+  이번 정리 범위 밖 — `tools/profile_hi_timing.py`는 값 자체가 0.05로 이미
+  어긋나 있어 더더욱 손대지 않음, 별도 확인 필요) — 안 쓰는 이 정의만 삭제,
+  외부 재수출 소비자 없음을 grep으로 확인 후 진행.
+- **`DIS_SEGS`/`CHG_SEGS`의 SoC 경계값·레이블은 그대로 유지**: 얼핏 죽은 것처럼
+  보였지만(`hi_correlation.py` 자신은 `for _, _, _seg, _ in ALL_SEGS`로 앞 2개
+  버림) `tools/profile_hi_timing.py`가 `for q_lo_f, q_hi_f, seg, _ in DIS_SEGS`로
+  경계값 자체를 실제 사용 중임을 확인 — 건드리지 않음(사용자 승인 범위 밖이기도
+  했음).
+- **검증**: `py_compile` 통과. 실제 import로 `hi_correlation.STAT_KEYS is
+  utils.hi_schema.STAT_KEYS`(object identity)까지 확인, `ALL_HI_KEYS` 개수
+  15+6×66 그대로, `THETA_FLAT` 속성 완전히 사라짐, 외부 3개 소비자의 `from
+  hi_correlation import STAT_KEYS, ...` 재수출 import도 무수정으로 정상 동작
+  확인. 순수 상수 중복 제거(값 변경 없음, object identity만 바뀜)라 재학습
+  검증은 불필요하다고 판단.
+
+### 2026-09-28 — 완전 사이클 Global HI(G01~G15) 계산 제거
+
+사용자 요청("완전 사이클 HI는 구하지 않도록 수정하고 싶어"). `_extract_one_cell`이
+사이클마다 세그먼트와 무관하게 한 번씩 계산하던 15개 "Global HI"(q_dis,
+energy_dis, ica_peak1_*, dva_valley_*, r_trans_est, ce, cv_q_frac/time_frac,
+chg_ica_peak1_h 등, `_build_flat_correlation_df`가 "학습엔 안 쓰임, 진단/시각화
+전용"이라고 이미 명시하고 있던 값들)의 계산 자체를 없앴다.
+
+- **`_extract_one_cell` 안 계산 로직 삭제**: 방전측(G01-03/05-10, `_global_ica`/
+  `_global_dva` 호출) + 충전측(G04/11-14, `_r_dc_from_chg`/`_global_ica` 호출)
+  전부 삭제. `grow` 딕셔너리는 이제 `{dataset, cell_id, cycle, capacity_Ah}`
+  4개 필드만 담는다.
+- **⚠️ "cycle" pkl 파일 자체는 안 없앴다** — 처음엔 완전 삭제를 검토했으나,
+  `model_lib/datasets/segment_dataset.py`의 `load_dataset_native_seg()`가 이
+  파일에서 `cycle`→`capacity_Ah` 매핑을 실제로 읽어, native seg pkl의
+  `capacity_Ah`(세그먼트 부분 충방전량이라 SOH 타깃이 될 수 없음)를 사이클
+  전체 총 용량으로 교체하는 데 쓰고 있음을 확인했다 — 이 파일을 없애면 학습
+  타깃 자체가 깨진다. 그래서 cycle pkl은 유지하되 내용만 4개 필수 컬럼으로
+  축소했다.
+- **`GLOBAL_HI_KEYS`/`_GLOBAL_LABELS` 상수, `HI_GROUPS["Global"]`, `_HI_META`/
+  `_build_hi_groups()`의 Global 루프 삭제**. `plot_correlation()`의 그림
+  레이아웃(GridSpec)에서 Global 히트맵 행 자체를 제거하고 세그먼트 행 인덱스를
+  한 칸씩 당겼다(`n_segs+2`→`n_segs+1`행, 마지막 산점도 행 인덱스도 같이 보정).
+- **`hi_segment_viz.py`의 `plot_hi_trend()`(Global HI 15종 열화 추이 플롯) 삭제**
+  — 데이터 소스 자체가 없어져 항상 빈 그림만 그리게 될 함수라 두 호출부(자체
+  `main()`, `hi_correlation.py`가 `exec_module`로 동적 호출하는 지점) 모두
+  같이 정리.
+- **건드리지 않은 것**: `_global_ica`/`_global_dva`/`_r_dc_from_chg` 함수 정의는
+  삭제하지 않았다 — `4_hi_analysis/tools/profile_hi_timing.py`가 이 셋을
+  `from hi_correlation import ...`로 가져다 자체 타이밍 프로파일링에 쓰고
+  있어(hi_correlation.py 안에서는 이제 안 쓰이지만) 그대로 유지.
+- **검증**: `py_compile` 통과. 실제 MIT `b1c0` 셀을 `_extract_one_cell()`
+  직접 호출로 재추출해 기존 캐시와 비교 — `cycle_rows`(1,820행)는 의도한 대로
+  `dataset/cell_id/cycle/capacity_Ah` 4개 컬럼만 남음, `seg_rows`는 21,828건
+  (기존 캐시와 행 수 완전 일치, `raw_v`/`raw_i`/`raw_t` 이미 제거된 이전
+  라운드 반영해 컬럼 수만 79→76) + 샘플 `stat_*` 5개 컬럼 값 전부 완전 일치 —
+  세그먼트 HI 계산 로직은 이번 변경으로 전혀 안 건드렸다는 것을 실측으로 확인.
+
+### 2026-09-29 — `profile_hi_timing.py`의 Global HI 타이밍 + `_global_ica`/`_global_dva`/`_r_dc_from_chg` 제거
+
+사용자 질문("profile_hi_timing.py에도 Global HI 로직이 남아있는 것 같은데, 제거하면
+이 3개 함수도 이제 안 쓰게 되는 거 아니야?") — 맞았다. 위 2026-09-28 라운드에서
+`_extract_one_cell`의 Global HI 계산은 지웠지만, `_global_ica`/`_global_dva`/
+`_r_dc_from_chg` 함수 정의 자체는 `profile_hi_timing.py`가 자기 타이밍 프로파일링에
+가져다 쓰고 있어서 남겨뒀었다. 이번에 그 소비처까지 마저 정리.
+
+- **`profile_hi_timing.py`**: `_time_global()`(Global HI 블록별 소요시간 측정
+  함수) 전체 삭제 + 호출부("Global HI 타이밍" 레코드 추가 블록) 삭제. 단
+  충전 구간(`chg`/`vc`/`ic`/`dtc`) 계산 자체는 유지 — 이후 `CHG_SEGS` 세그먼트
+  타이밍 루프가 그대로 쓰기 때문(완전 사이클 HI가 아니라 세그먼트 추출
+  전제조건). `CAT_COLORS`의 `"Global"` 항목, `from hi_correlation import (...)`
+  의 `_global_dva`/`_global_ica`/`_r_dc_from_chg` 삭제. 호출되는 곳이 아예
+  없던 죽은 함수 `_cat()`(concept→category 분류, `"Global"` 폴백이 존재
+  이유였음)도 같이 삭제.
+- **`hi_correlation.py`**: 이제 `profile_hi_timing.py`가 안 가져다 쓰므로
+  `_global_ica`/`_global_dva`/`_r_dc_from_chg` 정의 자체를 삭제(전수 grep으로
+  이 3개를 참조하는 곳이 정의 외엔 전혀 없음을 확인). 그 결과 이 파일에서만
+  쓰던 `from scipy.signal import savgol_filter`도 같이 삭제. `_peak_fwhm_asym`
+  (hi_compute.py에서 import)은 이 파일 자신은 이제 안 쓰지만
+  `profile_hi_timing.py`가 `from hi_correlation import _peak_fwhm_asym`로
+  재수출받아 쓰고 있어 그대로 유지 — 이유를 주석으로 남김.
+- **검증**: `py_compile` 전체 통과. 실제 import로 `hi_correlation`/
+  `profile_hi_timing`에 삭제 대상 이름이 전부 없어졌음을 `hasattr()`로 확인,
+  `CAT_COLORS`에 `"Global"` 키 없음 확인. MIT `b1c0` 셀 재추출로 `seg_rows`
+  21,828건/`cycle_rows` 1,820건 그대로임을 재확인(이번 변경은 죽은 함수
+  제거뿐이라 추출 결과에 영향 없어야 정상 — 실측으로 확인).
+
+### 2026-09-29 — `_extract_one_cell(args)`의 죽은 인자 분기 + 불필요한 JSON 왕복 제거
+
+사용자 질문 2건: (1) "파라미터는 parameters.py에서만 수집하기로 하지 않았냐 —
+`_extract_one_cell`의 `else` 분기가 `"qfrac"`/`"{}"`를 하드코딩하고 있다", (2) "왜
+`_axis_cfg`를 JSON으로 인코딩해서 넘기냐".
+
+- **(1) 확인 결과**: `_extract_one_cell`을 실제로 부르는 곳은 `load_all()` 안
+  2곳(직렬 루프, `ProcessPoolExecutor.submit`)뿐이고 둘 다 항상 4-tuple 또는
+  5-tuple만 넘긴다 — 3-tuple/비-tuple 분기(`"qfrac"`/`"{}"` 하드코딩 포함)는
+  repo 전체 grep으로 호출자가 전무함을 확인. 게다가 `"qfrac"`은 이미
+  `common/scenario/__init__.py`의 `REGISTRY`에서 삭제된 축이라(현재
+  `q_frac_ref`만 등록) 저 분기가 실행됐다면 `ValueError: Unknown scenario
+  axis 'qfrac'`로 즉시 죽었을 것 — "기본값"이 아니라 죽어서 검증조차 안 된
+  방어 코드였다. 두 분기 삭제, 실제 쓰이는 4/5-tuple 처리만 남김.
+- **(2) 확인 결과**: `load_all()`이 `axis_cfg`(dict)를 `json.dumps()`로 문자열화해
+  `ProcessPoolExecutor` 워커에 넘기고, 각 워커가 `_extract_one_cell` 안에서
+  다시 `json.loads()`로 되돌리고 있었다 — 같은 튜플에 `_progress_q`
+  (`multiprocessing.Manager().Queue()` 프록시, dict보다 훨씬 복잡한 객체)는
+  아무 변환 없이 그대로 넘어가는 걸로 보아 `ProcessPoolExecutor`가 pickle로
+  뭐든 그대로 직렬화한다는 게 이미 증명돼 있었다 — `axis_cfg`만 JSON으로
+  왕복시킬 기술적 이유가 없었다(레거시 흔적으로 추정). `load_all()`의 두
+  호출부와 `_extract_one_cell` 양쪽에서 `json.dumps`/`json.loads` 제거,
+  dict를 그대로 전달하도록 변경.
+- **검증**: `py_compile` 통과. MIT `b1c0` 셀로 새 4-tuple/5-tuple 시그니처
+  둘 다 직접 호출해 재추출 — `seg_rows` 21,828건/`cycle_rows` 1,820건 그대로
+  (기존 검증과 완전 동일), 두 경로(직렬/병렬 시그니처) 모두 정상 동작 확인.
+
+### 2026-09-29 — `run_pipeline.py`의 CLI 파라미터 전량 제거(스텝 선택만 남김)
+
+사용자 지적: "`run_pipeline.py`가 `parser.add_argument`로 실험 파라미터를 CLI
+옵션으로 받는 건, 어차피 이유가 커맨드라인 오버라이드를 위해서였는데, 이제
+`run_pipeline.py`의 커맨드라인은 스텝 선택(`from_step`/`--to-step`)만
+유일하게 관리하도록 하자" — `parameters.py`를 "단일 소스"로 삼기로 한
+원칙(§ 진행 이력 다수)을 오케스트레이터 자신에게도 적용한 것.
+
+- **문제**: `run_pipeline.py`는 `--workers`/`--force-extract`/
+  `--kernel-features-pkl`/`--interaction-json`/`--combined-redundancy-json`/
+  `--max-group-size`/`--synergy-redundancy-threshold`/`--max-epochs`/
+  `--patience`/`--batch-size`/`--hi-cost-weighted-l0`/`--n-hi`/`--p1-tag`/
+  `--rep-cells`/`--axis-config`/`--data-dir`/`--seg-data-dir`/
+  `--lambda-l0-override`/`--seed`/`--split-seed` 19개 CLI 플래그를 갖고
+  있었는데, 전부 기본값이 `parameters.py`의 `ACTIVE_*` 값이라 이미 "`parameters.py`가
+  단일 소스"였다 — CLI 오버라이드 경로는 `parameters.py`를 우회해 값을 바꿀
+  수 있는 **또 하나의 숨은 입력 경로**였을 뿐, 실제로 쓰이지도 않았다.
+  각 하위 스텝 스크립트(`train.py`, `interaction.py`, `synergy.py`,
+  `kernel.py`, `test.py` 등) 자신도 이미 동일하게 `parameters.py` 기본값을
+  갖는 자기 CLI를 유지하므로, 한 번만 다르게 돌려보고 싶으면 그 스크립트를
+  직접 호출하면 되고 오케스트레이터 레이어에 중복 CLI가 있을 이유가 없었다.
+- **수정**: `main()`의 `argparse.ArgumentParser`에서 `from_step`(위치 인자)과
+  `--to-step`만 남기고 나머지 19개 `add_argument` 호출을 전부 삭제, 그
+  자리를 `parameters.py`에서 직접 읽는 지역 변수 19개(`workers`,
+  `force_extract`, `kernel_features_pkl`, `interaction_json`,
+  `combined_redundancy_json`, `max_group_size`,
+  `synergy_redundancy_threshold`, `p1_max_epochs`, `p1_patience`,
+  `p1_batch_size`, `hi_cost_weighted_l0`, `n_hi`, `p1_tag`, `rep_cells`,
+  `axis_config`, `p1_data_dir`, `p1_seg_data_dir`, `lambda_l0_override`,
+  `seed`, `split_seed`)로 대체. `main()` 본문 전체(스텝별 인자 조립 루프,
+  미리보기 `print` 블록)에서 `args.X` 참조를 전부 대응하는 지역 변수로
+  치환(`args.from_step`/`args.to_step`만 예외로 유지 — 유일하게 남은 실제
+  CLI). 시그니처가 `args` 전체를 받던 `_resolve_interaction_path()`/
+  `_resolve_kernel_paths()` 두 헬퍼도 필요한 값만 명시적으로 받도록
+  변경(`(interaction_json, interaction_out, default_json)` /
+  `(kernel_features_pkl, combined_redundancy_json, kernel_pkl_out,
+  kernel_redundancy_out, default_pkl)`), 두 헬퍼의 호출부 4곳(미리보기 1회 +
+  Step 8 블록 내 재해석 2회 세트)도 새 시그니처에 맞게 수정.
+  덤으로 발견한 죽은 코드: `axis_config`가 이제 항상
+  `json.dumps(P.ACTIVE_AXIS_CONFIG)`로 고정되어(CLI로 바꿀 방법이 없으므로)
+  `_non_canon = axis_config != json.dumps(P.ACTIVE_AXIS_CONFIG)`가 항상
+  `False`가 되는 캐논-축 불일치 경고 블록도 함께 삭제. 모듈 docstring에
+  2026-09-29 항목을 추가해 변경 배경과 "실험값을 바꾸려면 이제
+  `parameters.py`를 고칠 것, 1회성 오버라이드는 해당 스텝 스크립트를 직접
+  실행할 것"이라는 새 사용 원칙을 명시하고, "사용:" 예시 블록에서
+  삭제된 플래그를 쓰던 예시들을 제거.
+- **검증**: `py_compile` 통과. `python run_pipeline.py --help` 출력이
+  `[-h] [--to-step TO_STEP] [FROM_STEP]`만 노출함을 확인(19개 옵션 전부
+  제거됨). 실제 서브프로세스 디스패치 동작 확인을 위해
+  `python run_pipeline.py 3 --to-step 3`(Step 3=무결성 검사, 빠르고
+  부작용 없음)을 실제 실행 — 4개 데이터셋(MIT/HUST/TJU/CALCE) 전부 정상
+  처리, ERROR/WARN 0건, 미리보기 출력의 `axis-config` 값이
+  `parameters.py: ACTIVE_AXIS_CONFIG`와 일치, 종료 코드 0으로 정상 완료.
+
+### 2026-09-29 — `hi_correlation.py`의 CLI 파라미터 전량 제거(parameters.py 직접 참조)
+
+`run_pipeline.py` CLI 정리(바로 위 항목) 직후 사용자 질문: "hi_correlation.py의
+main()도 parameters.py를 직접 import하면 되니까 parser는 전부 사라져도 되는거
+아니야?" — 처음엔 이 스크립트의 `--n1`/`--n2`/`--axis-config`/`--force` 등 단축
+CLI가 "PowerShell JSON 인용 우회용" ad-hoc 실험 오버라이드(run_pipeline.py의
+경우와 달리 실제로 쓰이는 기능)라 다르다고 답했으나, 후속 논의에서 사용자가
+그 오버라이드 자체를 CLI가 아니라 "매 실험 전 `parameters.py`를 정규식/AST로
+패치 → 실행 → 원복"하는 드라이버 스크립트로 대체하겠다는 워크플로를 확정 —
+이 전제하에서는 hi_correlation.py의 CLI도 run_pipeline.py와 동일하게 전량 제거
+가능해졌다(런타임 프로세스 경계상 "파일 수정 없이 메모리로만 오버라이드"는
+subprocess 기반 구조에서 불가능함을 먼저 확인 — 환경변수 방식도 검토했으나
+사용자가 최종적으로 파일 패치 방식을 선택).
+
+- **수정**: `main()`의 `argparse.ArgumentParser`와 19개 `add_argument`
+  (`--workers`, `--force`, `--dataset-group`, `--seg-axis`, `--axis-config`,
+  `--n1`/`--n2`/`--n-samples`/`--n2-start`/`--n2-end`/`--n2-step`/`--n2-seed`/
+  `--ref-lag`/`--noise-amp`/`--noise-mode`/`--noise-period`/`--min-pts`/
+  `--calibration-period`/`--calibration-mode`/`--calibration-jitter`/
+  `--offset-amp`/`--exclude-cv`/`--skip-shape`) 전체 삭제, `parameters.py`
+  (`ACTIVE_WORKERS`, `ACTIVE_FORCE_EXTRACT`, `FIXED_DATASET_GROUP`,
+  `FIXED_SEG_AXIS`, `ACTIVE_AXIS_CONFIG`, `FIXED_EXCLUDE_CV`,
+  `FIXED_SKIP_SHAPE` — 전부 기존에 "구 --옵션명" 주석과 함께 이미 준비돼 있던
+  상수들)에서 직접 읽는 지역 변수로 대체. 덤으로 `--axis-config` JSON
+  문자열 왕복(`json.dumps`/`json.loads`)과 "단축 인자 patch" 병합 로직도
+  전부 사라짐 — `ACTIVE_AXIS_CONFIG` dict를 그대로 사용. `_print_run_config()`
+  시그니처를 `args` 객체 대신 `(axis, axis_cfg, workers, force, exclude_cv,
+  skip_shape)`로 변경. 모듈 docstring/일부 주석(`_ds_dir`, CC→CV 검출 import,
+  `_extract_one_cell` 내부)에서 삭제된 CLI 플래그를 가리키던 문구를 대응
+  parameters.py 변수명으로 정리. 이제 안 쓰는 `import argparse` 제거.
+- **`run_pipeline.py` 동반 수정**: `hi_correlation.py`가 CLI를 전혀 안 받게
+  되어, Step 4 두 엔트리 중 `hi_correlation.py` 쪽 `use_workers`를 `True`→
+  `False`로 바꾸고, `--seg-axis`/`--axis-config`/`--force` 주입 조건에서
+  `script.endswith("hi_segment_viz.py")`로 분기해 `hi_correlation.py`는
+  제외(같은 Step 4의 `hi_segment_viz.py`는 아직 자체 CLI를 유지하므로 그대로
+  유지).
+- **검증**: `py_compile` 통과. `python run_pipeline.py 4 --to-step 4`를
+  15초 제한으로 실행해 디스패치되는 실제 커맨드를 확인 — `$ ...python.exe
+  .../hi_correlation.py`로 인자가 전혀 없음(기존엔 `--seg-axis`/
+  `--axis-config`/`--force`/`--workers`가 붙었음). 전체 HI 추출은 원래도
+  수 분 걸리는 무거운 작업이라 끝까지 기다리는 대신, Step4 전용 검증
+  관행대로 MIT `b1c0` 셀을 `_extract_one_cell()`로 직접 호출(axis_cfg는
+  `P.ACTIVE_AXIS_CONFIG`를 dict 그대로 전달) — `seg_rows` 21,828건/
+  `cycle_rows` 1,820건, 기존 검증과 완전 동일.
+
+### 2026-09-29 — `DEFAULT_SEG_AXIS`/`DEFAULT_AXIS_CONFIG`/`DEFAULT_DATA_DIR`/`DEFAULT_SEG_DATA_DIR` 4중 재선언 제거
+
+코드베이스 전체 중복 조사(Explore 에이전트) 결과 중 "파라미터성" 항목 — 사용자
+지적대로 이건 함수/로직이 아니라 순수 값 재선언이라 parameters.py 참조로
+바로 고칠 수 있는 항목이었다.
+
+- **문제**: `5_interaction/interaction.py`/`6_synergy/synergy.py`/
+  `7_kernel/kernel.py`/`8_train/train.py` 4개 파일이 각자
+  `DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS`, `DEFAULT_AXIS_CONFIG =
+  json.dumps(P.ACTIVE_AXIS_CONFIG)`, `DEFAULT_DATA_DIR =
+  P.FIXED_CANONICAL_DATA_DIR`, `DEFAULT_SEG_DATA_DIR =
+  P.FIXED_CANONICAL_SEG_DATA_DIR` 4줄을 바이트 단위로 동일하게 재선언하고
+  있었다 — 이미 parameters.py가 단일 소스인 값을 스크립트마다 지역 별칭으로
+  다시 감싼 것뿐이라, 값 자체의 불일치 위험은 없었지만 4곳에 똑같은 코드가
+  중복돼 가독성만 떨어뜨리고 있었다.
+- **수정**: 4개 파일 전부에서 이 4줄 블록을 삭제하고, 그 이름을 쓰던 자리
+  (interaction.py/synergy.py/kernel.py의 argparse `default=`, train.py의
+  argparse `default=`/help 텍스트 4곳 + `main()`의 None-폴백 로직 4곳)를
+  전부 `P.FIXED_SEG_AXIS`/`json.dumps(P.ACTIVE_AXIS_CONFIG)`/
+  `P.FIXED_CANONICAL_DATA_DIR`/`P.FIXED_CANONICAL_SEG_DATA_DIR` 직접 참조로
+  치환. train.py의 `axis_cfg` 폴백은 `json.loads(DEFAULT_AXIS_CONFIG)`
+  대신 `dict(P.ACTIVE_AXIS_CONFIG)`로 바꿔 불필요한 JSON 왕복도 하나 더
+  제거(hi_correlation.py 정리 때와 동일한 이유).
+- **검증**: `py_compile` 4개 파일 전부 통과. `--help` 4개 전부 exit 0 확인.
+  train.py는 실제 `_parse_args()` 호출 + 폴백 로직을 직접 실행해
+  `seg_axis == "q_frac_ref"`, `axis_cfg == P.ACTIVE_AXIS_CONFIG`,
+  `data_dir`가 정식 캐논 경로로 해석됨을 확인 — 기존 동작과 동일.
+
+**남은 항목**: 같은 조사에서 나온 나머지 중복(축 설정→데이터스펙 해석 로직,
+tqdm 폴백 shim 재구현 — 이미 `model_lib/utils/tqdm_utils.py`에 있음에도
+안 쓰고 있었음, `--axis-config` JSON 파싱 try/except, JSON 저장 한 줄,
+퍼센트 포맷터)은 값이 아니라 함수/로직이라 parameters.py가 아닌 별도
+utils 모듈로 빼야 함 — 아직 미착수. 별도로 진행한 행렬/벡터/텐서 연산
+중복 조사에서는 `4_hi_analysis/hi_compute.py`/`common/scenario/_curves.py`/
+`4_hi_analysis/tools/plateau_soc_stats.py` 3곳에 사실상 동일한 DVA/ICA
+곡선 생성 로직(V-Q binning, Savitzky-Golay, dV/dQ)이 있는데 **최소 샘플
+가드값이 다르다**(hi_compute.py는 `n<6`/`len(vs)<6`, `_curves.py`는 `n<8`/
+`len(vs)<8`) — 경계 길이 세그먼트에서 두 "단일 소스"가 서로 다른 결과를
+낼 수 있는 잠재 버그로, 아직 미수정. `_peak_fwhm_asym`도 피크가 배열
+경계에 걸릴 때 hi_compute.py는 `(nan, nan)`을 반환하는데 `_curves.py`는
+"2배 편측 추정값"을 반환해 동작이 다르다. `synergy.py`/`kernel.py`의
+`_residualize`/partial-corr 헬퍼도 바이트 단위 중복(kernel.py 주석에
+"중복 재구현" 명시, 의도적).
+
+### 2026-09-29 — `hi_correlation.py`의 시각화 함수를 `4_hi_analysis/plot.py`로 분리
+
+사용자가 IDE에서 994~1243행(히트맵/산점도/대표 셀 추이 플롯 + `_print_run_config`)을
+선택하고 "hi_correlation이 아니라 plot.py로 옮겨야 하는거 아닌가"라고 물어 진행.
+`_print_run_config`는 matplotlib을 전혀 안 쓰는 터미널 요약 출력이라 "plot"이라는
+이름에 안 맞아 이동 대상에서 제외하고, 실제 matplotlib 렌더링 함수 3개
+(`_draw_heatmap`/`plot_correlation`/`_plot_sample_hi`)만 옮겼다.
+
+- **순환 import 회피가 핵심 설계 포인트**: `HI_GROUPS`/`HI_LABELS`/`HI_GROUP_TAG`는
+  `main()`이 축에 따라 런타임에 재빌드하는 전역(`_build_hi_groups()` 호출 후
+  `global` 재할당, 1275행 부근)이다. `plot.py`가 `from hi_correlation import
+  HI_GROUPS`처럼 값을 직접 import하면, 그 바인딩은 plot.py가 처음 import되는
+  시점(= hi_correlation.py가 `from plot import ...`를 실행하는 시점, 즉 main()의
+  재빌드보다 먼저)의 스냅샷이라 재빌드 이후에도 갱신되지 않는 낡은 값을 계속 들고
+  있게 된다. 이를 피하려고 `_draw_heatmap`/`plot_correlation`/`_plot_sample_hi`
+  전부 이 세 값을 모듈 전역으로 import하지 않고 매 호출 시 명시적 인자로 받도록
+  시그니처를 바꿨다(`plot_correlation(corr_df, df, out_path, hi_groups, hi_labels,
+  hi_group_tag, n_top=4, datasets=None)`, `_plot_sample_hi(df, corr_df, out_dir,
+  hi_labels, hi_group_tag, datasets=None)`). 결과적으로 `plot.py`는
+  `hi_correlation.py`를 전혀 import하지 않는 단방향 의존만 남았다
+  (`hi_correlation.py → plot.py`).
+- **함께 옮긴 것**: `SAMPLE_CELL_IDS`/`DATASET_CMAPS`/`DATASET_COLORS`(대표 셀
+  ID·데이터셋별 cmap/색상) — hi_correlation.py 안에서 이 세 상수는 옮겨진
+  플롯 함수 밖에서 전혀 안 쓰였음을 grep으로 확인 후 plot.py로 완전히 이전(값
+  중복 없음). `matplotlib`/`gridspec`/`pyplot` import와 Agg 백엔드 설정도
+  플롯 함수 밖에서 안 쓰여서 hi_correlation.py에서 제거하고 plot.py로 이전.
+  `STAT_KEYS`/`DIFF_KEYS`/`LFP_KEYS`/`MORPH_KEYS`는 재빌드 대상이 아닌 고정
+  값(`utils.hi_schema`가 단일 소스)이라 plot.py가 직접 import(인자로 안 받음).
+- **`main()` 호출부 수정**: `plot_correlation(corr, df, out, n_top=4,
+  datasets=_ds_names)` → `plot_correlation(corr, df, out, HI_GROUPS, HI_LABELS,
+  HI_GROUP_TAG, n_top=4, datasets=_ds_names)`, `_plot_sample_hi(df, corr,
+  out_dir, datasets=_ds_names)` → `_plot_sample_hi(df, corr, out_dir, HI_LABELS,
+  HI_GROUP_TAG, datasets=_ds_names)`.
+- **검증**: `py_compile` 둘 다 통과. `import hi_correlation`/`import plot` 둘 다
+  순환 없이 정상 로드되고 `plot.plot_correlation is hi_correlation.plot_correlation`
+  확인(재-export가 실제로 같은 객체). MIT 셀 2개를 `_extract_one_cell()`로 직접
+  추출 → `_build_flat_correlation_df` → `compute_correlations`(corr shape
+  (396, 1), 66 HI × 6세그먼트와 일치) → `plot_correlation()`/`_plot_sample_hi()`를
+  실제 데이터로 끝까지 실행 — `hi_correlation.png`(1.4MB)/`sample_hi_trend.png`
+  (200KB) 둘 다 정상 생성 확인(빈 파일이나 크래시 없음).
+
+### 2026-09-29 — `_extract_one_cell()` 5개 헬퍼로 분리(방전/충전 내부 중복 통합)
+
+사용자가 "함수 단위로 동작을 나눠놓고 함수명으로 로직을 추측할 수 있어야 하는 거
+아니냐"고 물어, hi_correlation.py 전체를 훑어 평가한 결과 `_extract_one_cell`
+하나만 231줄짜리 단일 블록으로 남아있었다(인자 해석/scen 룩업/pkl 로드/방전 HI
+추출/충전 HI 추출/배치 거리계산 5가지 관심사가 섞여 있었고, 방전·충전 HI 추출
+블록은 phase만 다를 뿐 거의 같은 코드가 두 번 복사돼 있었음).
+
+- **분리한 헬퍼 5개**(전부 `_extract_one_cell` 바로 앞에 배치, 이 함수는 이제
+  이들을 순서대로 호출하는 얇은 오케스트레이터):
+  - `_build_scen_lookup(spec_names)` — 세그먼트 이름→scen 코드 룩업 테이블
+  - `_load_cell_pkl(path)` — pkl 로드+검증, 실패 시 `None`
+  - `_extract_segment_rows(rec_iter, spec_names, dataset, cell_id, cyc, cap,
+    scen_lookup, curve_buf)` — SegmentRecord→HI 행 변환. **방전과 충전 양쪽에서
+    동일하게 호출**해 기존에 두 번 복사돼 있던 코드를 하나로 통합.
+  - `_prepare_charge_arrays(chg_grp, cap, exclude_cv)` — 충전 배열 준비+gap
+    보정+완전성 게이트, 스킵 대상이면 `None`. 원래 `if q_tc > 0.05 and not
+    _chg_incomplete:` 밖에 `if q_tc >= 0.05:`가 한 번 더 있었는데(첫 조건에
+    이미 포함되는 항상-참 중복 체크 — Global HI 제거 리팩토링 때 남은 흔적으로
+    추정) 단일 게이트(`if q_tc <= 0.05 or q_tc < cap * 0.60: return None`)로
+    정리. 의미상 동치라 동작 변화는 없음.
+  - `_apply_batched_morph_distances(curve_buf)` — 루프 종료 후 배치 DTW/Fréchet,
+    결과를 행(dict)에 in-place로 써넣음.
+- **`_extract_one_cell`은 이제** 인자 언패킹 → segmenter/scen_lookup 준비 →
+  pkl 로드 → 사이클 루프(방전 게이트 통과 시 `_extract_segment_rows` 호출,
+  충전은 `_prepare_charge_arrays`가 `None`이 아니면 같은 함수 재호출) →
+  `_apply_batched_morph_distances` 순서로만 읽힌다 — 각 단계가 함수명으로
+  바로 식별됨.
+- **검증**: `py_compile` 통과. MIT `b1c0` 셀을 4-tuple/5-tuple(병렬 경로,
+  `multiprocessing.Manager().Queue()` 포함) 양쪽 시그니처로 직접 호출 —
+  둘 다 `seg_rows` 21,828건/`cycle_rows` 1,820건으로 기존 검증값과 완전
+  동일. 두 호출 결과의 행 dict 키 집합도 일치, 샘플 행(`seg_name='dis_hi'`,
+  `cycle=2`, `capacity_Ah=1.0706892`)도 정상 값.

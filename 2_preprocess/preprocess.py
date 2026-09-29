@@ -51,10 +51,8 @@ from tqdm.auto import tqdm
 PROJECT_ROOT     = Path(__file__).resolve().parent.parent
 _OUTPUTS_ROOT    = Path(__file__).resolve().parent / "outputs"
 OUTPUT_DIR       = _OUTPUTS_ROOT / date.today().strftime("%m%d")
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-from data_directories import DATA_4_HI_ROOT, EXTERNAL_DATA_ROOT  # noqa: E402
-import parameters as P  # noqa: E402 — 실행 환경/데이터셋 선택 단일 소스
+from data_directories import DATA_4_HI_ROOT, EXTERNAL_DATA_ROOT  # pip install -e . 로 import 가능
+import parameters as P  # 실행 환경/데이터셋 선택 단일 소스
 POSTPROCESS_ROOT = DATA_4_HI_ROOT / "clean"
 
 # _1_data_unified 원본(대용량)이 로컬에 없을 수 있음 — 이 경우 외부 드라이브로 폴백

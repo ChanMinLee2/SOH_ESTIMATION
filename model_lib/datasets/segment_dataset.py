@@ -15,12 +15,12 @@ Native seg format (future):
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Sequence
 
+# data_directories/parameters/common/utils 등은 pip install -e .로 어디서든 바로
+# import된다(pyproject.toml 참고) — sys.path 조작 불필요.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
 
 import numpy as np
 import pandas as pd
@@ -33,10 +33,6 @@ from utils.hi_schema import (
     EXCLUDE_STAT_LEAK, EXCLUDE_DQDV_LEAK,
     RAW_N, RAW_CH,
 )
-
-_proj_root = Path(__file__).resolve().parent.parent.parent
-if str(_proj_root) not in sys.path:
-    sys.path.insert(0, str(_proj_root))
 from common.scenario.base import ScenarioSpec
 
 _DEFAULT_SPEC: ScenarioSpec = spec_from_qfrac()

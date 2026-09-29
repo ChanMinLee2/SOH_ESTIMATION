@@ -31,8 +31,7 @@ from hi_correlation import (
     DIFF_KEYS, LFP_KEYS, MORPH_KEYS, STAT_KEYS,
     HI_LABELS,
     _add_phase,
-    _global_dva, _global_ica,
-    _peak_fwhm_asym, _r_dc_from_chg,
+    _peak_fwhm_asym,
     _seg_diff, _seg_lfp, _seg_morph_curves, _seg_stat,
     HUST_DIR, MIT_DIR,
 )
@@ -45,7 +44,6 @@ THETA_FLAT = 0.05  # _seg_lfp 와 동일한 플래토 임계값
 
 # 카테고리 색상
 CAT_COLORS = {
-    "Global": "#555555",
     "Stat":   "#2980b9",
     "Diff":   "#e67e22",
     "LFP":    "#27ae60",
@@ -63,11 +61,6 @@ for _k in LFP_KEYS:
     CONCEPT_LABEL[f"lfp_{_k}"]  = HI_LABELS.get(f"lfp_{_k}_{_REF_SEG}",  f"lfp_{_k}")
 for _k in MORPH_KEYS:
     CONCEPT_LABEL[f"morph_{_k}"] = HI_LABELS.get(f"morph_{_k}_{_REF_SEG}", f"morph_{_k}")
-
-
-def _cat(concept: str) -> str:
-    p = concept.split("_")[0]
-    return {"stat": "Stat", "diff": "Diff", "lfp": "LFP", "morph": "Morph"}.get(p, "Global")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -517,73 +510,6 @@ def _time_morph(mc, bol_ref, seg) -> dict[str, float]:
     return T
 
 
-def _time_global(v, i_mag, dt, q_local, vc=None, ic=None, dtc=None) -> dict[str, float]:
-    """Global HI 블록별 타이밍."""
-    T: dict[str, float] = {}
-
-    # G01–G03
-    t = _pc()
-    _ = float(np.sum(i_mag * dt) / 3600.0)
-    T["q_dis"] = _pc() - t
-
-    t = _pc()
-    _ = float(np.sum(v * i_mag * dt) / 3600.0)
-    T["energy_dis"] = _pc() - t
-
-    t = _pc()
-    denom = float(np.sum(i_mag * dt))
-    if denom > 1e-9: _ = float(np.sum(v * i_mag * dt)) / denom
-    T["v_mean_cw_dis"] = _pc() - t
-
-    # G05 q_plateau_frac
-    t = _pc()
-    mask_plt = (v >= 3.10) & (v <= 3.45)
-    if q_local > 0:
-        _ = float(np.sum(i_mag[mask_plt] * dt[mask_plt]) / 3600.0) / q_local
-    T["q_plateau_frac"] = _pc() - t
-
-    # G06–G08, G15 ICA
-    t = _pc()
-    _ = _global_ica(v, i_mag, dt)
-    T["ica_peak1_[v+h+area+asym]"] = _pc() - t
-
-    # G09–G10 DVA
-    t = _pc()
-    _ = _global_dva(v, i_mag, dt, q_local)
-    T["dva_valley_[q+depth]"] = _pc() - t
-
-    # G04, G11–G14 (충전 필요)
-    if vc is not None and ic is not None and dtc is not None:
-        t = _pc()
-        _ = _r_dc_from_chg(vc, ic, dtc)
-        T["r_trans_est"] = _pc() - t
-
-        q_tc = float(np.sum(ic * dtc) / 3600.0)
-
-        t = _pc()
-        _ = _global_ica(vc, ic, dtc)
-        T["chg_ica_peak1_h"] = _pc() - t
-
-        t = _pc()
-        i_mx = float(np.max(ic))
-        if i_mx > 0:
-            cv_mask = ic < 0.80 * i_mx
-            _ = float(np.sum(ic[cv_mask] * dtc[cv_mask]) / 3600.0)
-        T["cv_q_frac"] = _pc() - t
-
-        t = _pc()
-        if i_mx > 0:
-            cv_mask = ic < 0.80 * i_mx
-            _ = float(np.sum(dtc[cv_mask]))
-        T["cv_time_frac"] = _pc() - t
-
-        t = _pc()
-        _ = q_local / q_tc if q_tc > 0 else np.nan
-        T["ce"] = _pc() - t
-
-    return T
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 전처리 공유 비용 타이밍
 # ─────────────────────────────────────────────────────────────────────────────
@@ -655,7 +581,9 @@ def _profile_one_cell(args: tuple) -> list:
             if q_local < 0.05:
                 continue
 
-            # Global HI 타이밍
+            # 충전 구간(세그먼트별 타이밍의 CHG_SEGS 루프가 아래에서 그대로 사용 —
+            # 완전 사이클 Global HI 타이밍은 2026-09-29부로 제거, 이 블록 자체는
+            # 충전 세그먼트 추출의 전제조건이라 유지).
             chg = grp[grp["phase"] == "charge"].sort_values("time_s")
             vc = ic = dtc = None
             if len(chg) >= 20:
@@ -663,11 +591,6 @@ def _profile_one_cell(args: tuple) -> list:
                 vc      = chg["voltage_V"].values.astype(float)
                 ic      = np.abs(chg["current_A"].values.astype(float))
                 dtc     = np.clip(np.diff(tc_arr, prepend=tc_arr[0]), 0, None)
-
-            g_times = _time_global(v, i_mag, dt, q_local, vc, ic, dtc)
-            for feat, elapsed in g_times.items():
-                records.append({"feat_key": feat, "concept": feat,
-                                 "category": "Global", "time_us": elapsed * 1e6})
 
             # 세그먼트별 타이밍
             for q_lo_f, q_hi_f, seg, _ in DIS_SEGS:
@@ -814,7 +737,7 @@ def plot_category(df: pd.DataFrame, out_path: Path):
     전처리 비용은 해당 카테고리의 피처 수로 나눠 각 피처에 균등 배분.
       Diff/LFP: (vq_curve + ica_seg) / 15 per feature
       Morph:    morph_curves / 6          per feature
-      Stat/Global: 전처리 없음
+      Stat: 전처리 없음
     """
     # ── 컨셉별 평균 시간 ────────────────────────────────────────────────────
     concept_avg = (df[df["category"] != "Preproc"]
@@ -953,7 +876,7 @@ def save_cost_json(df: pd.DataFrame, out_path: Path):
 
     구조:
       concept_mean_us: {concept: 세그먼트당 평균 마진 비용(µs)}
-      concept_category: {concept: "Stat"|"Diff"|"LFP"|"Morph"|"Global"}
+      concept_category: {concept: "Stat"|"Diff"|"LFP"|"Morph"}
       preproc_mean_us: {"vq_curve":.., "ica_seg":.., "morph_curves":..} — 세그먼트당
         1회 고정비용(해당 카테고리 피처가 하나라도 활성일 때만 발생, Diff/LFP는
         vq_curve+ica_seg 공유, Morph는 morph_curves 별도)

@@ -23,10 +23,15 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
    플래그로 여러 프리셋(다른 회귀 헤드, 다른 데이터셋 조합 등)을 골라 쓸 수 있었으나,
    2026-09-27부로 **전면 폐기**했다(재검토 결과 그 프리셋들이 폴더 재편 이전 코드를
    전제로 한 채 한 번도 재검증되지 않았고, 그중 하나는 CLI 전달 경로 자체가 이미
-   조용히 끊겨 있었음 — `docs/REFATORING.md` 2026-09-27 항목 참고). 지금은
+   조용히 끊겨 있었음 — `docs/REFACTORING.md` 2026-09-27 항목 참고). 지금은
    `parameters.py: P1_MODEL_CONFIG` 딕셔너리 하나가 Step 5~9(상호작용/시너지/커널/
    학습)가 공유하는 모델·학습 설정의 유일한 소스다.
-4. **폴더 = 파이프라인 스텝** — 파라미터도 이 원칙을 따른다. 1개 스텝 전용 파라미터는
+4. **`parameters.py`는 editable install로 import된다** — 2026-09-28부로 저장소가
+   `pip install -e .`(`pyproject.toml`)로 설치되는 구조라, 각 스크립트는 실행 위치와
+   무관하게 `import parameters as P`만 하면 된다. 예전처럼 `PROJECT_ROOT`를 계산해
+   `sys.path`에 넣는 부트스트랩 코드는 전부 제거했다 — 새로 클론했으면 `pip install -e .`를
+   먼저 실행해야 한다.
+5. **폴더 = 파이프라인 스텝** — 파라미터도 이 원칙을 따른다. 1개 스텝 전용 파라미터는
    그 스텝 CLI에만, 여러 스텝이 공유하는 파라미터(축 설정, 데이터셋, 시드 등)는
    `run_pipeline.py`가 한 번만 받아 해당 스텝들에 동일하게 뿌린다.
 
@@ -168,7 +173,7 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 `--lambda-l0-override`, `--l0-warmup-epochs-override`, `--l0-norm-constant`,
 `--hi-cost-weighted-l0`, `--val-rmse-epsilon`. **2026-09-27부로 `--model-config`/
 `--regression-model` 삭제** — 전자는 yaml 폐기, 후자는 이미 오래전부터 실제
-전달 경로가 끊겨 있던 죽은 플래그였음(`docs/REFATORING.md` 참고). 대안 회귀
+전달 경로가 끊겨 있던 죽은 플래그였음(`docs/REFACTORING.md` 참고). 대안 회귀
 헤드(Transformer 등)는 이제 `P1_MODEL_CONFIG["model"]["regression_model"]`을
 코드에서 직접 바꿔야 활성화된다.
 
@@ -195,4 +200,4 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
   전면 폐기 — `interaction.py`/`synergy.py`/`kernel.py`/`train.py` 전부
   `P1_MODEL_CONFIG`를 직접 참조하도록 통일. 이 문서의 옛 버전에 있던
   "config.yaml 구조 개편안" 절은 이 폐기로 완전히 대체되었다(자세한 경위는
-  `docs/REFATORING.md` 2026-09-27 항목).
+  `docs/REFACTORING.md` 2026-09-27 항목).

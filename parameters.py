@@ -203,7 +203,7 @@ FIXED_SKIP_SHAPE = False                # 구 --skip-shape (형상 이상치 필
 # 이전 코드를 전제로 한 채 한 번도 재검증되지 않았고, 그중 하나(--regression-model)는
 # 이미 run_pipeline.py -> train.py 전달 경로가 끊겨 있었다(train.py가 그 플래그
 # 자체를 안 받은 지 오래) — 재현이 필요해지면 그때 다시 설계할 것
-# (docs/REFATORING.md 2026-09-27 항목 참고).
+# (docs/REFACTORING.md 2026-09-27 항목 참고).
 #
 # scenario.axis/axis_config는 별도로 안 두고 FIXED_SEG_AXIS/ACTIVE_AXIS_CONFIG를
 # 그대로 참조한다 — 축 설정이 여기 또 복사되면 두 값이 다시 어긋날 수 있기 때문

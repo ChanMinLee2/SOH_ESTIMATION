@@ -5,11 +5,18 @@ LFP SOH Prediction 전체 파이프라인 실행기.
 데이터 전처리(Step 1~4)부터 모델 학습/평가(Step 5~9)까지 지원.
 
 2026-09-21 리팩토링: CLI 파라미터를 "자주 바꾸는 것"과 "거의 안 바꾸는 것"으로 나눠
-`parameters.py`로 옮겼다. 자주 바꾸는 파라미터(ACTIVE_*)는 여전히 CLI 플래그로 노출되고
-기본값만 parameters.py를 참조한다. 거의 안 바꾸는 파라미터(FIXED_*)는 CLI 플래그 자체를
-없애고 parameters.py 값을 그대로 하위 스크립트에 전달한다 — 바꾸려면 parameters.py를
-직접 수정할 것. `--include-stat-leak`/`--exclude-dqdv-leak` 두 불리언 플래그는
-`--n-hi {63,64,66}` 단일 선택으로 통합했다.
+`parameters.py`로 옮겼다. `--include-stat-leak`/`--exclude-dqdv-leak` 두 불리언
+플래그는 `--n-hi {63,64,66}` 단일 선택으로 통합했다.
+
+2026-09-29: 이 오케스트레이터 자신의 CLI는 스텝 선택(위치 인자 `from_step`,
+`--to-step`)만 남기고 나머지 전부(ACTIVE_*/FIXED_* 둘 다) 제거했다 — 이 파일은
+"실행 파라미터를 커맨드라인으로 받는 곳"이 아니라 "parameters.py 값을 각 스텝에
+전달하는 오케스트레이터"이기만 하면 되는데, 그동안 ACTIVE_*는 CLI로도 계속
+오버라이드 가능하게 남겨둬서 이 파일 자체가 parameters.py 말고 또 하나의 파라미터
+입력 경로가 되어 있었다. 실험값을 바꾸려면 이제 parameters.py를 직접 고칠 것 — 한
+번만 다르게 돌려보고 싶으면(예: seed만 다르게) 이 스크립트를 거치지 말고 해당
+스텝 스크립트(예: `8_train/train.py --seed 123 ...`)를 직접 실행하면 된다(그쪽은
+자기 CLI를 그대로 유지 — 이 정리는 run_pipeline.py 한 파일에만 적용).
 
 2026-08-15: Step 4(HI 추출)가 예전엔 항상 `--force`로 캐시를 무시하고 재추출했다
 (코드/파라미터를 바꾸고 전체 파이프라인을 처음부터 돌릴 때 낡은 캐시를 실수로 쓰는 걸
@@ -34,19 +41,12 @@ LFP SOH Prediction 전체 파이프라인 실행기.
 그룹→커널 HI→학습→평가를 Step 5~9로 한 칸씩 당겼다(구 6~10 → 신 5~9). 폴더 이름도
 `5_interaction/`~`9_eval/`로 동시에 개명해 "폴더 번호 = 스텝 번호" 원칙을 유지한다.
 
-사용:
+사용(실험값을 바꾸려면 parameters.py를 먼저 수정):
   python run_pipeline.py                          # 전체 파이프라인 (Step 1부터)
   python run_pipeline.py 2                        # Step 2부터 재실행
   python run_pipeline.py 8                        # 학습+평가만 (Step 8~9, v4 기본 — Step 5~7 산출물 재사용)
   python run_pipeline.py 8 --to-step 8            # 학습만(평가 제외)
   python run_pipeline.py 9                        # 평가만(직전 Phase 1 run 자동 탐색)
-  python run_pipeline.py 3 --workers 8
-  python run_pipeline.py 8 --seed 0 --split-seed 0 --p1-tag p1v4_seed0
-  python run_pipeline.py 4 --to-step 4 --force-extract --axis-config '{...}'  # 캐시 무시하고 강제 재추출
-  # 상호작용 검정→시너지 그룹→커널 HI→학습→평가를 max-group-size=2로 전부 새로 만들어서 실행:
-  python run_pipeline.py 5 --max-group-size 2 --p1-tag p1v4_scen_g2 --axis-config '{...}' --data-dir ... --seg-data-dir ...
-  # HI63(q_abs/energy/dqdv_area 전부 제외)으로 돌리기:
-  python run_pipeline.py 5 --n-hi 63 --p1-tag p1v4_scen_hi63 --axis-config '{...}' --data-dir ... --seg-data-dir ...
 """
 
 import argparse
@@ -99,10 +99,13 @@ P1V4_INTERACTION_JSON = ("legacy_results/experiments/phase1_lab/results/"
 # STEPS의 "번호"는 더는 1..len(STEPS)와 일치하지 않는다 — 총 스텝 수는 N_STEPS(아래,
 # =max 번호)를 써야 한다.
 STEPS = [
-    (1, "데이터 변환",             "1_convert/convert_unified.py",    ["--dataset", "all"], True),
+    (1, "데이터 변환",             "1_convert/convert_unified.py",    ["--dataset", P.ACTIVE_DATASET], True),
     (2, "이상 사이클 제거",        "2_preprocess/preprocess.py",       [],                   True),
     (3, "무결성 검사",             "3_integrity/check_integrity.py",   [],                   True),
-    (4, "HI 상관 분석",            "4_hi_analysis/hi_correlation.py",  [],                   True),
+    # hi_correlation.py는 2026-09-29부로 CLI를 전혀 안 받는다(parameters.py 직접
+    # 참조) — use_workers=False로 --workers도 안 붙인다. hi_segment_viz.py는 아직
+    # 자체 CLI(--workers/--seg-axis/--axis-config/--force)를 유지 중이라 그대로 둔다.
+    (4, "HI 상관 분석",            "4_hi_analysis/hi_correlation.py",  [],                   False),
     (4, "HI 세그먼트 시각화",      "4_hi_analysis/hi_segment_viz.py",  [],                   True),
     (5, "HI-시나리오 상호작용 검정", "5_interaction/interaction.py", [], False),
     (6, "HI 시너지 그룹 구성",     "6_synergy/synergy.py",        [], False),
@@ -145,14 +148,16 @@ def _interaction_out_path(run_dir: Path, tag: str) -> Path:
     return run_dir / f"hi_scenario_interaction_{tag}.json"
 
 
-def _resolve_interaction_path(args, interaction_out: Path, default_json: str) -> str | None:
+def _resolve_interaction_path(
+    interaction_json: str | None, interaction_out: Path, default_json: str,
+) -> str | None:
     """Step 8(학습)/9(평가)용 interaction-json 최종 해석 — kernel-features-pkl과 동일한
-    3단 우선순위: 1) --interaction-json이 명시적으로 주어지면(빈 문자열 포함) 그 값 그대로
-    (빈 문자열이면 아예 전달 안 함, v0/v2/v3 재현용) 2) Step 5(자동 경로)을 이번 실행에서
-    방금 만들었거나 이전에 만들어둔 파일이 있으면 그걸 3) 그것도 없으면 default_json(v4
-    정식 고정 경로)로 최종 fallback."""
-    if args.interaction_json is not None:
-        return args.interaction_json or None
+    3단 우선순위: 1) parameters.py: ACTIVE_INTERACTION_JSON이 명시적으로 주어지면(빈
+    문자열 포함) 그 값 그대로(빈 문자열이면 아예 전달 안 함, v0/v2/v3 재현용) 2) Step 5
+    (자동 경로)을 이번 실행에서 방금 만들었거나 이전에 만들어둔 파일이 있으면 그걸
+    3) 그것도 없으면 default_json(v4 정식 고정 경로)로 최종 fallback."""
+    if interaction_json is not None:
+        return interaction_json or None
     if interaction_out.exists():
         return str(interaction_out)
     return default_json
@@ -169,20 +174,21 @@ def _kernel_out_paths(run_dir: Path, tag: str) -> tuple[Path, Path]:
 
 
 def _resolve_kernel_paths(
-    args, kernel_pkl_out: Path, kernel_redundancy_out: Path, default_pkl: str,
+    kernel_features_pkl: str | None, combined_redundancy_json: str | None,
+    kernel_pkl_out: Path, kernel_redundancy_out: Path, default_pkl: str,
 ) -> tuple[str, str | None]:
-    """Step 8용 kernel-features-pkl/combined-redundancy-json 최종 해석 — 명시적 CLI 값이
-    최우선, 없으면 자동 경로가 실존하면 그걸, 그것도 없으면 default_pkl(v4 정식 고정 경로)로
-    최종 fallback한다. 파일 존재 여부를 매번 새로 검사한다(Step 6~7을 같은 실행 안에서
-    막 돌렸을 때도 정확히 잡히도록)."""
-    if args.kernel_features_pkl is not None:
-        resolved_pkl = args.kernel_features_pkl
+    """Step 8용 kernel-features-pkl/combined-redundancy-json 최종 해석 — parameters.py
+    값이 명시적으로 주어지면 최우선, 없으면 자동 경로가 실존하면 그걸, 그것도 없으면
+    default_pkl(v4 정식 고정 경로)로 최종 fallback한다. 파일 존재 여부를 매번 새로
+    검사한다(Step 6~7을 같은 실행 안에서 막 돌렸을 때도 정확히 잡히도록)."""
+    if kernel_features_pkl is not None:
+        resolved_pkl = kernel_features_pkl
     elif kernel_pkl_out.exists():
         resolved_pkl = str(kernel_pkl_out)
     else:
         resolved_pkl = default_pkl
-    if args.combined_redundancy_json is not None:
-        resolved_redundancy = args.combined_redundancy_json
+    if combined_redundancy_json is not None:
+        resolved_redundancy = combined_redundancy_json
     elif kernel_redundancy_out.exists():
         resolved_redundancy = str(kernel_redundancy_out)
     else:
@@ -240,6 +246,9 @@ def _ask_continue(num: int) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    # 2026-09-29: 이 오케스트레이터의 CLI는 스텝 선택(아래 두 인자)만 남긴다 —
+    # 그 외 모든 실행 파라미터는 parameters.py: ACTIVE_*/FIXED_*에서만 읽는다
+    # (모듈 docstring 2026-09-29 항목 참고). 값을 바꾸려면 parameters.py를 고칠 것.
     parser = argparse.ArgumentParser(
         description="LFP SOH 파이프라인 실행기 (데이터 전처리 → Phase 1 통합 학습/평가)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -255,116 +264,31 @@ def main():
         "--to-step", type=int, default=None, metavar="TO_STEP",
         help=f"종료 스텝 번호 포함 (미지정 시 끝까지, 범위: 1~{N_STEPS})",
     )
-    parser.add_argument(
-        "--workers", type=int, default=min(P.ACTIVE_WORKERS, os.cpu_count() or 1),
-        help=f"데이터 스텝(1~4)에 전달할 병렬 프로세스 수 (기본: {P.ACTIVE_WORKERS})",
-    )
-    parser.add_argument(
-        "--force-extract", action="store_true", dest="force_extract",
-        default=P.ACTIVE_FORCE_EXTRACT,
-        help="Step 4(HI 추출) 캐시를 무시하고 강제 재추출. 기본은 캐시가 있으면 재사용. "
-             "코드/파라미터를 바꾼 뒤나, random/random_grid처럼 캐시 파일명에 axis_config "
-             "값이 안 들어가는 축의 파라미터만 바꿨을 때는 이 플래그를 꼭 같이 줘야 한다.",
-    )
-    parser.add_argument(
-        "--kernel-features-pkl", default=P.ACTIVE_KERNEL_FEATURES_PKL,
-        dest="kernel_features_pkl",
-        help="Step 8 전용 — 커널 특징 pkl 경로. 미지정 시: Step 6~7을 이번에 돌렸거나(또는 "
-             "이전에 돌려서) 자동 경로에 파일이 있으면 그걸 쓰고, 없으면 "
-             f"v4 정식 kernel_v3 파일({P1V4_KERNEL_FEATURES_PKL})로 최종 fallback한다. "
-             "빈 문자열('')을 명시하면 아예 전달하지 않음(v0 재현 등).",
-    )
-    parser.add_argument(
-        "--interaction-json", default=P.ACTIVE_INTERACTION_JSON,
-        dest="interaction_json",
-        help="Step 8/9(학습/평가) 전용 — HI x 시나리오 상호작용 JSON 경로. 미지정 시: "
-             "Step 5을 이번에 돌렸거나(또는 이전에 돌려서) 자동 경로에 파일이 있으면 그걸 "
-             "쓰고, 없으면 v4 정식 고정 경로로 최종 fallback한다. 학습(8)과 평가(9) "
-             "양쪽에 동일하게 전달된다. 빈 문자열('')을 명시하면 아예 전달하지 않음.",
-    )
-    parser.add_argument(
-        "--combined-redundancy-json", default=P.ACTIVE_COMBINED_REDUNDANCY_JSON,
-        dest="combined_redundancy_json",
-        help="Step 8 전용 — kernel.py의 결합(raw+kernel) 다중공선성 "
-             "배제 산출물(*_combined_redundancy.json, v4 요구사항2). 미지정이고 Step 6~7 "
-             "결과물(자동 경로)이 존재하면 그걸 자동으로 쓴다.",
-    )
-    parser.add_argument(
-        "--max-group-size", type=int, default=P.ACTIVE_MAX_GROUP_SIZE, dest="max_group_size",
-        help=f"Step 6 전용 — 시너지 그룹 최대 크기(그룹당 raw HI 개수 상한, 기본 "
-             f"{P.ACTIVE_MAX_GROUP_SIZE}). 줄이면(2~3) 그룹당 RBF 커널 입력 차원이 줄어, "
-             "시나리오당 샘플이 적을 때(scen처럼 6분할) 커널 과적합 위험을 낮출 수 있다는 "
-             "가설을 검증하는 용도.",
-    )
-    parser.add_argument(
-        "--synergy-redundancy-threshold", type=float,
-        default=P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD, dest="synergy_redundancy_threshold",
-        help="Step 6+7 공용(2026-09-25 통합) — synergy.py 1차 배제(그룹 내부 raw HI)와 "
-             f"kernel.py 2차 배제(커널 HI끼리, pooled)가 같은 값을 쓴다(기본 "
-             f"{P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD}).",
-    )
-    parser.add_argument(
-        "--max-epochs", type=int, default=P.ACTIVE_MAX_EPOCHS, dest="p1_max_epochs",
-        help="Step 8 전용 — 학습 에폭 상한(기본 None=yaml training.epochs).",
-    )
-    parser.add_argument(
-        "--patience", type=int, default=P.ACTIVE_PATIENCE, dest="p1_patience",
-        help="Step 8 전용 — 조기종료 patience(기본 None=train.py 자체 기본 60).",
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=P.ACTIVE_BATCH_SIZE, dest="p1_batch_size",
-        help="Step 8 전용 — 배치 크기 오버라이드(기본 None=yaml training.batch_size).",
-    )
-    parser.add_argument(
-        "--hi-cost-weighted-l0", action="store_true", dest="hi_cost_weighted_l0",
-        default=P.ACTIVE_HI_COST_WEIGHTED_L0,
-        help="Step 8 전용 — L0 페널티에 HI 카테고리 비용(CATEGORY_COSTS)을 가중치로 곱한다. "
-             "기본(미지정)은 균일 비용 1.0.",
-    )
-    parser.add_argument(
-        "--n-hi", type=int, default=P.ACTIVE_N_HI, dest="n_hi", choices=P.N_HI_CHOICES,
-        help=f"Step 5~9 전용 — raw HI 개수(기본 {P.ACTIVE_N_HI}). 63=stat_q_abs/"
-             "stat_energy_seg/diff_dqdv_area 전부 제외, 64(기본)=q_abs/energy만 제외, "
-             "66=전부 포함. SOH_EXCLUDE_STAT_LEAK/SOH_EXCLUDE_DQDV_LEAK 환경변수를 이 값에 "
-             "맞춰 하위 프로세스에 자동 주입한다(docs/MODEL_FLOW.md §13 N_HI 토글 참고). "
-             "64가 아닌 값으로 돌리려면 --kernel-features-pkl/--interaction-json도 그 N_HI "
-             "기준으로 새로 만든 파일을 같이 지정해야 한다 — shape 불일치 방지를 위해 "
-             "Step 5부터 다시 생성하는 걸 권장.",
-    )
-    parser.add_argument(
-        "--p1-tag", default=P.ACTIVE_P1_TAG, dest="p1_tag",
-        help=f"Step 8 train.py의 --tag (run 디렉터리 이름에 들어감, 기본: "
-             f"{P.ACTIVE_P1_TAG}). 상호작용/시너지/커널 태그를 안 주면 이 값에서 자동 파생됨.",
-    )
-    parser.add_argument(
-        "--rep-cells", nargs="+", default=P.ACTIVE_REP_CELLS, dest="rep_cells",
-        help="Step 9 평가 시 용량곡선 비교 플랏을 그릴 셀 ID(들) (미지정 시 데이터셋별 5개 자동 선정)",
-    )
-    parser.add_argument(
-        "--axis-config", default=json.dumps(P.ACTIVE_AXIS_CONFIG), metavar="JSON",
-        help="축 파라미터 JSON (Step 4~8에 전달, 기본값은 parameters.py: ACTIVE_AXIS_CONFIG). "
-             "부분 수정이 아니라 통째로 교체된다 — 일부만 바꾸고 싶어도 전체 딕셔너리를 "
-             "다시 써서 넘길 것(예: '{\"n1\": 0.4, \"n2\": 0.2, \"n_samples\": 4}').",
-    )
-    parser.add_argument("--data-dir", default=P.ACTIVE_DATA_DIR, dest="p1_data_dir",
-                        help="Step 5~8(상호작용 검정/시너지 그룹/커널 HI/train.py) 공통 "
-                             "cycle pkl 경로 오버라이드. 이 스크립트들은 --axis-config만으로 데이터 "
-                             "경로를 자동 계산하지 않고 항상 자기 자신의 기본 경로(정식 q_frac_ref "
-                             "캐논 설정)로 fallback하므로, 캐논이 아닌 축 설정으로 돌리려면 "
-                             "**반드시** 이 옵션과 --seg-data-dir을 함께 줘야 한다.")
-    parser.add_argument("--seg-data-dir", default=P.ACTIVE_SEG_DATA_DIR, dest="p1_seg_data_dir",
-                        help="Step 5~8 공통 seg pkl 경로 오버라이드. --data-dir와 항상 같이 줄 것.")
-    parser.add_argument("--lambda-l0-override", type=float, default=P.ACTIVE_LAMBDA_L0_OVERRIDE,
-                        dest="lambda_l0_override",
-                        help=f"loss.lambda_l0을 이 값으로 강제 고정(기본 "
-                             f"{P.ACTIVE_LAMBDA_L0_OVERRIDE}, train.py "
-                             "--lambda-l0-override 그대로 전달, Step 8 전용). None으로 끄면 "
-                             "yaml의 lambda_l0_auto 로직으로 되돌아간다(레거시, 비권장).")
-    parser.add_argument("--seed",        type=int, default=P.ACTIVE_SEED,
-                        help="재현성 시드 — 모델 초기화 torch/numpy/random RNG (Step 8 전달, 기본 42)")
-    parser.add_argument("--split-seed",  type=int, default=P.ACTIVE_SPLIT_SEED,
-                        help="train/val/test 셀 분할 시드 (Step 5~8 전달, 기본 42)")
     args = parser.parse_args()
+
+    # parameters.py에서 그대로 읽는 실행 파라미터 — 전부 CLI로 오버라이드 불가.
+    # 한 번만 다르게 돌려보고 싶으면 해당 스텝 스크립트(예: 8_train/train.py)를
+    # 직접 실행할 것 — 그쪽은 자기 CLI를 그대로 유지한다.
+    workers = min(P.ACTIVE_WORKERS, os.cpu_count() or 1)
+    force_extract = P.ACTIVE_FORCE_EXTRACT
+    kernel_features_pkl = P.ACTIVE_KERNEL_FEATURES_PKL
+    interaction_json = P.ACTIVE_INTERACTION_JSON
+    combined_redundancy_json = P.ACTIVE_COMBINED_REDUNDANCY_JSON
+    max_group_size = P.ACTIVE_MAX_GROUP_SIZE
+    synergy_redundancy_threshold = P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD
+    p1_max_epochs = P.ACTIVE_MAX_EPOCHS
+    p1_patience = P.ACTIVE_PATIENCE
+    p1_batch_size = P.ACTIVE_BATCH_SIZE
+    hi_cost_weighted_l0 = P.ACTIVE_HI_COST_WEIGHTED_L0
+    n_hi = P.ACTIVE_N_HI
+    p1_tag = P.ACTIVE_P1_TAG
+    rep_cells = P.ACTIVE_REP_CELLS
+    axis_config = json.dumps(P.ACTIVE_AXIS_CONFIG)
+    p1_data_dir = P.ACTIVE_DATA_DIR
+    p1_seg_data_dir = P.ACTIVE_SEG_DATA_DIR
+    lambda_l0_override = P.ACTIVE_LAMBDA_L0_OVERRIDE
+    seed = P.ACTIVE_SEED
+    split_seed = P.ACTIVE_SPLIT_SEED
 
     to_step = args.to_step if args.to_step is not None else N_STEPS
 
@@ -377,23 +301,23 @@ def main():
 
     selected = [s for s in STEPS if args.from_step <= s[0] <= to_step]
 
-    # Step 5~9이 전부 공유하는 실험 폴더 — --seed는 원래 Step 8(학습) 전용 CLI였지만,
+    # Step 5~9이 전부 공유하는 실험 폴더 — seed는 원래 Step 8(학습) 전용 값이지만,
     # 폴더명에 필요해서 여기서 한 번만 해석한다(train.py는 --seed/--split-seed가
     # 필수라 미지정 시 42로 채우는 것과 동일 규칙). run_ts도 여기서 한 번만 찍어서 Step 5~8
     # 내내 같은 타임스탬프를 쓴다.
-    _seed = args.seed if args.seed is not None else P.FIXED_DEFAULT_SEED
+    _seed = seed if seed is not None else P.FIXED_DEFAULT_SEED
     run_ts = datetime.now().strftime("%m%d_%H%M")
-    run_dir = _run_dir_for(run_ts, args.p1_tag, _seed)
+    run_dir = _run_dir_for(run_ts, p1_tag, _seed)
     if any(s[0] in (5, 6, 7, 8, 9) for s in selected):
         run_dir.mkdir(parents=True, exist_ok=True)
 
-    # 상호작용/시너지/커널 태그 — 전부 --p1-tag에서 자동 파생(FIXED_INTERACTION_TAG 등이
+    # 상호작용/시너지/커널 태그 — 전부 p1_tag에서 자동 파생(FIXED_INTERACTION_TAG 등이
     # None이므로 항상 이 경로). 실제 파일 경로는 100% 이 태그 + run_dir로 결정되므로,
     # Step 5~7을 이번에 안 돌려도 이전에 같은 p1-tag+seed로 만들어둔 결과물이 run_dir에
     # 있으면 Step 8가 그대로 찾아 쓴다.
-    interaction_tag = P.FIXED_INTERACTION_TAG or f"{args.p1_tag}_interaction"
-    synergy_tag = P.FIXED_SYNERGY_TAG or f"{args.p1_tag}_groups"
-    kernel_tag = P.FIXED_KERNEL_TAG or f"{args.p1_tag}_kernel"
+    interaction_tag = P.FIXED_INTERACTION_TAG or f"{p1_tag}_interaction"
+    synergy_tag = P.FIXED_SYNERGY_TAG or f"{p1_tag}_groups"
+    kernel_tag = P.FIXED_KERNEL_TAG or f"{p1_tag}_kernel"
     interaction_out = _interaction_out_path(run_dir, interaction_tag)
     synergy_out = _synergy_out_path(run_dir, synergy_tag)
     kernel_pkl_out, kernel_redundancy_out = _kernel_out_paths(run_dir, kernel_tag)
@@ -401,15 +325,18 @@ def main():
     # 미리보기용 1회 해석(아래 print 요약에만 씀) — 실제로 Step 8에 전달되는 값은 Step 8
     # 블록에서 다시 해석한다(Step 5~7을 같은 실행에서 막 돌려 파일이 생긴 경우를 반영하기 위함).
     resolved_kernel_pkl, resolved_combined_redundancy = _resolve_kernel_paths(
-        args, kernel_pkl_out, kernel_redundancy_out, P1V4_KERNEL_FEATURES_PKL,
+        kernel_features_pkl, combined_redundancy_json, kernel_pkl_out, kernel_redundancy_out,
+        P1V4_KERNEL_FEATURES_PKL,
     )
-    resolved_interaction = _resolve_interaction_path(args, interaction_out, P1V4_INTERACTION_JSON)
+    resolved_interaction = _resolve_interaction_path(
+        interaction_json, interaction_out, P1V4_INTERACTION_JSON,
+    )
 
     print("\n" + "="*60)
     print("  LFP SOH Prediction — 전체 파이프라인")
     print("="*60)
     print(f"  스텝 범위   : {args.from_step} → {to_step}")
-    print(f"  병렬 워커   : {args.workers}  (데이터 스텝 전용)")
+    print(f"  병렬 워커   : {workers}  (데이터 스텝 전용)")
     if any(s[0] in (5, 6, 7, 8, 9) for s in selected):
         print(f"  실험 폴더   : {run_dir}")
     if any(s[0] == 5 for s in selected):
@@ -417,22 +344,22 @@ def main():
     if any(s[0] in (6, 7) for s in selected):
         print(f"  synergy-tag : {synergy_tag}  (Step 6 출력 -> {synergy_out.name})")
         print(f"  kernel-tag  : {kernel_tag}  (Step 7 출력 -> {kernel_pkl_out.name})")
-        print(f"  max-group-size: {args.max_group_size}  (Step 6)")
+        print(f"  max-group-size: {max_group_size}  (Step 6)")
     if any(s[0] == 8 for s in selected):
         print(f"  Phase1 설정 : parameters.py: P1_MODEL_CONFIG  (Step 8, train.py)")
-        print(f"  Phase1 tag  : {args.p1_tag}")
-        print(f"  n-hi        : {args.n_hi}")
+        print(f"  Phase1 tag  : {p1_tag}")
+        print(f"  n-hi        : {n_hi}")
         print(f"  kernel-pkl  : {resolved_kernel_pkl or '(미사용)'}"
-              f"{'  [자동: Step 6~7 결과]' if args.kernel_features_pkl is None and kernel_pkl_out.exists() else ''}")
+              f"{'  [자동: Step 6~7 결과]' if kernel_features_pkl is None and kernel_pkl_out.exists() else ''}")
         print(f"  combined-redundancy : {resolved_combined_redundancy or '(미사용)'}")
         print(f"  interaction : {resolved_interaction or '(미사용)'}"
-              f"{'  [자동: Step 5 결과]' if args.interaction_json is None and interaction_out.exists() else ''}")
-        print(f"  hi-cost-weighted-l0: {args.hi_cost_weighted_l0}")
-        if args.lambda_l0_override is not None:
-            print(f"  lambda-l0   : {args.lambda_l0_override} (고정)")
-    if args.axis_config:
-        print(f"  axis-config : {args.axis_config}")
-    if args.force_extract:
+              f"{'  [자동: Step 5 결과]' if interaction_json is None and interaction_out.exists() else ''}")
+        print(f"  hi-cost-weighted-l0: {hi_cost_weighted_l0}")
+        if lambda_l0_override is not None:
+            print(f"  lambda-l0   : {lambda_l0_override} (고정)")
+    if axis_config:
+        print(f"  axis-config : {axis_config}")
+    if force_extract:
         print(f"  force-extract: True  (Step4 캐시 무시)")
     print(f"  실행 스텝   :")
     for n, name, _, _, _ in selected:
@@ -449,22 +376,24 @@ def main():
     if p1_run_dir is None and (run_dir / "checkpoints").exists():
         p1_run_dir = run_dir
     run_src: str | None = None
-    _split_seed = args.split_seed if args.split_seed is not None else P.FIXED_DEFAULT_SEED
+    _split_seed = split_seed if split_seed is not None else P.FIXED_DEFAULT_SEED
 
     for num, name, script, extra, use_workers in selected:
         step_extra = list(extra)
 
-        # ── 축 정보 주입 (Step 4~8 — 상호작용 검정(5)/시너지 그룹(6)/커널 HI(7) 생성도
+        # ── 축 정보 주입 (Step 5~8 — 상호작용 검정(5)/시너지 그룹(6)/커널 HI(7) 생성도
         #    학습(8)과 같은 "실제 데이터가 뭔지"에 의존하므로 축 설정을 여기서부터
-        #    같이 받는다) ─────────────────────────────────────────────────────
-        if num in (4, 5, 6, 7, 8):
+        #    같이 받는다. hi_correlation.py(Step 4)는 2026-09-29부로 CLI가 없어
+        #    parameters.py를 직접 읽으므로 제외 — hi_segment_viz.py(Step 4의 다른
+        #    엔트리)는 아직 자체 CLI를 유지 중이라 그쪽에는 계속 넣어준다) ──────
+        if num in (5, 6, 7, 8) or (num == 4 and script.endswith("hi_segment_viz.py")):
             step_extra += ["--seg-axis", P.FIXED_SEG_AXIS]
-            if args.axis_config:
-                step_extra += ["--axis-config", args.axis_config]
+            if axis_config:
+                step_extra += ["--axis-config", axis_config]
 
-        # ── 강제 재추출 옵션 주입 (Step 4만 — 기본은 캐시 재사용, HI 상관 분석/HI 세그먼트
-        #    시각화 둘 다 Step 4라 두 엔트리 모두에 적용됨) ──
-        if num == 4 and args.force_extract:
+        # ── 강제 재추출 옵션 주입 (hi_segment_viz.py 전용 — hi_correlation.py는
+        #    parameters.py: ACTIVE_FORCE_EXTRACT를 직접 읽는다) ──
+        if num == 4 and script.endswith("hi_segment_viz.py") and force_extract:
             step_extra += ["--force"]
 
         # ── Step 5(HI-시나리오 상호작용 검정, interaction.py) 전용 ──
@@ -474,26 +403,26 @@ def main():
             step_extra += ["--min-effect-size", str(P.FIXED_INTERACTION_MIN_EFFECT_SIZE)]
             step_extra += ["--tag", interaction_tag]
             step_extra += ["--out-dir", str(run_dir)]
-            if args.p1_data_dir:
-                step_extra += ["--data-dir", args.p1_data_dir]
-            if args.p1_seg_data_dir:
-                step_extra += ["--seg-data-dir", args.p1_seg_data_dir]
+            if p1_data_dir:
+                step_extra += ["--data-dir", p1_data_dir]
+            if p1_seg_data_dir:
+                step_extra += ["--seg-data-dir", p1_seg_data_dir]
 
         # ── Step 6(HI 시너지 그룹 구성, synergy.py) 전용 ────────────
         if num == 6:
             step_extra += ["--split-seed", str(_split_seed)]
-            step_extra += ["--max-group-size", str(args.max_group_size)]
-            step_extra += ["--redundancy-threshold", str(args.synergy_redundancy_threshold)]
+            step_extra += ["--max-group-size", str(max_group_size)]
+            step_extra += ["--redundancy-threshold", str(synergy_redundancy_threshold)]
             step_extra += ["--min-partial-corr", str(P.FIXED_MIN_PARTIAL_CORR)]
             step_extra += ["--prefilter-top-m", str(P.FIXED_PREFILTER_TOP_M)]
             if P.FIXED_GLOBAL_DEDUP:
                 step_extra += ["--global-dedup"]
             step_extra += ["--tag", synergy_tag]
             step_extra += ["--out-dir", str(run_dir)]
-            if args.p1_data_dir:
-                step_extra += ["--data-dir", args.p1_data_dir]
-            if args.p1_seg_data_dir:
-                step_extra += ["--seg-data-dir", args.p1_seg_data_dir]
+            if p1_data_dir:
+                step_extra += ["--data-dir", p1_data_dir]
+            if p1_seg_data_dir:
+                step_extra += ["--seg-data-dir", p1_seg_data_dir]
 
         # ── Step 7(커널 HI 피처 생성, kernel.py) 전용 ───────
         if num == 7:
@@ -507,10 +436,10 @@ def main():
             if P.FIXED_KERNEL_GAMMA is not None:
                 step_extra += ["--gamma", str(P.FIXED_KERNEL_GAMMA)]
             step_extra += ["--n-components", str(P.FIXED_KERNEL_N_COMPONENTS)]
-            # 2026-09-25: synergy.py(Step 6) 1차 배제와 동일 상수로 통합 — args.synergy_
+            # 2026-09-25: synergy.py(Step 6) 1차 배제와 동일 상수로 통합 — synergy_
             # redundancy_threshold를 그대로 재사용해 --synergy-redundancy-threshold
             # 하나로 두 스텝을 동시에 제어(구 FIXED_KERNEL_REDUNDANCY_THRESHOLD 삭제).
-            step_extra += ["--redundancy-threshold", str(args.synergy_redundancy_threshold)]
+            step_extra += ["--redundancy-threshold", str(synergy_redundancy_threshold)]
             if P.FIXED_KERNEL_MAX_FEATURES is not None:
                 step_extra += ["--max-features", str(P.FIXED_KERNEL_MAX_FEATURES)]
             if P.FIXED_MIN_RAW_PARTIAL_CORR is not None:
@@ -518,30 +447,31 @@ def main():
             step_extra += ["--combined-redundancy-threshold", str(P.FIXED_COMBINED_REDUNDANCY_THRESHOLD)]
             step_extra += ["--tag", kernel_tag]
             step_extra += ["--out-dir", str(run_dir)]
-            if args.p1_data_dir:
-                step_extra += ["--data-dir", args.p1_data_dir]
-            if args.p1_seg_data_dir:
-                step_extra += ["--seg-data-dir", args.p1_seg_data_dir]
+            if p1_data_dir:
+                step_extra += ["--data-dir", p1_data_dir]
+            if p1_seg_data_dir:
+                step_extra += ["--seg-data-dir", p1_seg_data_dir]
 
         # ── 학습 파라미터 주입 (Step 8=Phase1 학습) ────────────────
         if num == 8:
-            if args.lambda_l0_override is not None:
-                step_extra += ["--lambda-l0-override", str(args.lambda_l0_override)]
+            if lambda_l0_override is not None:
+                step_extra += ["--lambda-l0-override", str(lambda_l0_override)]
             # train.py는 --seed/--split-seed가 required=True라 항상 값을
             # 넘겨야 한다 — 미지정 시 42로 채운다(_seed는 run_dir 이름을 정할 때 이미
             # 동일 규칙으로 계산해뒀다 — 여기서 다시 계산하면 값이 어긋날 위험이 있어 재사용).
-            if args.seed is None or args.split_seed is None:
+            if seed is None or split_seed is None:
                 print(f"\n  [안내] Step 8(train.py)는 --seed/--split-seed가 "
                       f"필수 인자라 미지정 값을 기본 42로 채웁니다 "
                       f"(seed={_seed}, split-seed={_split_seed}).")
             step_extra += ["--seed", str(_seed), "--split-seed", str(_split_seed)]
 
-            step_extra += ["--tag", args.p1_tag]
+            step_extra += ["--tag", p1_tag]
             step_extra += ["--output-dir", str(run_dir)]
             # 여기서 다시 해석한다(맨 위 미리보기 값을 그대로 쓰지 않음) — Step 5~7을
             # 이번 실행에 포함시켰다면 지금쯤 파일이 실제로 생겨있어야 정상이다.
             _kernel_pkl_now, _combined_redundancy_now = _resolve_kernel_paths(
-                args, kernel_pkl_out, kernel_redundancy_out, P1V4_KERNEL_FEATURES_PKL,
+                kernel_features_pkl, combined_redundancy_json, kernel_pkl_out, kernel_redundancy_out,
+                P1V4_KERNEL_FEATURES_PKL,
             )
             if _kernel_pkl_now != resolved_kernel_pkl or _combined_redundancy_now != resolved_combined_redundancy:
                 print(f"\n  [안내] Step 6~7 결과가 방금 반영됨 — kernel-pkl: {_kernel_pkl_now}"
@@ -551,7 +481,9 @@ def main():
                 step_extra += ["--kernel-features-pkl", resolved_kernel_pkl]
             if resolved_combined_redundancy:
                 step_extra += ["--combined-redundancy-json", resolved_combined_redundancy]
-            _interaction_now = _resolve_interaction_path(args, interaction_out, P1V4_INTERACTION_JSON)
+            _interaction_now = _resolve_interaction_path(
+                interaction_json, interaction_out, P1V4_INTERACTION_JSON,
+            )
             if _interaction_now != resolved_interaction:
                 print(f"\n  [안내] Step 5 결과가 방금 반영됨 — interaction-json: {_interaction_now}")
             resolved_interaction = _interaction_now
@@ -561,17 +493,17 @@ def main():
                 step_extra += ["--train-cycle-frac", str(P.FIXED_TRAIN_CYCLE_FRAC)]
             if P.FIXED_BETA_MIN is not None:
                 step_extra += ["--beta-min", str(P.FIXED_BETA_MIN)]
-            if args.p1_max_epochs is not None:
-                step_extra += ["--max-epochs", str(args.p1_max_epochs)]
-            if args.p1_patience is not None:
-                step_extra += ["--patience", str(args.p1_patience)]
-            if args.p1_batch_size is not None:
-                step_extra += ["--batch-size", str(args.p1_batch_size)]
+            if p1_max_epochs is not None:
+                step_extra += ["--max-epochs", str(p1_max_epochs)]
+            if p1_patience is not None:
+                step_extra += ["--patience", str(p1_patience)]
+            if p1_batch_size is not None:
+                step_extra += ["--batch-size", str(p1_batch_size)]
             if P.FIXED_L0_WARMUP_EPOCHS_OVERRIDE is not None:
                 step_extra += ["--l0-warmup-epochs-override", str(P.FIXED_L0_WARMUP_EPOCHS_OVERRIDE)]
             if P.FIXED_L0_NORM_CONSTANT is not None:
                 step_extra += ["--l0-norm-constant", str(P.FIXED_L0_NORM_CONSTANT)]
-            if args.hi_cost_weighted_l0:
+            if hi_cost_weighted_l0:
                 step_extra += ["--hi-cost-weighted-l0"]
             if P.FIXED_DEVICE is not None:
                 step_extra += ["--device", P.FIXED_DEVICE]
@@ -582,21 +514,14 @@ def main():
             # 축 설정을 쓰면서 이걸 빠뜨리면, scenario_spec.json은 그 설정을 반영해
             # 만들어지는데 실제로 로드되는 pkl은 캐논 데이터라는 "spec과 데이터 불일치"가
             # 조용히 발생한다 — 반드시 명시적으로 확인.
-            if args.p1_data_dir:
-                step_extra += ["--data-dir", args.p1_data_dir]
-            if args.p1_seg_data_dir:
-                step_extra += ["--seg-data-dir", args.p1_seg_data_dir]
-            _non_canon = args.axis_config != json.dumps(P.ACTIVE_AXIS_CONFIG)
-            if _non_canon and not (args.p1_data_dir and args.p1_seg_data_dir):
-                print("\n  [경고] --axis-config가 정식(캐논) q_frac_ref 설정과 다른데 "
-                      "--data-dir/--seg-data-dir을 안 줬습니다 — Step 8가 이 축 설정을 반영한 "
-                      "scenario_spec.json은 만들면서, 실제 pkl 데이터는 train.py의 "
-                      "기본 캐논 경로에서 그대로 읽어버립니다(spec-데이터 불일치, 조용히 틀린 "
-                      "결과). Step 4로 미리 추출한 경로를 --data-dir/--seg-data-dir로 명시하세요.")
+            if p1_data_dir:
+                step_extra += ["--data-dir", p1_data_dir]
+            if p1_seg_data_dir:
+                step_extra += ["--seg-data-dir", p1_seg_data_dir]
 
-            if args.n_hi != 66:
+            if n_hi != 66:
                 print(f"\n  [안내] SOH_EXCLUDE_STAT_LEAK/SOH_EXCLUDE_DQDV_LEAK을 Step 5~9 "
-                      f"하위 프로세스 환경에 명시 주입합니다(N_HI={args.n_hi}). N_HI가 64가 "
+                      f"하위 프로세스 환경에 명시 주입합니다(N_HI={n_hi}). N_HI가 64가 "
                       "아니면 --kernel-features-pkl/--interaction-json도 그 N_HI 기준으로 "
                       "새로 만든 파일이 아니면 shape 불일치로 실패합니다.")
             else:
@@ -626,12 +551,12 @@ def main():
                 step_extra += ["--kernel-features-pkl", resolved_kernel_pkl]
             if resolved_combined_redundancy:
                 step_extra += ["--combined-redundancy-json", resolved_combined_redundancy]
-            if args.rep_cells:
-                step_extra += ["--rep-cells", *args.rep_cells]
-            if args.p1_data_dir:
-                step_extra += ["--data-dir", args.p1_data_dir]
-            if args.p1_seg_data_dir:
-                step_extra += ["--seg-data-dir", args.p1_seg_data_dir]
+            if rep_cells:
+                step_extra += ["--rep-cells", *rep_cells]
+            if p1_data_dir:
+                step_extra += ["--data-dir", p1_data_dir]
+            if p1_seg_data_dir:
+                step_extra += ["--seg-data-dir", p1_seg_data_dir]
             if P.FIXED_DEVICE is not None:
                 step_extra += ["--device", P.FIXED_DEVICE]
 
@@ -648,12 +573,12 @@ def main():
         # (단일 소스 원칙 완성).
         _extra_env = None
         if num in (5, 6, 7, 8, 9):
-            _exclude_stat_leak, _exclude_dqdv_leak = P.N_HI_TO_ENV[args.n_hi]
+            _exclude_stat_leak, _exclude_dqdv_leak = P.N_HI_TO_ENV[n_hi]
             _extra_env = {
                 "SOH_EXCLUDE_STAT_LEAK": _exclude_stat_leak,
                 "SOH_EXCLUDE_DQDV_LEAK": _exclude_dqdv_leak,
             }
-        ok = run_step(num, name, script, step_extra, use_workers, args.workers,
+        ok = run_step(num, name, script, step_extra, use_workers, workers,
                        extra_env=_extra_env)
 
         if num == 8:

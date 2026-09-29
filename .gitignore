@@ -15,3 +15,5 @@
 *.log
 /1_convert/CALCE/*
 /1_convert/TJU/*
+*.egg-info/
+build/

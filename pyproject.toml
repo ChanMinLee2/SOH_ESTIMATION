@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soh-estimation"
+version = "0.1.0"
+description = "LFP/NCM/LCO battery State-of-Health estimation pipeline"
+requires-python = ">=3.10"
+
+# 이 저장소는 "패키지 배포"가 아니라 "sys.path 부트스트랩 제거"가 목적이다 —
+# pip install -e . 한 번이면 아래 모듈/패키지가 실행 위치(cwd)나 진입점 스크립트의
+# 파일 위치와 무관하게 항상 import 가능해진다. docs/REFATORING.md/PARAMETERS.md
+# 참고. 파이프라인 스텝 폴더(1_convert/~9_eval/)와 진단 도구는 패키지가 아니라
+# "직접 실행하는 스크립트"라 여기 포함하지 않는다 — 어디서도 그 폴더를 import하지
+# 않는다(전수 확인됨).
+[tool.setuptools]
+py-modules = ["data_directories", "parameters", "log_utils"]
+packages = [
+    "common",
+    "common.scenario",
+    "models",
+    "datasets",
+    "training",
+    "evaluation",
+    "utils",
+]
+
+# common/은 이미 저장소 루트 기준 이름과 위치가 같아 별도 매핑이 필요 없다.
+# models/datasets/training/evaluation/utils 5개는 실제로는 model_lib/ 밑에 있지만,
+# 그 내부 코드 전체가 "model_lib 자체가 import 루트"라는 전제로 서로
+# `from models.xxx import ...`처럼 절대경로 스타일로 import하고 있어(2026-09-23
+# 폴더 재배치 때 이미 확인된 사실) — 그 관례를 그대로 유지하기 위해 패키지 이름은
+# 그대로 두고 실제 디렉터리만 재매핑한다.
+[tool.setuptools.package-dir]
+models = "model_lib/models"
+datasets = "model_lib/datasets"
+training = "model_lib/training"
+evaluation = "model_lib/evaluation"
+utils = "model_lib/utils"

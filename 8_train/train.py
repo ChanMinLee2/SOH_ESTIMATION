@@ -36,7 +36,7 @@ ACTIVE_AXIS_CONFIG를 그대로 쓴다 — 다른 조합이면 직접 지정, �
 유일한 학습 설정 소스다. 과거 main_qfref_S_*.yaml 프리셋들(dataset subset/
 regression_model 교체 ablation)은 이번 리팩토링 이전(폴더 구조·train.py 개명 전)
 코드를 전제로 했고 이후 한 번도 재검증되지 않았다 — 재현이 필요해지면 그때 다시
-설계할 것(docs/REFATORING.md 2026-09-27 항목 참고).
+설계할 것(docs/REFACTORING.md 2026-09-27 항목 참고).
 """
 
 from __future__ import annotations
@@ -50,9 +50,8 @@ from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+# data_directories/parameters/common/models/datasets/training/evaluation/utils는
+# pip install -e .로 어디서든 바로 import된다(pyproject.toml 참고) — sys.path 조작 불필요.
 
 # Windows 콘솔이 cp949일 때 em-dash 등 특수문자 print가 UnicodeEncodeError로 죽는 문제
 # 방지(lambda_sweep.py/plot_lambda_sweep.py와 동일 패턴) — 짧은 스모크런처럼 체크포인트가
@@ -91,11 +90,9 @@ import parameters as P  # noqa: E402 — 축 설정 단일 소스(P.ACTIVE_AXIS_
 # RuntimeError였다 — lambda_sweep.py가 이미 겪은 문제와 동일(그쪽 주석 참고). 네 값은
 # 항상 세트로 움직이므로, 표준 조합이 아니면 넷 다 함께 오버라이드해야 한다.
 # parameters.py: ACTIVE_AXIS_CONFIG/FIXED_CANONICAL_DATA_DIR/SEG_DATA_DIR이 유일한
-# 소스다(2026-09-23 통일, 2026-09-27 --model-config yaml 폴백 자체를 제거해 확정).
-DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS
-DEFAULT_AXIS_CONFIG = json.dumps(P.ACTIVE_AXIS_CONFIG)
-DEFAULT_DATA_DIR = P.FIXED_CANONICAL_DATA_DIR
-DEFAULT_SEG_DATA_DIR = P.FIXED_CANONICAL_SEG_DATA_DIR
+# 소스다(2026-09-23 통일, 2026-09-27 --model-config yaml 폴백 자체를 제거해 확정,
+# 2026-09-29 지역 DEFAULT_* 재선언 제거 — interaction.py/synergy.py/kernel.py와
+# 바이트 단위로 중복이었다. 아래부터는 P.를 직접 참조).
 
 # run_pipeline.py의 P1V2_RUNS_DIR과 동일 경로(2026-09-23 재배치) — 단독 실행 시(--output-dir
 # 미지정) 폴백으로만 쓰인다. run_pipeline.py를 거치면 항상 --output-dir이 명시되므로 이
@@ -106,9 +103,9 @@ RESULTS_DIR = PROJECT_ROOT / "model_lib" / "results" / "p1v2_runs"
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Phase1 v2 — 체크포인트 기준 변경 + temperature annealing")
     p.add_argument("--seg-axis", default=None,
-                   help="미지정 시 DEFAULT_SEG_AXIS(parameters.py: FIXED_SEG_AXIS)로 폴백")
+                   help="미지정 시 parameters.py: FIXED_SEG_AXIS로 폴백")
     p.add_argument("--axis-config", default=None,
-                   help="미지정 시 DEFAULT_AXIS_CONFIG(parameters.py: ACTIVE_AXIS_CONFIG)로 폴백")
+                   help="미지정 시 parameters.py: ACTIVE_AXIS_CONFIG로 폴백")
     p.add_argument("--charge-m", type=int, default=None)
     p.add_argument("--discharge-m", type=int, default=None)
     p.add_argument("--scen-k", type=int, default=None)
@@ -123,11 +120,12 @@ def _parse_args() -> argparse.Namespace:
                         "docs/260909_RESULTS.md §6-5(e) 진단 실험. parameters.py 기본 1.0=미적용.")
     p.add_argument("--data-dir", default=None,
                    help="cycle pkl 경로. 미지정 시 yaml의 data.data_dir, 그마저 없으면 "
-                        "DEFAULT_DATA_DIR(캐논 경로)로 폴백 — 예전엔 CLI 기본값이 항상 "
-                        "DEFAULT_DATA_DIR라 yaml 값이 있어도 조용히 무시됐다(2026-09-04 수정).")
+                        "parameters.py: FIXED_CANONICAL_DATA_DIR(캐논 경로)로 폴백 — 예전엔 "
+                        "CLI 기본값이 항상 이 캐논 경로라 yaml 값이 있어도 조용히 무시됐다"
+                        "(2026-09-04 수정).")
     p.add_argument("--seg-data-dir", default=None,
                    help="seg pkl 경로. 미지정 시 yaml의 data.seg_data_dir, 그마저 없으면 "
-                        "DEFAULT_SEG_DATA_DIR로 폴백(위와 동일 수정).")
+                        "parameters.py: FIXED_CANONICAL_SEG_DATA_DIR로 폴백(위와 동일 수정).")
     p.add_argument("--beta-min", type=float,
                    default=P.FIXED_BETA_MIN if P.FIXED_BETA_MIN is not None else 0.1,
                    help="annealing 종착 BETA(parameters.py 기본 0.1, 원래값 2/3)")
@@ -392,14 +390,16 @@ def main() -> None:
     import copy
     cfg = copy.deepcopy(P.P1_MODEL_CONFIG)
 
-    # 우선순위: CLI 명시 > 이 파일의 DEFAULT_*(=parameters.py) 상수.
-    seg_axis = args.seg_axis if args.seg_axis is not None else DEFAULT_SEG_AXIS
-    axis_cfg = json.loads(args.axis_config) if args.axis_config is not None else json.loads(DEFAULT_AXIS_CONFIG)
+    # 우선순위: CLI 명시 > parameters.py.
+    seg_axis = args.seg_axis if args.seg_axis is not None else P.FIXED_SEG_AXIS
+    axis_cfg = (json.loads(args.axis_config) if args.axis_config is not None
+                else dict(P.ACTIVE_AXIS_CONFIG))
     cfg["scenario"] = {"axis": seg_axis, "axis_config": axis_cfg}
     cfg["data"]["split_seed"] = args.split_seed
     cfg["data"]["train_cycle_frac"] = args.train_cycle_frac
-    cfg["data"]["data_dir"] = args.data_dir if args.data_dir is not None else DEFAULT_DATA_DIR
-    cfg["data"]["seg_data_dir"] = args.seg_data_dir if args.seg_data_dir is not None else DEFAULT_SEG_DATA_DIR
+    cfg["data"]["data_dir"] = args.data_dir if args.data_dir is not None else P.FIXED_CANONICAL_DATA_DIR
+    cfg["data"]["seg_data_dir"] = (args.seg_data_dir if args.seg_data_dir is not None
+                                    else P.FIXED_CANONICAL_SEG_DATA_DIR)
 
     cls_cfg = cfg.setdefault("classifier", {})
     reg_cfg = cfg.setdefault("regression", {})

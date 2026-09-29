@@ -3,7 +3,6 @@ hi_segment_viz.py
 
 출력 파일:
   hi_segment_cuts.png           -V vs q_frac 세그먼트 경계 확인 (qfrac 축 전용)
-  hi_trend.png                  -Global HI 15종 열화 추이
   hi_segment_trend_stat.png     -N구간 × 통계 HI 열화 추이 (카테고리 A)  [행=시나리오, 열=HI]
   hi_segment_trend_diff.png     -N구간 × 미분 HI 열화 추이 (카테고리 B)
   hi_segment_trend_lfp.png      -N구간 × LFP HI 열화 추이 (카테고리 C)
@@ -38,7 +37,6 @@ import pandas as pd
 
 from hi_correlation import (
     ALL_SEGS,
-    GLOBAL_HI_KEYS,
     HI_GROUPS,
     HUST_DIR,
     MIT_DIR,
@@ -46,9 +44,7 @@ from hi_correlation import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT.parent) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT.parent))
-import parameters as P  # noqa: E402 — 축 설정/실행 환경 단일 소스
+import parameters as P  # 축 설정/실행 환경 단일 소스 (pip install -e . 로 import 가능)
 
 # ── 폰트 설정 ──────────────────────────────────────────────────────────────────
 for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
@@ -274,61 +270,6 @@ def plot_segment_cuts(mit_pkls, hust_pkls, out_path: Path, n_cycles: int = 4):
                         CHG_SEG_COLORS, CHG_SEG_LABELS, n_cycles)
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    print(f"  저장: {out_path}")
-    plt.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Figure 2: Global HI 열화 추이 (hi_trend.png)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def plot_hi_trend(df: pd.DataFrame, out_path: Path):
-    """Global HI 15종 전체 -용량 열화 추이."""
-    df = df.copy()
-    df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
-
-    avail = [k for k in GLOBAL_HI_KEYS if k in df.columns]
-    ncols = 5
-    nrows = (len(avail) + ncols - 1) // ncols
-
-    fig, axes = plt.subplots(nrows, ncols,
-                              figsize=(ncols * 3.8, nrows * 3.2),
-                              squeeze=False)
-    fig.suptitle(
-        "Global HI 15종 -열화 추이  (x=Capacity Ah, 선=셀별 궤적)\n"
-        "■ 파란 계열=MIT   ■ 주황 계열=HUST",
-        fontsize=11, fontweight="bold",
-    )
-
-    legend_done = False
-    for ai, hi_key in enumerate(avail):
-        ax = axes[ai // ncols][ai % ncols]
-        for ds, color in DS_COLOR.items():
-            sub = df[df["dataset"] == ds][["cell_id", hi_key, "capacity_Ah"]].dropna()
-            if len(sub) == 0:
-                continue
-            for _, grp in sub.groupby("cell_id"):
-                grp_s = grp.sort_values("capacity_Ah", ascending=False)
-                ax.plot(grp_s["capacity_Ah"], grp_s[hi_key],
-                        color=color, lw=0.7, alpha=0.22)
-            ax.scatter(sub["capacity_Ah"], sub[hi_key],
-                       color=color, s=1.2, alpha=0.28,
-                       label=ds if not legend_done else None)
-
-        ax.set_xlabel("Capacity (Ah)", fontsize=8)
-        ax.set_ylabel(_plain_label(hi_key), fontsize=8)
-        ax.set_title(hi_key, fontsize=8, fontweight="bold")
-        ax.tick_params(labelsize=7)
-        ax.grid(True, lw=0.3, alpha=0.4)
-        if not legend_done:
-            ax.legend(fontsize=8, markerscale=4, loc="best")
-            legend_done = True
-
-    for ai in range(len(avail), nrows * ncols):
-        axes[ai // ncols][ai % ncols].set_visible(False)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"  저장: {out_path}")
     plt.close()
@@ -586,8 +527,6 @@ def main():
 
     # qfrac 이외 축은 HI_GROUPS 재빌드 (모듈 전역 갱신)
     if _axis != "qfrac":
-        import sys as _sys
-        _sys.path.insert(0, str(PROJECT_ROOT.parent))
         from common.scenario import get_segmenter as _get_seg
         from hi_correlation import _build_hi_groups
         _seg_names = _get_seg(_axis, {_axis: _axis_cfg}).get_spec().scenario_names
@@ -621,10 +560,6 @@ def main():
     df = load_or_extract(n_workers=args.workers, force=args.force,
                          axis=_axis, axis_cfg=_axis_cfg)
     print(f"  총 사이클: {len(df):,}")
-
-    # Figure 2: Global HI 열화 추이
-    print("\n=== Global HI 열화 추이 (15종) ===")
-    plot_hi_trend(df, hi_plot_dir / "hi_trend.png")
 
     # Figure 3-A/B/C/D: 카테고리별 세그먼트 HI 열화 추이
     for cat, cat_title, fname in CATEGORIES:

@@ -67,10 +67,9 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-from data_directories import DATA_4_HI_ROOT_STR  # noqa: E402
+# data_directories/parameters/common/models/datasets/utils 등은 pip install -e .로
+# 어디서든 바로 import된다(pyproject.toml 참고) — sys.path 조작 불필요.
+from data_directories import DATA_4_HI_ROOT_STR
 
 try:
     from utils.compat import install_numpy2_shim

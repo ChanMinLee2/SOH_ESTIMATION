@@ -6,17 +6,10 @@ the look across the whole set.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from data_directories import DATA_4_HI_ROOT  # noqa: E402,F401
+from data_directories import DATA_4_HI_ROOT  # noqa: F401 — pip install -e . 로 import 가능
 
 # ---------------------------------------------------------------- palette --
 #

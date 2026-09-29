@@ -399,6 +399,19 @@ MD5가 리팩토링 전후로 완전히 일치하는지로 검증되어 왔다.
 
 ## 14. 실행 방법 요약
 
+**최초 1회 설치**(저장소를 새로 클론했다면 반드시 먼저 실행):
+
+```bash
+pip install -e .
+```
+
+`data_directories`/`parameters`/`common`/`models`/`datasets` 등을 어느 위치에서
+실행하든 import할 수 있게 저장소를 editable install한다(`pyproject.toml`). 이걸
+안 하면 각 스텝 스크립트가 `ModuleNotFoundError`로 죽는다 — 예전에는 스크립트마다
+`sys.path`를 직접 조작해 해결했지만 2026-09-28에 그 코드를 전부 제거했다.
+
+**파이프라인 실행**:
+
 ```bash
 python run_pipeline.py                 # 전체 파이프라인, Step 1부터
 python run_pipeline.py 4 --to-step 4   # Step 4(시나리오 분할+HI 추출)만
@@ -408,5 +421,5 @@ python run_pipeline.py 9               # 평가만(직전 run 자동 탐색)
 ```
 
 자주 바꾸는 파라미터(`ACTIVE_*`)는 CLI 플래그로 노출되고, 거의 안 바꾸는
-파라미터(`FIXED_*`)는 `parameters.py`를 직접 수정해야 한다(§`docs/REFATORING.md`
-참고 — 이 구분과 세부 변경 이력은 그 문서가 계속 추적한다).
+파라미터(`FIXED_*`)는 `parameters.py`를 직접 수정해야 한다(`docs/PARAMETERS.md`에
+전체 목록, `docs/REFACTORING.md`에 변경 이력).

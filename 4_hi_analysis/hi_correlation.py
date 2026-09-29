@@ -6,7 +6,10 @@ Spearman 상관계수를 계산·시각화 — run_pipeline.py Step 4.
 
 입력 : _4_data_hi/clean/{MIT,HUST,TJU,CALCE}/*.pkl
 출력 : hi_correlation.png
-       _4_data_hi/{axis}/cycle/{DS}/{cell_id}.pkl
+       _4_data_hi/{axis}/cycle/{DS}/{cell_id}.pkl (dataset/cell_id/cycle/capacity_Ah만 —
+         2026-09-28부로 완전 사이클 Global HI는 계산하지 않는다, 아래 "HI 구조" 참고.
+         capacity_Ah 컬럼만은 계속 필요 — model_lib/datasets/segment_dataset.py가 세그먼트별
+         부분 capacity_Ah를 이 사이클 총량으로 대체하는 데 씀.)
        _4_data_hi/{axis}/seg/{DS}/{cell_id}.pkl   (세그먼트 포맷 — Step 5 이후가 실제로 읽는 것)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -15,65 +18,56 @@ Spearman 상관계수를 계산·시각화 — run_pipeline.py Step 4.
 
 2026-09-24: q_frac_ref가 유일한 세그멘테이션 축이다(과거 실험용 축 protocol/vwindow/
 rcs/cluster/q_abs/vqslope/full_cycle/test_rs는 common/scenario/에서 삭제 — git
-히스토리에 남아있으니 필요하면 그쪽에서 복원). --seg-axis는 이제 실질적으로 상수라
-CLI에 남아있지만 다른 값을 주면 get_segmenter()가 ValueError(Unknown scenario axis)를
-낸다.
+히스토리에 남아있으니 필요하면 그쪽에서 복원).
 
-생략하면 parameters.py: FIXED_SEG_AXIS(="q_frac_ref")/ACTIVE_AXIS_CONFIG가
-자동 적용된다(run_pipeline.py도 동일):
+2026-09-29: 이 스크립트는 CLI 인자를 전혀 받지 않는다 — 워커 수/캐시 강제 재추출
+여부/데이터셋 그룹/세그멘테이션 축/축 파라미터(n1/n2/ref_lag/noise_amp/...)/CC-only
+여부/shape 필터 비활성화 여부, 전부 parameters.py(ACTIVE_WORKERS/ACTIVE_FORCE_EXTRACT/
+FIXED_DATASET_GROUP/FIXED_SEG_AXIS/ACTIVE_AXIS_CONFIG/FIXED_EXCLUDE_CV/
+FIXED_SKIP_SHAPE)에서만 읽는다(run_pipeline.py도 동일한 값을 읽어 쓴다 — 단일 소스).
+실행은 그냥:
     python 4_hi_analysis/hi_correlation.py
-    python 4_hi_analysis/hi_correlation.py --dataset-group lfp --force
 
-n1/n2/ref_lag/noise_amp 등 q_frac_ref 파라미터를 바꾸려면 --axis-config로 전체
-딕셔너리를 다시 주거나, --n1/--n2/... 단축 인자로 일부만 patch:
-    python 4_hi_analysis/hi_correlation.py --n1 0.4 --ref-lag 0
-
-전체 CLI 옵션은 `python 4_hi_analysis/hi_correlation.py --help` 참고 — 대부분
-parameters.py 기본값을 참조한다(--n1/--n2/... 축 단축 인자만 예외로, 명시 안 하면
---axis-config 값을 그대로 patch 없이 둔다).
+실험 조건을 바꾸려면 parameters.py를 직접 고친 뒤 실행한다. 여러 조건을 순차로
+돌리려면(예: n1을 바꿔가며 5케이스), 매 케이스 전에 parameters.py를 패치하고
+실행 후 원래 값으로 복원하는 드라이버 스크립트를 쓴다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HI 구조 (docs/NEW_HIS.md 참조)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Global  (15):  G01–G15
   Segment (n_seg × 66): 통계 S01–S20 / 미분 D01–D20 / LFP L01–L20 / Morph M01–M06
+  (완전 사이클 Global HI, 옛 G01–G15는 2026-09-28부로 계산하지 않음 — 진단/시각화
+  전용이었고 모델 학습 입력도 아니었다. git 히스토리에서 복원 가능.)
   세그먼트 이름: 축마다 다름 (q_frac_ref: dis_hi/dis_mid/dis_lo/chg_lo/chg_mid/chg_hi)
   키 명명: stat_{k}_{seg} / diff_{k}_{seg} / lfp_{k}_{seg} / morph_{k}_{seg}
 """
 
-import argparse
 import json
 import os
 import pickle
-import sys
 import warnings
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.gridspec as gridspec
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.signal import savgol_filter
 from scipy.stats import spearmanr
 from tqdm.auto import tqdm
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ─────────────────────────────────────────────────────────────────────────────
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STEP_DIR     = Path(__file__).resolve().parent
+STEP_DIR = Path(__file__).resolve().parent
 # 2026-08-08: pkl 데이터(_4_data_hi 전체, 4_hi_analysis의 캐시 pkl)만 D로 이동 — STEP_DIR은
 # hi_segment_viz.py 등 실제 코드 파일 위치 조회에도 쓰이므로(아래 spec_from_file_location)
 # 그대로 두고, data_directories.py의 공유 상수를 쓴다.
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-from data_directories import DATA_4_HI_ROOT, PKL_CACHE_ROOT  # noqa: E402
-import parameters as P  # noqa: E402 — 축 설정 단일 소스(P.ACTIVE_AXIS_CONFIG)
+# 2026-09-28: 저장소가 pip install -e .로 editable install돼 있어(pyproject.toml),
+# data_directories/parameters/common 전부 PROJECT_ROOT를 sys.path에 넣지 않아도
+# 바로 import된다 — ProcessPoolExecutor로 spawn되는 subprocess에서도 동일.
+from data_directories import DATA_4_HI_ROOT, PKL_CACHE_ROOT
+import parameters as P  # 축 설정 단일 소스(P.ACTIVE_AXIS_CONFIG)
 MIT_DIR      = DATA_4_HI_ROOT / "clean" / "MIT"
 HUST_DIR     = DATA_4_HI_ROOT / "clean" / "HUST"
 TJU_DIR      = DATA_4_HI_ROOT / "clean" / "TJU"
@@ -91,22 +85,17 @@ DATASET_GROUPS = {
     "ncm": ["TJU", "CALCE"],
     "all": ["MIT", "HUST", "TJU", "CALCE"],
 }
-# 대표 셀(플롯용) — 2_preprocess/preprocess.py의 SAMPLE_IDS와 동일 셀
-SAMPLE_CELL_IDS = {"MIT": "b1c0", "HUST": "1-1", "TJU": "CY25-05_1-#1", "CALCE": "CS2_8"}
-DATASET_CMAPS   = {"MIT": "Blues", "HUST": "Oranges", "TJU": "Greens", "CALCE": "Purples"}
-DATASET_COLORS  = {"MIT": "#1f77b4", "HUST": "#d55e00", "TJU": "#2ca02c", "CALCE": "#9467bd"}
+# 대표 셀 ID/데이터셋별 플롯 스타일(cmap/색상)은 plot.py 소유(2026-09-29 분리) —
+# 이 파일에서 상관분석 결과를 그릴 때 plot.py의 plot_correlation/_plot_sample_hi로
+# 넘기기만 하고, 여기서는 값을 다시 정의하지 않는다.
 
 
 def _ds_dir(name: str) -> Path:
-    """데이터셋 이름 -> 현재 디렉터리 (MIT_DIR/HUST_DIR은 --skip-shape 시 런타임에
-    재할당되므로 모듈 전역을 매번 새로 조회해야 한다)."""
+    """데이터셋 이름 -> 현재 디렉터리 (MIT_DIR/HUST_DIR은 FIXED_SKIP_SHAPE=True 시
+    런타임에 재할당되므로 모듈 전역을 매번 새로 조회해야 한다)."""
     return {"MIT": MIT_DIR, "HUST": HUST_DIR, "TJU": TJU_DIR, "CALCE": CALCE_DIR}[name]
 
-# common 패키지를 subprocess에서도 import 가능하게
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-# CC→CV 전환 검출 (--exclude-cv 옵션에서 재사용)
+# CC→CV 전환 검출 (FIXED_EXCLUDE_CV=True 시 재사용)
 from common.scenario._curves import _detect_cv_start  # noqa: E402
 
 # 세그먼트 HI 계산 로직의 단일 소스는 hi_compute.py(같은 디렉터리, 2026-09-23까지는
@@ -117,44 +106,23 @@ from hi_compute import (  # noqa: E402
     _seg_diff,
     _seg_lfp,
     _seg_morph_curves,
-    _peak_fwhm_asym,
+    _peak_fwhm_asym,  # 이 파일 자신은 더 이상 안 씀(완전 사이클 Global HI 계산
+                      # 제거, 2026-09-29) — tools/profile_hi_timing.py가
+                      # `from hi_correlation import _peak_fwhm_asym`으로 재수출
+                      # 받아 쓰므로 그대로 유지.
 )
+
+# STAT/DIFF/LFP/MORPH 키 목록의 단일 소스는 model_lib/utils/hi_schema.py("66-HI
+# schema") — 2026-09-28: 저장소가 editable install(pyproject.toml)돼 있어 이제
+# Step4에서도 바로 import된다. 예전엔 이 목록을 여기 그대로 복사해뒀었다(hi_schema.py와
+# 66개 키 전부 동일했음 — 진짜 중복, 같은 이름의 로컬 정의를 두지 않는다는 위 hi_compute.py
+# 원칙과 동일하게 적용).
+from utils.hi_schema import STAT_KEYS, DIFF_KEYS, LFP_KEYS, MORPH_KEYS  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HI 키 상수 정의
 # ─────────────────────────────────────────────────────────────────────────────
-THETA_FLAT = 0.25  # V/Ah — LFP 플래토 판별 임계값 (|dV/dQ| < θ_flat) — _curves.THETA_FLAT 과 동일
 
-GLOBAL_HI_KEYS = [
-    "q_dis", "energy_dis", "v_mean_cw_dis", "r_trans_est", "q_plateau_frac",
-    "ica_peak1_v", "ica_peak1_h", "ica_peak1_area",
-    "dva_valley_q", "dva_valley_depth",
-    "ce", "cv_q_frac", "cv_time_frac", "chg_ica_peak1_h", "ica_peak1_asym",
-]
-_GLOBAL_LABELS = {
-    "q_dis":           "Q_dis",
-    "energy_dis":      "E_dis",
-    "v_mean_cw_dis":   "μ_cw(V)_dis",
-    "r_trans_est":     "R_trans",
-    "q_plateau_frac":  "Q_plat/Q",
-    "ica_peak1_v":     "V @ peak(dQ/dV)",
-    "ica_peak1_h":     "max(dQ/dV)",
-    "ica_peak1_area":  "∫(dQ/dV)dV",
-    "dva_valley_q":    "Q @ min(dV/dQ)",
-    "dva_valley_depth":"min(dV/dQ)",
-    "ce":              "CE",
-    "cv_q_frac":       "Q_CV/Q",
-    "cv_time_frac":    "t_CV/t",
-    "chg_ica_peak1_h": "max(dQ/dV) [chg]",
-    "ica_peak1_asym":  "ICA asym",
-}
-
-STAT_KEYS = [
-    "v_mean_cw", "v_std", "v_skew", "v_kurt", "v_ent",
-    "i_mean", "i_std", "v_med", "corr_qi", "corr_vi",
-    "q_abs", "energy_seg", "v_iqr", "v_range", "v_p10",
-    "v_p90", "v_samp_ent", "corr_vt", "i_q_slope", "v_detrended_std",
-]
 _STAT_LABELS = {
     "v_mean_cw":        "μ_cw(V)",
     "v_std":            "σ(V)",
@@ -178,12 +146,6 @@ _STAT_LABELS = {
     "v_detrended_std":  "σ(V detrend)",
 }
 
-DIFF_KEYS = [
-    "dvdq_mean", "dvdq_std", "dvdq_max_abs", "dvdq_min", "dvdq_area",
-    "dqdv_peak_h", "dqdv_peak_v", "dqdv_peak_w", "dqdv_area", "v_trend_slope",
-    "dqdv_peak_asym", "d2vdq2_rms", "dvdq_skew", "dvdq_ent", "dv_di_seg",
-    "dqdv_valley_h", "dqdv_valley_v", "dvdq_peak_q", "dvdq_flat_q", "dqdv_area_asym",
-]
 _DIFF_LABELS = {
     "dvdq_mean":       "μ(dV/dQ)",
     "dvdq_std":        "σ(dV/dQ)",
@@ -207,13 +169,6 @@ _DIFF_LABELS = {
     "dqdv_area_asym":  "ICA area asym",
 }
 
-LFP_KEYS = [
-    "plateau_frac", "plateau_v_mean", "plateau_v_std", "plateau_dvdq_std",
-    "nonlin_idx", "v_dev_mid", "v_flatness", "delta_v_rms",
-    "vq_slope_mid", "inflect_v", "inflect_q_frac", "v_concavity",
-    "phase_entry_dvdq", "v_q_pearson", "ica_peak_cnt",
-    "plateau_v_slope", "v_gradient_exit", "plateau_q_onset", "dv_dt_plateau", "v_ent_plateau",
-]
 _LFP_LABELS = {
     "plateau_frac":      "plat. frac.",
     "plateau_v_mean":    "μ(V)|plat",
@@ -238,10 +193,6 @@ _LFP_LABELS = {
 }
 
 # 카테고리 D: 형태학적 거리 (BOL 대비 DTW / 이산 Fréchet) × 3곡선 = 6종
-MORPH_KEYS = [
-    "vt_dtw", "vq_dtw", "ve_dtw",
-    "vt_frec", "vq_frec", "ve_frec",
-]
 _MORPH_LABELS = {
     "vt_dtw":  "DTW(V-t)",       "vq_dtw":  "DTW(V-Q)",       "ve_dtw":  "DTW(V-E)",
     "vt_frec": "Fréchet(V-t)",   "vq_frec": "Fréchet(V-Q)",   "ve_frec": "Fréchet(V-E)",
@@ -279,8 +230,6 @@ _SEG_HI_BASES: list = (
 
 # ── 전체 HI 키 / 레이블 / 그룹 자동 빌드 ────────────────────────────────────
 _HI_META: list = []
-for _k in GLOBAL_HI_KEYS:
-    _HI_META.append((_k, _GLOBAL_LABELS[_k]))
 for _, _, _seg, _ in ALL_SEGS:
     for _k in STAT_KEYS:
         _HI_META.append((f"stat_{_k}_{_seg}", _STAT_LABELS[_k]))
@@ -291,11 +240,10 @@ for _, _, _seg, _ in ALL_SEGS:
     for _k in MORPH_KEYS:
         _HI_META.append((f"morph_{_k}_{_seg}", _MORPH_LABELS[_k]))
 
-ALL_HI_KEYS = [k for k, _ in _HI_META]   # 15 + 6×66 = 411
+ALL_HI_KEYS = [k for k, _ in _HI_META]   # 6×66 = 396 (완전 사이클 Global HI 15개는 더 이상 계산 안 함)
 HI_LABELS   = {k: lbl for k, lbl in _HI_META}
 
 HI_GROUPS: "OrderedDict[str, list[str]]" = OrderedDict()
-HI_GROUPS["Global"] = GLOBAL_HI_KEYS[:]
 for _, _, _seg, _seg_lbl in ALL_SEGS:
     HI_GROUPS[f"{_seg} — Stat"]  = [f"stat_{k}_{_seg}"  for k in STAT_KEYS]
     HI_GROUPS[f"{_seg} — Diff"]  = [f"diff_{k}_{_seg}"  for k in DIFF_KEYS]
@@ -311,9 +259,8 @@ def _build_hi_groups(seg_names: list) -> tuple:
     qfrac 이외 축(protocol, vwindow, rcs, cluster)은 세그먼트 이름이 달라
     모듈 레벨 상수가 맞지 않는다. main()에서 축이 결정된 뒤 이 함수로 교체한다.
     """
-    labels: dict = {k: _GLOBAL_LABELS[k] for k in GLOBAL_HI_KEYS}
+    labels: dict = {}
     groups: "OrderedDict[str, list[str]]" = OrderedDict()
-    groups["Global"] = GLOBAL_HI_KEYS[:]
     for seg in seg_names:
         for k in STAT_KEYS:
             labels[f"stat_{k}_{seg}"] = _STAT_LABELS[k]
@@ -384,106 +331,6 @@ def _dtw_batch(queries: np.ndarray, bol: np.ndarray) -> np.ndarray:
     return out
 
 
-def _global_ica(v, i_mag, dt, v_lo=2.8, v_hi=3.65, n_bins=80):
-    """전체 방전/충전 ICA (dQ/dV). SG window=21.
-
-    Returns (peak_v, peak_h, peak_area, asym) — LFP 범위 [3.1, 3.5] V 내 1차 피크
-    """
-    edges  = np.linspace(v_lo, v_hi, n_bins + 1)
-    dv     = edges[1] - edges[0]
-    vmids  = (edges[:-1] + edges[1:]) / 2
-    dqdv   = np.zeros(n_bins)
-    for j in range(n_bins):
-        m = (v >= edges[j]) & (v < edges[j + 1])
-        if m.sum() > 0:
-            dqdv[j] = np.sum(i_mag[m] * dt[m]) / 3600.0 / dv
-    ws = min(21, n_bins - (1 - n_bins % 2))
-    ws = max(3, ws if ws % 2 == 1 else ws - 1)
-    try:
-        dqdv_s = savgol_filter(dqdv, ws, min(3, ws - 1))
-    except Exception:
-        dqdv_s = dqdv
-    lfp_m = (vmids >= 3.1) & (vmids <= 3.5)
-    if lfp_m.sum() < 3:
-        return np.nan, np.nan, np.nan, np.nan
-    sub   = dqdv_s[lfp_m]; subv = vmids[lfp_m]
-    pk    = int(np.argmax(sub))
-    peak_v    = float(subv[pk])
-    peak_h    = float(sub[pk])
-    peak_area = float(np.trapz(np.maximum(sub, 0), subv))
-    full_pk   = int(np.where(lfp_m)[0][0]) + pk
-    _, asym   = _peak_fwhm_asym(dqdv_s, full_pk, vmids)
-    return peak_v, peak_h, peak_area, asym
-
-
-def _global_dva(v, i_mag, dt, q_local):
-    """전체 방전 DVA (dV/dQ). SG window=21.
-
-    Returns (valley_q, valley_depth) — LFP 플래토 범위 [3.15, 3.50] V 내 최솟값
-    """
-    if q_local < 0.1 or len(v) < 20:
-        return np.nan, np.nan
-    dq_bin  = max(q_local / 50.0, 0.005)
-    q_cum   = np.cumsum(i_mag * dt) / 3600.0
-    q_edges = np.arange(0.0, q_local + dq_bin, dq_bin)
-    n_seg   = len(q_edges) - 1
-    v_avg   = np.full(n_seg, np.nan)
-    for j in range(n_seg):
-        m = (q_cum >= q_edges[j]) & (q_cum < q_edges[j + 1])
-        if m.sum() > 0:
-            v_avg[j] = float(np.mean(v[m]))
-    valid = np.isfinite(v_avg)
-    if valid.sum() < 5:
-        return np.nan, np.nan
-    qm     = (q_edges[:-1] + q_edges[1:]) / 2
-    v_fill = np.interp(qm, qm[valid], v_avg[valid])
-    ws = min(21, n_seg - (1 - n_seg % 2))
-    ws = max(3, ws if ws % 2 == 1 else ws - 1)
-    try:
-        v_s = savgol_filter(v_fill, ws, min(3, ws - 1))
-    except Exception:
-        v_s = v_fill
-    dvdqa = np.gradient(v_s, dq_bin)
-    plt_m = (v_fill >= 3.15) & (v_fill <= 3.50)
-    if plt_m.sum() < 2:
-        return np.nan, np.nan
-    sub_q   = qm[plt_m]; sub_d = dvdqa[plt_m]
-    vi      = int(np.argmin(sub_d))
-    return float(sub_q[vi]), float(sub_d[vi])
-
-
-def _r_dc_from_chg(vc, ic, dtc):
-    """CC→CV 전환 시 ΔV/ΔI 로 직류 내부저항 추정 [mΩ].
-
-    전환 전후 각 5샘플 평균으로 안정화. 전환 없으면 NaN.
-    """
-    if len(ic) < 15:
-        return np.nan
-    i_mx = float(np.max(ic))
-    if i_mx < 0.01:
-        return np.nan
-    cc_mask = ic >= 0.80 * i_mx
-    trans_idx = None
-    for j in range(1, len(cc_mask)):
-        if cc_mask[j - 1] and not cc_mask[j]:
-            trans_idx = j
-            break
-    if trans_idx is None or trans_idx < 3:
-        return np.nan
-    pre  = max(0, trans_idx - 5)
-    post = min(len(ic), trans_idx + 5)
-    v_pre  = float(np.mean(vc[pre:trans_idx]))
-    v_post = float(np.mean(vc[trans_idx:post]))
-    i_pre  = float(np.mean(ic[pre:trans_idx]))
-    i_post = float(np.mean(ic[trans_idx:post]))
-    di = abs(i_pre - i_post)
-    dv = abs(v_pre - v_post)
-    if di < 0.01:
-        return np.nan
-    r = dv / di * 1000.0   # mΩ
-    return float(r) if 0.0 < r < 1000.0 else np.nan
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # HI 추출 (top-level — multiprocessing 호환)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -516,6 +363,143 @@ def _strip_seg_suffix(d: dict, seg: str) -> dict:
     return {(k[:-n] if k.endswith(suf) else k): v for k, v in d.items()}
 
 
+def _build_scen_lookup(spec_names: list) -> dict:
+    """세그먼트 이름 → scen 코드(방향 부호 있는 정수). _SEG_SCEN(qfrac류 표준
+    6-시나리오)에 전부 있으면 그대로, 아니면 이름 접두사(chg/dis)+등장순서로 계산."""
+    if all(s in _SEG_SCEN for s in spec_names):
+        return {s: _SEG_SCEN[s][0] for s in spec_names}
+    _chg_names = [s for s in spec_names if s.startswith("chg")]
+    _dis_names = [s for s in spec_names if s not in _chg_names]
+    return {
+        s: ((_chg_names.index(s) + 1) if s in _chg_names else -(_dis_names.index(s) + 1))
+        for s in spec_names
+    }
+
+
+def _load_cell_pkl(path: Path):
+    """셀 pkl 로드 + 최소 검증. 반환: (df_all, dataset, cell_id) 또는 실패 시 None."""
+    try:
+        with open(path, "rb") as f:
+            raw = pickle.load(f)
+    except Exception:
+        return None
+
+    meta   = raw.get("meta", {})
+    df_all = raw.get("cycles")
+    if df_all is None or not isinstance(df_all, pd.DataFrame):
+        return None
+
+    if "phase" not in df_all.columns:
+        df_all = _add_phase(df_all)
+
+    dataset = meta.get("dataset", "")
+    cell_id = meta.get("cell_id", path.stem)
+    return df_all, dataset, cell_id
+
+
+def _extract_segment_rows(rec_iter, spec_names: list, dataset: str, cell_id: str,
+                           cyc, cap: float, scen_lookup: dict,
+                           curve_buf: dict) -> list:
+    """세그먼터가 내놓는 SegmentRecord들을 HI 행(dict) 리스트로 변환.
+
+    방전/충전 양쪽에서 동일하게 쓴다(예전엔 두 곳에 거의 같은 코드가 복사돼 있었다 —
+    2026-09-29 통합, docs/REFACTORING.md 참고). Morph HI는 여기서 값을 확정하지
+    않고 곡선만 curve_buf에 버퍼링한다 — 실제 거리 계산은 그 사이클 루프가 전부 끝난
+    뒤 _apply_batched_morph_distances()가 세그먼트/곡선타입별로 배치 처리한다
+    (BOL 참조 곡선을 알려면 같은 시나리오의 첫 세그먼트가 먼저 나와야 하므로).
+    """
+    rows = []
+    for _rec in rec_iter:
+        seg = _rec.meta.get("seg_name") or spec_names[_rec.scenario_id]
+        vs = _rec.v; ims = _rec.i; dts = _rec.dt; qcs = _rec.q
+        _srow: dict = {
+            "dataset": dataset, "cell_id": cell_id, "cycle": int(cyc),
+            "capacity_Ah": cap,
+            "segment_id": int(_rec.scenario_id),
+            "seg_name": seg,
+            "scen": scen_lookup.get(seg, 0),
+            # assign="none"(no_scen 대조군)이라도 사후 존별 재분리가 가능하도록
+            # 원본 존/위치 정보를 그대로 보존한다(docs/260816_RESULTS.md §5-4).
+            "zone": _rec.meta.get("zone"),
+            "q_frac_lo": _rec.meta.get("q_frac_lo"),
+            "q_frac_hi": _rec.meta.get("q_frac_hi"),
+        }
+        _srow.update(_strip_seg_suffix(_seg_stat(vs, ims, dts, qcs, seg), seg))
+        _srow.update(_strip_seg_suffix(_seg_diff(vs, ims, dts, qcs, seg), seg))
+        _srow.update(_strip_seg_suffix(_seg_lfp(vs, ims, dts, qcs, seg), seg))
+        _mc = _seg_morph_curves(vs, ims, dts)
+        for _ct, _arr in zip(("vt", "vq", "ve"), _mc):
+            if _arr is not None:
+                curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((_srow, _arr))
+        rows.append(_srow)
+    return rows
+
+
+def _prepare_charge_arrays(chg_grp: pd.DataFrame, cap: float, exclude_cv: bool):
+    """충전 phase 원시 배열 준비 + gap 보정 + 완전성 게이트.
+
+    len(chg_grp)<20, 또는 완전 충전 전하량(q_tc)이 0.05Ah 이하거나 등록 용량의
+    60% 미만(불완전 충전)이면 None — 이 사이클은 충전 세그먼트 HI를 추출하지
+    않는다. 반환값은 (vc, ic, dtc, qcc) — exclude_cv=True면 CV 시작 지점에서
+    절단된 사본(세그먼터 입력 전용)이고, 완전성 게이트 자체는 항상 절단 전
+    원본 q_tc로 판정한다(CV 구간을 잘라내면 q_tc가 줄어 게이트 판정이 달라지면
+    안 되므로).
+    """
+    if len(chg_grp) < 20:
+        return None
+    tc  = chg_grp["time_s"].values.astype(float)
+    vc  = chg_grp["voltage_V"].values.astype(float)
+    ic  = np.abs(chg_grp["current_A"].values.astype(float))
+    dtc = np.clip(np.diff(tc, prepend=tc[0]), 0, None)
+
+    # chg_gap_seg=True인 행은 preprocess.py 필터4가 그 지점의 dt가 비정상적으로
+    # 크다고(CC 전환 갭 등) 판정한 곳이다(2026-08-05부터 행 단위 판정 — 사이클
+    # 전체가 아니라 그 행 하나만 플래그된다). 그 큰 dt를 누적적분(qcc)에 그대로
+    # 넣으면 그 지점 "이후" 값까지 전부 오염되므로, 이 행의 dt만 정상 구간
+    # 중앙값으로 대체한다 — V/I 값 자체는 그대로 쓰므로 정보 손실은 이 한 행의
+    # 시간정보로 국한된다(예전엔 chg_gap_seg가 하나라도 있으면 세그먼트 HI 계산
+    # 전체를 스킵했다 — MIT batch2 99.94% 사이클이 이렇게 날아갔었다).
+    if "chg_gap_seg" in chg_grp.columns:
+        _gap_mask = chg_grp["chg_gap_seg"].to_numpy(dtype=bool)
+        if _gap_mask.any():
+            _dtc_pos = dtc[dtc > 0]
+            _dtc_med = float(np.median(_dtc_pos)) if len(_dtc_pos) else 0.0
+            dtc = np.where(_gap_mask, _dtc_med, dtc)
+
+    qcc = np.cumsum(ic * dtc) / 3600.0
+    q_tc = float(qcc[-1])
+    if q_tc <= 0.05 or q_tc < cap * 0.60:
+        return None
+
+    # exclude_cv: 세그먼터에 넘기는 사본만 CV 시작 지점에서 절단.
+    if exclude_cv:
+        _cv_i = _detect_cv_start(vc, ic)
+        return vc[:_cv_i], ic[:_cv_i], dtc[:_cv_i], qcc[:_cv_i]
+    return vc, ic, dtc, qcc
+
+
+def _apply_batched_morph_distances(curve_buf: dict) -> None:
+    """곡선 버퍼(세그먼트/곡선타입별) → 배치 DTW/Fréchet 거리를 계산해 각 세그먼트
+    행(dict)에 직접 써넣는다(반환값 없음, in-place). 그 시나리오의 첫 유효
+    세그먼트를 BOL(fresh-state) 참조로 쓴다.
+
+    각 pair가 "그 세그먼트 행" 자체를 들고 있으므로 결과를 바로 그 행에 대입한다 —
+    예전엔 사이클 번호로 cycle_rows[_c]를 다시 찾아 대입해서 같은 사이클의 여러
+    세그먼트가 서로 덮어썼다(2026-08-16 이전 버그, docs/260816_RESULTS.md 참고).
+    """
+    for _seg, _ct_dict in curve_buf.items():
+        for _ct, _pairs in _ct_dict.items():
+            if not _pairs:
+                continue
+            _bol_arr = _pairs[0][1]                             # 그 시나리오의 첫 유효 세그먼트 = BOL
+            _queries  = np.array([p[1] for p in _pairs])       # (N, n)
+            _dtw_vals = _dtw_batch(_queries, _bol_arr)          # (N,)
+            _frec_vals = np.max(np.abs(_queries - _bol_arr), axis=1)  # (N,)
+            for (_srow_ref, _), _dv, _fv in zip(_pairs, _dtw_vals, _frec_vals):
+                _srow_ref[f"morph_{_ct}_dtw"]  = float(_dv)
+                _srow_ref[f"morph_{_ct}_frec"] = float(_fv)
+
+
 def _extract_one_cell(args) -> tuple:
     """반환: (seg_rows, cycle_rows, coverage).
 
@@ -523,59 +507,46 @@ def _extract_one_cell(args) -> tuple:
       모델 학습 입력(8_train)이 실제로 읽는 데이터. 한 (사이클,시나리오)에 n_samples개면
       n_samples개 행이 그대로 남는다(2026-08-16 이전엔 row.update() 덮어쓰기로 마지막
       1개만 남았음 — docs/260816_RESULTS.md 참고).
-    cycle_rows: 사이클 1개당 행 1개, 글로벌 HI(G01~G15) + capacity_Ah만 포함 — 세그먼트와
-      무관하게 사이클당 한 번만 계산되므로 그대로 1행/사이클 유지.
+    cycle_rows: 사이클 1개당 행 1개, dataset/cell_id/cycle/capacity_Ah만 포함(2026-09-28
+      이전엔 완전 사이클 Global HI(G01~G15)도 여기 같이 있었으나 진단/시각화 전용이라
+      계산 자체를 없앴다 — capacity_Ah 컬럼만 여전히 실사용, 아래 주석 참고).
     coverage: random_segment 세그먼터에서만 채워지고, 그 외에는 빈 dict.
+
+    단계별로 헬퍼에 위임하는 얇은 오케스트레이터다(2026-09-29 분리 —
+    예전엔 5가지 관심사(인자 해석/pkl 로드/방전 추출/충전 추출/배치 거리계산)가
+    231줄짜리 함수 하나에 다 섞여 있었고, 방전·충전 추출 블록도 거의 같은 코드가
+    두 번 복사돼 있었다. docs/REFACTORING.md 참고):
+      _build_scen_lookup      — 세그먼트 이름 → scen 코드
+      _load_cell_pkl          — pkl 로드 + 검증
+      _extract_segment_rows   — SegmentRecord → HI 행(방전/충전 공용)
+      _prepare_charge_arrays  — 충전 배열 준비 + gap 보정 + 완전성 게이트
+      _apply_batched_morph_distances — 루프 후 배치 DTW/Fréchet
     """
-    _progress_q = None
-    _exclude_cv = False
-    if isinstance(args, tuple) and len(args) == 5:
-        pkl_path_str, _axis, _axis_cfg_json, _exclude_cv, _progress_q = args
-    elif isinstance(args, tuple) and len(args) == 4:
-        pkl_path_str, _axis, _axis_cfg_json, _exclude_cv = args
-    elif isinstance(args, tuple):
-        pkl_path_str, _axis, _axis_cfg_json = args
+    # load_all()의 두 호출부(직렬/ProcessPoolExecutor)만이 실제 호출자다 — 둘 다 항상
+    # (path, axis, axis_cfg, exclude_cv) 4-tuple이고, 병렬 실행 시에만 진행률 큐가 5번째로
+    # 붙는다. axis_cfg는 dict를 그대로 넘긴다(ProcessPoolExecutor도 pickle로 dict를 그대로
+    # 옮기므로 JSON 문자열로 왕복 인코딩할 이유가 없다 — 2026-09-29, 예전엔 3-tuple/
+    # 비-tuple("qfrac" 기본값 포함) 분기까지 있었으나 둘 다 실제 호출자가 전혀 없었고,
+    # "qfrac"은 이미 REGISTRY에서 삭제된 축이라 그 분기가 실행됐다면 바로 에러였다 —
+    # 죽은 방어 코드였음을 grep으로 확인 후 정리).
+    if len(args) == 5:
+        pkl_path_str, _axis, _axis_cfg, _exclude_cv, _progress_q = args
     else:
-        pkl_path_str, _axis, _axis_cfg_json = str(args), "qfrac", "{}"
+        pkl_path_str, _axis, _axis_cfg, _exclude_cv = args
+        _progress_q = None
 
     from common.scenario import get_segmenter as _get_seg
-    _axis_cfg = json.loads(_axis_cfg_json) if isinstance(_axis_cfg_json, str) else _axis_cfg_json
     _segmenter = _get_seg(_axis, {_axis: _axis_cfg})
     _spec_names = _segmenter.get_spec().scenario_names
+    _scen_lookup = _build_scen_lookup(_spec_names)
 
-    # scen 코드 사전 계산 (_SEG_SCEN에 있으면 그대로, 없으면 방향+등장순서 기반 — 기존
-    # _to_seg_df와 동일 규칙). segment_id는 이제 SegmentRecord.scenario_id를 그대로 쓴다
-    # (spec.routing으로 이미 계산된 값이라 재계산 불필요 — qfrac류에서 _SEG_SCEN 순서와도 일치).
-    if all(s in _SEG_SCEN for s in _spec_names):
-        _scen_lookup = {s: _SEG_SCEN[s][0] for s in _spec_names}
-    else:
-        _chg_names = [s for s in _spec_names if s.startswith("chg")]
-        _dis_names = [s for s in _spec_names if s not in _chg_names]
-        _scen_lookup = {}
-        for s in _spec_names:
-            _scen_lookup[s] = ((_chg_names.index(s) + 1) if s in _chg_names
-                                else -(_dis_names.index(s) + 1))
-
-    path = Path(pkl_path_str)
-    try:
-        with open(path, "rb") as f:
-            raw = pickle.load(f)
-    except Exception:
+    _loaded = _load_cell_pkl(Path(pkl_path_str))
+    if _loaded is None:
         return [], [], {}
-
-    meta   = raw.get("meta", {})
-    df_all = raw.get("cycles")
-    if df_all is None or not isinstance(df_all, pd.DataFrame):
-        return [], [], {}
-
-    if "phase" not in df_all.columns:
-        df_all = _add_phase(df_all)
-
-    dataset = meta.get("dataset", "")
-    cell_id = meta.get("cell_id", path.stem)
+    df_all, dataset, cell_id = _loaded
 
     seg_rows: list[dict] = []      # 세그먼트 인스턴스별 행 (native seg 포맷)
-    cycle_rows: list[dict] = []    # 사이클별 글로벌 HI 행 (cycle 포맷)
+    cycle_rows: list[dict] = []    # 사이클별 행 (cycle 포맷, dataset/cell_id/cycle/capacity_Ah)
     # {seg_name: {curve_type: [(그 세그먼트 행 dict, arr), ...]}} — 배치 DTW용 곡선 버퍼.
     # 키를 사이클 번호가 아니라 "그 세그먼트 행 자체"로 잡아, 배치 처리 후 바로 그 행에
     # 대입한다(사이클 단위 딕셔너리를 거치지 않으므로 여러 세그먼트가 같은 사이클번호를
@@ -613,168 +584,41 @@ def _extract_one_cell(args) -> tuple:
         if q_local < cap * 0.30:
             continue
 
-        # ── 사이클 글로벌 HI (세그먼트와 무관, 사이클당 한 번만 계산) ────────────
-        grow: dict = {k: np.nan for k in GLOBAL_HI_KEYS}
-        grow.update({"dataset": dataset, "cell_id": cell_id,
-                     "cycle": int(cyc), "capacity_Ah": cap})
+        # ── 사이클 행(cycle 포맷) — 완전 사이클 Global HI(G01~G15)는 더 이상 계산하지
+        # 않는다(2026-09-28, 진단/시각화 전용이었고 학습 입력도 아니었음 —
+        # _build_flat_correlation_df 참고). 다만 이 행 자체(dataset/cell_id/cycle/
+        # capacity_Ah)는 계속 필요하다 — model_lib/datasets/segment_dataset.py의
+        # load_dataset_native_seg()가 이 "cycle" pkl에서 사이클 진짜 총 용량
+        # (capacity_Ah)을 읽어 세그먼트별 capacity_Ah(부분 충방전량이라 그 자체로는
+        # SOH 타깃이 될 수 없음)를 대체하는 데 실제로 쓰기 때문이다.
+        grow: dict = {"dataset": dataset, "cell_id": cell_id,
+                      "cycle": int(cyc), "capacity_Ah": cap}
 
-        # ── G01–G03 방전 기본 ─────────────────────────────────────────────
-        grow["q_dis"]          = q_local
-        grow["energy_dis"]     = float(np.sum(v * i_mag * dt) / 3600.0)
-        denom = float(np.sum(i_mag * dt))
-        if denom > 1e-9:
-            grow["v_mean_cw_dis"] = float(np.sum(v * i_mag * dt)) / denom
-
-        # ── G05 q_plateau_frac ────────────────────────────────────────────
-        mask_plt = (v >= 3.10) & (v <= 3.45)
-        if q_local > 0:
-            grow["q_plateau_frac"] = (
-                float(np.sum(i_mag[mask_plt] * dt[mask_plt]) / 3600.0) / q_local
-            )
-
-        # ── G06–G08, G15: ICA ─────────────────────────────────────────────
-        p1v, p1h, p1ar, p1asy = _global_ica(v, i_mag, dt)
-        grow["ica_peak1_v"]    = p1v
-        grow["ica_peak1_h"]    = p1h
-        grow["ica_peak1_area"] = p1ar
-        grow["ica_peak1_asym"] = p1asy
-
-        # ── G09–G10: DVA ──────────────────────────────────────────────────
-        grow["dva_valley_q"], grow["dva_valley_depth"] = _global_dva(
-            v, i_mag, dt, q_local
-        )
-
-        # ── 방전 세그먼트 HI (segmenter 기반) — 세그먼트 인스턴스마다 독립 행 ──────
+        # ── 방전 세그먼트 HI (segmenter 기반) ──────────────────────────────
         if q_local >= 0.05:
-            for _rec in _segmenter.iter_segments(
-                cell_id, int(cyc), v, i_mag, dt, q_cum
-            ):
-                seg = _rec.meta.get("seg_name") or _spec_names[_rec.scenario_id]
-                vs_s = _rec.v; ims_s = _rec.i; dts_s = _rec.dt; qcs_s = _rec.q
-                _srow: dict = {
-                    "dataset": dataset, "cell_id": cell_id, "cycle": int(cyc),
-                    "capacity_Ah": cap,
-                    "segment_id": int(_rec.scenario_id),
-                    "seg_name": seg,
-                    "scen": _scen_lookup.get(seg, 0),
-                    # assign="none"(no_scen 대조군)이라도 사후 존별 재분리가 가능하도록
-                    # 원본 존/위치 정보를 그대로 보존한다(docs/260816_RESULTS.md §5-4).
-                    "zone": _rec.meta.get("zone"),
-                    "q_frac_lo": _rec.meta.get("q_frac_lo"),
-                    "q_frac_hi": _rec.meta.get("q_frac_hi"),
-                }
-                _srow.update(_strip_seg_suffix(_seg_stat(vs_s, ims_s, dts_s, qcs_s, seg), seg))
-                _srow.update(_strip_seg_suffix(_seg_diff(vs_s, ims_s, dts_s, qcs_s, seg), seg))
-                _srow.update(_strip_seg_suffix(_seg_lfp(vs_s, ims_s, dts_s, qcs_s, seg), seg))
-                _mc = _seg_morph_curves(vs_s, ims_s, dts_s)
-                for _ct, _arr in zip(("vt", "vq", "ve"), _mc):
-                    if _arr is not None:
-                        _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((_srow, _arr))
-                seg_rows.append(_srow)
+            seg_rows.extend(_extract_segment_rows(
+                _segmenter.iter_segments(cell_id, int(cyc), v, i_mag, dt, q_cum),
+                _spec_names, dataset, cell_id, cyc, cap, _scen_lookup, _curve_buf,
+            ))
 
-        # ── 충전 HI ───────────────────────────────────────────────────────
+        # ── 충전 세그먼트 HI (segmenter 기반) — gap 보정된 배열 + 완전성 게이트는
+        # _prepare_charge_arrays가 전담(None이면 이 사이클은 충전 HI 스킵) ──────
         chg_grp = grp[grp["phase"] == "charge"].sort_values("time_s")
-        if len(chg_grp) >= 20:
-            tc  = chg_grp["time_s"].values.astype(float)
-            vc  = chg_grp["voltage_V"].values.astype(float)
-            ic  = np.abs(chg_grp["current_A"].values.astype(float))
-            dtc = np.clip(np.diff(tc, prepend=tc[0]), 0, None)
-
-            # chg_gap_seg=True인 행은 preprocess.py 필터4가 그 지점의 dt가
-            # 비정상적으로 크다고(CC 전환 갭 등) 판정한 곳이다(2026-08-05부터
-            # 행 단위 판정 — 사이클 전체가 아니라 그 행 하나만 플래그된다).
-            # 그 큰 dt를 누적적분(qcc)에 그대로 넣으면 그 지점 "이후" 값까지
-            # 전부 오염되므로, 이 행의 dt만 정상 구간 중앙값으로 대체한다 —
-            # V/I 값 자체는 그대로 쓰므로 정보 손실은 이 한 행의 시간정보로
-            # 국한된다(예전엔 chg_gap_seg가 하나라도 있으면 세그먼트 HI 계산
-            # 전체를 스킵했다 — MIT batch2 99.94% 사이클이 이렇게 날아갔었다).
-            if "chg_gap_seg" in chg_grp.columns:
-                _gap_mask = chg_grp["chg_gap_seg"].to_numpy(dtype=bool)
-                if _gap_mask.any():
-                    _dtc_pos = dtc[dtc > 0]
-                    _dtc_med = float(np.median(_dtc_pos)) if len(_dtc_pos) else 0.0
-                    dtc = np.where(_gap_mask, _dtc_med, dtc)
-
-            qcc = np.cumsum(ic * dtc) / 3600.0
-            q_tc = float(qcc[-1])
-
-            _chg_incomplete = q_tc < cap * 0.60
-
-            if q_tc > 0.05 and not _chg_incomplete:
-                # G04 r_trans_est: CC→CV 전환 시점 ΔV/ΔI [mΩ]
-                grow["r_trans_est"] = _r_dc_from_chg(vc, ic, dtc)
-
-                # G11 CE
-                grow["ce"] = cap / q_tc
-
-                # G12–G13 CV 거동
-                i_mx = float(np.max(ic))
-                if i_mx > 0:
-                    cv_mask = ic < 0.80 * i_mx
-                    q_cv  = float(np.sum(ic[cv_mask] * dtc[cv_mask]) / 3600.0)
-                    t_cv  = float(np.sum(dtc[cv_mask]))
-                    t_tot = float(np.sum(dtc))
-                    grow["cv_q_frac"]   = q_cv / q_tc if q_tc > 0 else np.nan
-                    grow["cv_time_frac"] = t_cv / t_tot if t_tot > 0 else np.nan
-
-                # G14 chg_ica_peak1_h
-                _, c_pk_h, _, _ = _global_ica(vc, ic, dtc)
-                grow["chg_ica_peak1_h"] = c_pk_h
-
-                # 충전 세그먼트 HI (segmenter 기반) — CC 전환 갭이 있던 행은 위에서
-                # 이미 dtc를 정상값으로 대체해뒀으므로 더 이상 전체 스킵할 필요 없음.
-                if q_tc >= 0.05:
-                    _empty = np.empty(0, dtype=float)
-                    # --exclude-cv: 세그먼터에 넘기는 사본만 CV 시작 지점에서 절단.
-                    # ce/cv_q_frac/cv_time_frac 등 위의 전역 충전 HI는 원본(vc/ic/dtc/qcc)을
-                    # 그대로 써야 하므로 여기서는 별도 변수(vc_s 등)로만 대체한다.
-                    if _exclude_cv:
-                        _cv_i = _detect_cv_start(vc, ic)
-                        vc_s, ic_s, dtc_s, qcc_s = vc[:_cv_i], ic[:_cv_i], dtc[:_cv_i], qcc[:_cv_i]
-                    else:
-                        vc_s, ic_s, dtc_s, qcc_s = vc, ic, dtc, qcc
-                    for _rec in _segmenter.iter_segments(
-                        cell_id, int(cyc), _empty, _empty, _empty, _empty,
-                        vc_s, ic_s, dtc_s, qcc_s,
-                    ):
-                        seg = _rec.meta.get("seg_name") or _spec_names[_rec.scenario_id]
-                        vs_c = _rec.v; ims_c = _rec.i; dts_c = _rec.dt; qcs_c = _rec.q
-                        _srow_c: dict = {
-                            "dataset": dataset, "cell_id": cell_id, "cycle": int(cyc),
-                            "capacity_Ah": cap,
-                            "segment_id": int(_rec.scenario_id),
-                            "seg_name": seg,
-                            "scen": _scen_lookup.get(seg, 0),
-                            "zone": _rec.meta.get("zone"),
-                            "q_frac_lo": _rec.meta.get("q_frac_lo"),
-                            "q_frac_hi": _rec.meta.get("q_frac_hi"),
-                        }
-                        _srow_c.update(_strip_seg_suffix(_seg_stat(vs_c, ims_c, dts_c, qcs_c, seg), seg))
-                        _srow_c.update(_strip_seg_suffix(_seg_diff(vs_c, ims_c, dts_c, qcs_c, seg), seg))
-                        _srow_c.update(_strip_seg_suffix(_seg_lfp(vs_c, ims_c, dts_c, qcs_c, seg), seg))
-                        _mc_c = _seg_morph_curves(vs_c, ims_c, dts_c)
-                        for _ct, _arr in zip(("vt", "vq", "ve"), _mc_c):
-                            if _arr is not None:
-                                _curve_buf.setdefault(seg, {}).setdefault(_ct, []).append((_srow_c, _arr))
-                        seg_rows.append(_srow_c)
+        _chg_arrays = _prepare_charge_arrays(chg_grp, cap, exclude_cv=_exclude_cv)
+        if _chg_arrays is not None:
+            vc_s, ic_s, dtc_s, qcc_s = _chg_arrays
+            _empty = np.empty(0, dtype=float)
+            seg_rows.extend(_extract_segment_rows(
+                _segmenter.iter_segments(
+                    cell_id, int(cyc), _empty, _empty, _empty, _empty,
+                    vc_s, ic_s, dtc_s, qcc_s,
+                ),
+                _spec_names, dataset, cell_id, cyc, cap, _scen_lookup, _curve_buf,
+            ))
 
         cycle_rows.append(grow)
 
-    # ── 배치 DTW / Fréchet (곡선 버퍼 → 루프 종료 후 일괄 처리) ──────────────
-    # 각 pair가 "그 세그먼트 행" 자체를 들고 있으므로 결과를 바로 그 행에 대입한다 —
-    # 예전엔 사이클 번호로 cycle_rows[_c]를 다시 찾아 대입해서 같은 사이클의 여러
-    # 세그먼트가 서로 덮어썼다(2026-08-16 이전 버그, docs/260816_RESULTS.md 참고).
-    for _seg, _ct_dict in _curve_buf.items():
-        for _ct, _pairs in _ct_dict.items():
-            if not _pairs:
-                continue
-            _bol_arr = _pairs[0][1]                             # 그 시나리오의 첫 유효 세그먼트 = BOL
-            _queries  = np.array([p[1] for p in _pairs])       # (N, n)
-            _dtw_vals = _dtw_batch(_queries, _bol_arr)          # (N,)
-            _frec_vals = np.max(np.abs(_queries - _bol_arr), axis=1)  # (N,)
-            for (_srow_ref, _), _dv, _fv in zip(_pairs, _dtw_vals, _frec_vals):
-                _srow_ref[f"morph_{_ct}_dtw"]  = float(_dv)
-                _srow_ref[f"morph_{_ct}_frec"] = float(_fv)
+    _apply_batched_morph_distances(_curve_buf)
 
     if _progress_q is not None and _progress_local > 0:
         _progress_q.put(_progress_local)
@@ -801,7 +645,8 @@ def load_all(
     """반환: (df_seg, df_cycle, coverage). coverage는 random_segment 시에만 채워짐(그 외 빈 dict).
 
     df_seg: 세그먼트 인스턴스별 HI(native seg 포맷, 모델 학습 입력). df_cycle: 사이클별
-    글로벌 HI(cycle 포맷). 둘 다 이 디렉터리(MIT 또는 HUST)의 전체 셀을 이어붙인 것.
+    dataset/cell_id/cycle/capacity_Ah 행(cycle 포맷, 완전 사이클 HI 없음). 둘 다 이
+    디렉터리(MIT 또는 HUST)의 전체 셀을 이어붙인 것.
 
     exclude_cv=True: 충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간을 제외
     (segmenter 자체는 수정 없음 — _extract_one_cell에서 세그먼터에 넘기는
@@ -809,13 +654,13 @@ def load_all(
     """
     # 사이클 수가 많은 셀(파일 크기 큰 순) 먼저 배정 → 워커 간 부하 균형 개선
     files = sorted(pkl_dir.glob("*.pkl"), key=lambda f: f.stat().st_size, reverse=True)
-    cfg_json = json.dumps(axis_cfg or {})
+    _axis_cfg = axis_cfg or {}
     all_seg: list = []
     all_cyc: list = []
     coverage: dict = {}
     if n_workers <= 1:
         for f in tqdm(files, desc=pkl_dir.name):
-            seg_rows, cyc_rows, cov = _extract_one_cell((str(f), axis, cfg_json, exclude_cv))
+            seg_rows, cyc_rows, cov = _extract_one_cell((str(f), axis, _axis_cfg, exclude_cv))
             all_seg.extend(seg_rows); all_cyc.extend(cyc_rows); _merge_coverage(coverage, cov)
     else:
         # 파일 완료 단위 tqdm(pbar)만으로는 큰 파일이 많이 배정된 초반에 진행률이
@@ -842,7 +687,7 @@ def load_all(
         _drain_thread.start()
 
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
-            futs = {ex.submit(_extract_one_cell, (str(f), axis, cfg_json, exclude_cv, _progress_q)): f
+            futs = {ex.submit(_extract_one_cell, (str(f), axis, _axis_cfg, exclude_cv, _progress_q)): f
                     for f in files}
             with tqdm(total=len(files), desc=pkl_dir.name, position=0) as pbar:
                 for fut in as_completed(futs):
@@ -1172,205 +1017,16 @@ def compute_correlations(df: pd.DataFrame, datasets: list | None = None) -> pd.D
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 시각화
+# 시각화 — 히트맵/산점도/대표 셀 추이는 plot.py 소유(2026-09-29 분리, 이 파일은
+# 추출+상관분석만 남긴다). HI_GROUPS/HI_LABELS/HI_GROUP_TAG는 축에 따라 이 모듈이
+# 런타임에 재빌드하는 값이라(아래 main() 참고) plot.py가 자체 import하지 않고
+# 매 호출 시 인자로 받는다 — 재빌드 전 값을 계속 캐싱하는 걸 막기 위함.
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _draw_heatmap(ax, keys, title, corr_df, datasets=("MIT", "HUST")):
-    """단일 히트맵. |ρ| 평균 내림차순 정렬."""
-    avail = [k for k in keys if k in corr_df.index]
-    if not avail:
-        ax.set_title(title, fontsize=8); ax.axis("off"); return None, []
-    order = (
-        corr_df.loc[avail].abs().mean(axis=1)
-        .fillna(0).sort_values(ascending=False).index.tolist()
-    )
-    datasets = list(datasets)
-    hm = corr_df.loc[order, datasets].values
-
-    im = ax.imshow(hm.T, aspect="auto", cmap="RdYlGn",
-                   vmin=-1, vmax=1, interpolation="nearest")
-    ax.set_xticks(range(len(order)))
-    ax.set_xticklabels([HI_LABELS.get(k, k) for k in order],
-                       rotation=38, ha="right", fontsize=7)
-    ax.set_yticks(range(len(datasets)))
-    ax.set_yticklabels(datasets, fontsize=9, fontweight="bold")
-    ax.set_title(title, fontsize=8, pad=4, fontweight="bold")
-    for xi, k in enumerate(order):
-        for yi, ds in enumerate(datasets):
-            val = hm[xi, yi]
-            txt = f"{val:.2f}" if np.isfinite(val) else "N/A"
-            ax.text(xi, yi, txt, ha="center", va="center",
-                    fontsize=6,
-                    color="white" if abs(val) > 0.65 else "black",
-                    fontweight="bold")
-    return im, order
+from plot import plot_correlation, _plot_sample_hi  # noqa: E402
 
 
-def plot_correlation(corr_df: pd.DataFrame, df: pd.DataFrame,
-                     out_path: Path, n_top: int = 4, datasets: list | None = None):
-    datasets = list(datasets) if datasets is not None else ["MIT", "HUST"]
-    df = df.copy()
-    df["dataset"] = df["dataset"].replace("MIT_MAT", "MIT")
-
-    for font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
-        try:
-            plt.rcParams["font.family"] = font; break
-        except Exception:
-            continue
-    plt.rcParams["axes.unicode_minus"] = False
-
-    # ── 레이아웃: Global + N segment rows + scatter ───────────────────────
-    # 각 세그먼트 행: [Stat | Diff | LFP] 3 sub-panels
-    _segs_for_plot = [k.split(" — ")[0] for k in HI_GROUPS if k.endswith("— Stat")]
-    n_segs = len(_segs_for_plot)
-    n_seg_hi = n_segs * (len(STAT_KEYS) + len(DIFF_KEYS) + len(LFP_KEYS) + len(MORPH_KEYS))
-    fig = plt.figure(figsize=(44, 14 + 7 * n_segs))
-    fig.suptitle(
-        f"Health Indicator Spearman ρ  ─  {len(GLOBAL_HI_KEYS) + n_seg_hi} HIs"
-        f"  (Global {len(GLOBAL_HI_KEYS)} + Segment {n_seg_hi})",
-        fontsize=13, fontweight="bold", y=0.999,
-    )
-    gs_main = gridspec.GridSpec(
-        n_segs + 2, 1, figure=fig,
-        height_ratios=[1.1] + [1.0] * n_segs + [2.0],
-        hspace=0.60,
-    )
-
-    # ── 행 0: Global ──────────────────────────────────────────────────────
-    ax0 = fig.add_subplot(gs_main[0])
-    im0, _ = _draw_heatmap(ax0, HI_GROUPS["Global"],
-                           "Global  (15 HIs)", corr_df, datasets=datasets)
-
-    # ── 행 1–N: 세그먼트별 3 sub-panels (HI_GROUPS 기반 동적 생성) ─────────
-    seg_rows = [
-        (seg, seg, row_idx + 1)
-        for row_idx, seg in enumerate(_segs_for_plot)
-    ]
-    ref_im = im0
-    for seg, seg_title, row_idx in seg_rows:
-        gs_seg = gridspec.GridSpecFromSubplotSpec(
-            1, 3, subplot_spec=gs_main[row_idx], wspace=0.06)
-        for ci, cat in enumerate(["Stat", "Diff", "LFP"]):
-            ax_s = fig.add_subplot(gs_seg[ci])
-            im_s, _ = _draw_heatmap(
-                ax_s,
-                HI_GROUPS[f"{seg} — {cat}"],
-                f"{seg_title}  [{cat}]",
-                corr_df,
-                datasets=datasets,
-            )
-            if im_s is not None and ref_im is None:
-                ref_im = im_s
-
-    # ── 공유 컬러바 ── 이 시점의 fig.get_axes()는 전부 Global+세그먼트 히트맵
-    # (산점도 axes는 아직 생성 전) — 예전엔 n_segs=6(qfrac 계열) 기준 [:7]로
-    # 하드코딩돼 있었는데, random/random_grid(assign="none")처럼 n_segs=2인
-    # 축에서는 무해했지만 우연히 맞았을 뿐이라 명시적으로 전체를 쓰도록 고침.
-    if ref_im is not None:
-        cbar = plt.colorbar(ref_im, ax=fig.get_axes(), shrink=0.25, pad=0.01)
-        cbar.set_label("Spearman ρ", fontsize=10)
-
-    # ── 마지막 행: 상위 HI 산점도 ── gs_main은 n_segs+2행(0=Global, 1..n_segs=세그먼트,
-    # 마지막=산점도)이라 마지막 행 인덱스는 n_segs+1. 예전엔 이 값이 항상 7(=n_segs=6인
-    # qfrac/q_frac_wide/q_frac_ref 표준 6-시나리오 축 기준)로 하드코딩돼 있어서
-    # n_segs가 다른 축(random/random_grid의 assign="none"=2시나리오, protocol/vwindow/
-    # cluster/full_cycle 등)에서 GridSpec 범위를 벗어나 IndexError가 났다(2026-08-15).
-    abs_mean = corr_df.abs().mean(axis=1).fillna(0).sort_values(ascending=False)
-    top_his  = abs_mean.index[:n_top].tolist()
-
-    gs_sc = gridspec.GridSpecFromSubplotSpec(
-        len(datasets), n_top, subplot_spec=gs_main[n_segs + 1], hspace=0.52, wspace=0.30)
-    cmaps  = DATASET_CMAPS
-    colors = DATASET_COLORS
-
-    for ci, hi_key in enumerate(top_his):
-        for ri, ds in enumerate(datasets):
-            ax = fig.add_subplot(gs_sc[ri, ci])
-            sub = df[df["dataset"] == ds][[hi_key, "capacity_Ah", "cycle"]].dropna()
-            if len(sub) == 0:
-                ax.text(0.5, 0.5, "No data", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=8)
-                ax.set_title(f"{HI_LABELS.get(hi_key, hi_key)}  [{ds}]", fontsize=8)
-                continue
-            cyc_n = ((sub["cycle"] - sub["cycle"].min()) /
-                     max(sub["cycle"].max() - sub["cycle"].min(), 1))
-            ax.scatter(sub[hi_key], sub["capacity_Ah"],
-                       c=cyc_n, cmap=cmaps[ds],
-                       s=1.5, alpha=0.35, linewidths=0, rasterized=True)
-            if len(sub) > 20:
-                coef  = np.polyfit(sub[hi_key], sub["capacity_Ah"], 1)
-                x_lin = np.linspace(sub[hi_key].min(), sub[hi_key].max(), 200)
-                ax.plot(x_lin, np.polyval(coef, x_lin),
-                        "-", color=colors[ds], lw=1.8, alpha=0.9)
-            rho     = corr_df.loc[hi_key, ds] if hi_key in corr_df.index else np.nan
-            rho_str = f"ρ={rho:.3f}" if np.isfinite(rho) else "ρ=N/A"
-            lbl     = HI_LABELS.get(hi_key, hi_key)
-            tag     = HI_GROUP_TAG.get(hi_key, "")
-            ax.set_title(f"{lbl}  [{ds}]\n[{tag}]  {rho_str}", fontsize=7, pad=3)
-            ax.set_xlabel(lbl, fontsize=6)
-            ax.set_ylabel("Capacity (Ah)", fontsize=6)
-            ax.tick_params(labelsize=5)
-
-    plt.savefig(out_path, dpi=130, bbox_inches="tight")
-    print(f"  저장: {out_path}")
-    plt.close()
-
-
-def _plot_sample_hi(df: pd.DataFrame, corr_df: pd.DataFrame, out_dir: Path,
-                     datasets: list | None = None) -> None:
-    """대표 셀 상위 HI 사이클 추이."""
-    datasets = list(datasets) if datasets is not None else ["MIT", "HUST"]
-    SAMPLES = {ds: SAMPLE_CELL_IDS[ds] for ds in datasets}
-    CMAPS   = {ds: DATASET_CMAPS[ds] for ds in datasets}
-
-    df_p = df.copy()
-    df_p["dataset"] = df_p["dataset"].replace("MIT_MAT", "MIT")
-
-    abs_mean = corr_df.abs().mean(axis=1).fillna(0).sort_values(ascending=False)
-    top4     = abs_mean.index[:4].tolist()
-    n_ds     = len(SAMPLES)
-
-    fig, axes = plt.subplots(n_ds, 4, figsize=(16, n_ds * 3.5),
-                              squeeze=False, constrained_layout=True)
-    fig.suptitle("[Step 4 HI 추출 결과]  대표 셀 상위 HI 사이클 추이",
-                 fontsize=11, fontweight="bold")
-
-    for ri, (ds, cell) in enumerate(SAMPLES.items()):
-        sub = df_p[(df_p["dataset"] == ds) & (df_p["cell_id"] == cell)].sort_values("cycle")
-        for ci, hi_key in enumerate(top4):
-            ax = axes[ri, ci]
-            if len(sub) == 0 or hi_key not in sub.columns:
-                ax.text(0.5, 0.5, "No data", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=9); continue
-            valid = sub[["cycle", hi_key, "capacity_Ah"]].dropna()
-            if len(valid) < 3:
-                ax.text(0.5, 0.5, "No data", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=9); continue
-            cap_range = valid["capacity_Ah"].max() - valid["capacity_Ah"].min()
-            c_norm = (valid["capacity_Ah"] - valid["capacity_Ah"].min()) / max(cap_range, 1e-9)
-            ax.scatter(valid["cycle"], valid[hi_key],
-                       c=c_norm, cmap=CMAPS[ds], s=8, alpha=0.8)
-            rho = corr_df.loc[hi_key, ds] if (
-                hi_key in corr_df.index and ds in corr_df.columns) else np.nan
-            rho_str = f"ρ={rho:.3f}" if np.isfinite(rho) else "ρ=N/A"
-            lbl = HI_LABELS.get(hi_key, hi_key)
-            tag = HI_GROUP_TAG.get(hi_key, "")
-            title = f"{lbl}  [{tag}]\n{rho_str}" if ri == 0 else f"{lbl}  [{tag}]"
-            ax.set_title(title, fontsize=8, fontweight="bold")
-            ax.set_xlabel("Cycle", fontsize=7)
-            ax.set_ylabel(lbl, fontsize=7)
-            ax.tick_params(labelsize=6)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "sample_hi_trend.png"
-    plt.savefig(out_path, dpi=130, bbox_inches="tight")
-    print(f"  저장: {out_path}")
-    plt.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
+def _print_run_config(axis: str, axis_cfg: dict, workers: int, force: bool,
+                       exclude_cv: bool, skip_shape: bool) -> None:
     """HI 추출 실행 조건(축·파라미터·경로·랜덤옵션)을 터미널에 요약 출력."""
     from common.scenario import get_segmenter as _gs
     try:
@@ -1385,10 +1041,10 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
         _axis_dir = f"q_frac_ref/{_qfref_tag(axis_cfg)}"
     else:
         _axis_dir = axis
-    _exclude_cv = bool(getattr(args, "exclude_cv", False))
+    _exclude_cv = exclude_cv
     if _exclude_cv:
         _axis_dir = f"{_axis_dir}_ccOnly"
-    if bool(getattr(args, "skip_shape", False)):
+    if skip_shape:
         _axis_dir = f"{_axis_dir}_noshape"
 
     _is_rand = bool(axis_cfg.get("random_segment", False))
@@ -1415,8 +1071,8 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
               f"seed={int(axis_cfg.get('n2_seed', 20260903))}")
         print(f"                    (존을 랜덤 길이로 타일링 — 커버리지 100% 보장, "
               f"n_samples 무시)")
-    print(f"  워커 수          : {getattr(args, 'workers', '?')}")
-    print(f"  force 재추출     : {getattr(args, 'force', False)}")
+    print(f"  워커 수          : {workers}")
+    print(f"  force 재추출     : {force}")
     print(f"  exclude_cv      : {_exclude_cv}"
           + ("  (충전 세그먼트 HI는 CC 구간만 사용)" if _exclude_cv else ""))
     print(f"  데이터 저장 경로 : _4_data_hi/{_axis_dir}/{{seg,cycle}}/")
@@ -1426,145 +1082,29 @@ def _print_run_config(axis: str, axis_cfg: dict, args) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HI 411종 추출 및 Spearman 상관 시각화")
-    parser.add_argument("--workers", type=int, default=min(P.ACTIVE_WORKERS, os.cpu_count() or 1),
-                        help=f"병렬 프로세스 수 (parameters.py 기본 "
-                             f"{min(P.ACTIVE_WORKERS, os.cpu_count() or 1)})")
-    parser.add_argument("--force",   action="store_true",
-                        help="캐시 무시하고 HI 재추출")
-    parser.add_argument("--dataset-group", type=str, default=P.FIXED_DATASET_GROUP, dest="dataset_group",
-                        choices=list(DATASET_GROUPS),
-                        help=f"데이터셋 그룹: lfp(MIT+HUST, 기존 캐시 경로 그대로) | "
-                             "ncm(TJU+CALCE, NCM/LCO 신규 통합) | all(4개 전체). "
-                             "그룹별로 독립된 캐시/저장 경로를 쓰므로 서로 안 겹침. "
-                             f"(parameters.py 기본 {P.FIXED_DATASET_GROUP!r})")
-    # ── 시나리오 축 ──────────────────────────────────────────────────────────
-    parser.add_argument("--seg-axis", type=str, default=P.FIXED_SEG_AXIS,
-                        help=f"세그멘테이션 축 — {P.FIXED_SEG_AXIS!r}만 등록돼 있다(2026-09-24 "
-                             "비-정식 축 일괄 삭제, common/scenario/ REGISTRY 참고). 다른 값을 "
-                             "주면 get_segmenter()가 ValueError.")
-    parser.add_argument("--axis-config", type=str, default=json.dumps(P.ACTIVE_AXIS_CONFIG),
-                        help="축 파라미터 JSON 문자열 (예: '{\"n_windows\": 4}'). 기본값은 "
-                             "parameters.py: ACTIVE_AXIS_CONFIG(단일 소스) — run_pipeline.py도 "
-                             "동일한 값을 기본으로 쓴다. 아래 --n1/--n2/... 단축 인자를 하나라도 "
-                             "주면 이 JSON(기본값이든 여기서 직접 준 값이든) 위에 그 값만 patch된다 "
-                             "(PowerShell JSON 인용 우회용).")
-    # q_frac_wide / vqslope 전용 단축 인자 — JSON 없이 파라미터 직접 지정 (PowerShell 호환).
-    # default=None은 "명시적으로 안 줬음"의 센티널이다 — parameters.py 값으로 바꾸면 안 됨
-    # (아래 병합 로직이 --axis-config 위에 patch하는 방식이라, None이 아니면 항상 덮어쓴다).
-    # 실제 기본값은 parameters.py: ACTIVE_AXIS_CONFIG에 키가 있으면 그 값, 없으면 세그먼터
-    # 자체 기본값(괄호 안)이다.
-    parser.add_argument("--n1",       type=float, default=None,
-                        help=f"q_frac_wide/q_frac_ref 구간 크기 (parameters.py 기본 "
-                             f"{P.ACTIVE_AXIS_CONFIG.get('n1', '없음 — 세그먼터 자체 기본 0.4')}). --axis-config patch")
-    parser.add_argument("--n2",       type=float, default=None,
-                        help=f"q_frac_wide/q_frac_ref 세그먼트 길이 (parameters.py 기본 "
-                             f"{P.ACTIVE_AXIS_CONFIG.get('n2', '없음 — 세그먼터 자체 기본 0.2')}). --axis-config patch")
-    parser.add_argument("--n-samples", type=int, default=None, dest="n_samples",
-                        help=f"q_frac_wide/q_frac_ref/vqslope 구간당 세그먼트 수 (parameters.py 기본 "
-                             f"{P.ACTIVE_AXIS_CONFIG.get('n_samples', '없음 — 세그먼터 자체 기본값')}). --axis-config patch")
-    # q_frac_ref 전용 단축 인자 (n1/n2/n_samples는 q_frac_wide와 공유해 위 인자 그대로 씀)
-    parser.add_argument("--n2-start", type=float, default=None, dest="n2_start",
-                        help="q_frac_ref: n2 범위 모드 하한 — 세그먼트 길이를 고정하지 않고 "
-                             "{n2_start, +n2_step, ..., n2_end} 격자에서 랜덤 추첨하고 존을 "
-                             "그 길이들로 타일링해 커버리지 100%%를 보장한다(n_samples 무시). "
-                             "parameters.py에 없음(현재 고정 n2 모드 사용) — --n2-end와 반드시 함께. "
-                             "--axis-config patch")
-    parser.add_argument("--n2-end", type=float, default=None, dest="n2_end",
-                        help="q_frac_ref: n2 범위 모드 상한 (--n2-start와 함께). parameters.py에 없음. "
-                             "--axis-config patch")
-    parser.add_argument("--n2-step", type=float, default=None, dest="n2_step",
-                        help="q_frac_ref: n2 길이 격자 간격 (기본 0.1). parameters.py에 없음. "
-                             "--axis-config patch")
-    parser.add_argument("--n2-seed", type=int, default=None, dest="n2_seed",
-                        help="q_frac_ref: n2 길이 추첨 시드 (기본 20260903). parameters.py에 없음. "
-                             "--axis-config patch")
-    parser.add_argument("--ref-lag",   type=int, default=None, dest="ref_lag",
-                        help=f"q_frac_ref: 레퍼런스 지연 사이클 수 (parameters.py 기본 "
-                             f"{P.ACTIVE_AXIS_CONFIG.get('ref_lag', '없음 — 세그먼터 자체 기본 0')}). --axis-config patch")
-    parser.add_argument("--noise-amp", type=float, default=None, dest="noise_amp",
-                        help=f"q_frac_ref: 레퍼런스 노이즈 최대 진폭, 분수 (parameters.py 기본 "
-                             f"{P.ACTIVE_AXIS_CONFIG.get('noise_amp', '없음 — 세그먼터 자체 기본 0.03')}). --axis-config patch")
-    parser.add_argument("--noise-mode", type=str, default=None, dest="noise_mode",
-                        choices=["ou", "sine"],
-                        help=f"q_frac_ref: 노이즈 드리프트 방식 (parameters.py 기본 "
-                             f"{P.ACTIVE_AXIS_CONFIG.get('noise_mode', '없음 — 세그먼터 자체 기본 ou')!r}). "
-                             "ou=bounded random walk | sine=구버전 결정론적. --axis-config patch")
-    parser.add_argument("--noise-period", type=float, default=None, dest="noise_period_cycles",
-                        help=f"q_frac_ref: 노이즈 평균회귀 특성시간/파장(사이클 수, parameters.py 기본 "
-                             f"{P.ACTIVE_AXIS_CONFIG.get('noise_period_cycles', '없음 — 세그먼터 자체 기본 200')}). "
-                             "--axis-config patch")
-    parser.add_argument("--min-pts", type=int, default=None, dest="min_pts",
-                        help="q_frac_wide/q_frac_ref: 세그먼트 최소 포인트 수(기본 10). "
-                             "parameters.py에 없음. 기본값과 다르면 '_minptsN' 접미사 경로에 별도 저장 "
-                             "(§4.6 confound 방지). --axis-config patch")
-    parser.add_argument("--calibration-period", type=int, default=None, dest="calibration_period",
-                        help="q_frac_ref: 레퍼런스 재보정 주기(사이클 수, docs/260903_RESULTS.md §1). "
-                             "parameters.py에 없음(미지정 시 재보정 없음, 기존 동작). 권장값 100. "
-                             "--axis-config patch")
-    parser.add_argument("--calibration-mode", type=str, default=None, dest="calibration_mode",
-                        choices=["drift_only", "full"],
-                        help="q_frac_ref: 재보정 시 리셋 범위 — drift_only(기본, OU만) | "
-                             "full(바이어스까지). parameters.py에 없음. --axis-config patch")
-    parser.add_argument("--calibration-jitter", type=int, default=None, dest="calibration_jitter",
-                        help="q_frac_ref: 재보정 주기를 ±jitter 사이클 흔듦(기본 0). "
-                             "parameters.py에 없음. --axis-config patch")
-    parser.add_argument("--offset-amp", type=float, default=None, dest="offset_amp",
-                        help="q_frac_ref: 센서 offset 오차 최대진폭, A 단위(기본 0=비활성). "
-                             "전류 크기와 무관하게 사이클 소요시간에 비례하는 절대오차를 추가한다 "
-                             "(common/scenario/q_frac_ref.py 모듈 docstring '센서 offset 오차' 절). "
-                             "parameters.py에 없음. --axis-config patch")
-    parser.add_argument("--exclude-cv", action="store_true", dest="exclude_cv",
-                        help="충전 세그먼트 HI 추출 시 CC→CV 전환 이후 구간 제외 "
-                             "(segmenter는 무수정, 세그먼터에 넘기는 충전 배열만 CV 시작 지점에서 절단; "
-                             "결과는 '_ccOnly' 접미사 경로에 별도 저장)")
-    parser.add_argument("--skip-shape", action="store_true", dest="skip_shape",
-                        help="preprocess.py --skip-shape로 만든 _4_data_hi/clean_noshape/를 "
-                             "입력으로 사용 (MIT_DIR/HUST_DIR을 그쪽으로 재지정). 결과는 "
-                             "'_noshape' 접미사 경로에 별도 저장 — 필터7 있는 기본 데이터와 "
-                             "절대 안 겹침")
-    args = parser.parse_args()
+    # 2026-09-29: 이 스크립트의 실행 파라미터는 parameters.py에서만 읽는다 — 예전엔
+    # --n1/--n2/--axis-config/--dataset-group/--exclude-cv/--skip-shape 등 CLI로
+    # parameters.py를 우회해 값을 바꿀 수 있었지만(대부분 PowerShell JSON 인용 우회
+    # 목적), 실험 조건을 바꾸려면 이제 parameters.py 자체를 고치고 실행한다. 여러
+    # 조건을 순차 실행하려면 매 케이스 전에 parameters.py를 패치하고 실행 후 원복하는
+    # 드라이버 스크립트를 쓴다(docs/REFACTORING.md 2026-09-29 항목).
+    workers = min(P.ACTIVE_WORKERS, os.cpu_count() or 1)
+    force = P.ACTIVE_FORCE_EXTRACT
+    dataset_group = P.FIXED_DATASET_GROUP
+    exclude_cv = P.FIXED_EXCLUDE_CV
+    skip_shape = P.FIXED_SKIP_SHAPE
+    _axis = P.FIXED_SEG_AXIS
+    _axis_cfg: dict = dict(P.ACTIVE_AXIS_CONFIG)
 
-    if args.skip_shape:
-        if args.dataset_group != "lfp":
-            print(f"[ERROR] --skip-shape는 clean_noshape/{{MIT,HUST}}만 있음 — "
-                  f"dataset_group={args.dataset_group!r}(TJU/CALCE 포함)와 함께 쓸 수 없음")
+    if skip_shape:
+        if dataset_group != "lfp":
+            print(f"[ERROR] FIXED_SKIP_SHAPE는 clean_noshape/{{MIT,HUST}}만 있음 — "
+                  f"FIXED_DATASET_GROUP={dataset_group!r}(TJU/CALCE 포함)와 함께 쓸 수 없음")
             return
         global MIT_DIR, HUST_DIR
         MIT_DIR  = DATA_4_HI_ROOT / "clean_noshape" / "MIT"
         HUST_DIR = DATA_4_HI_ROOT / "clean_noshape" / "HUST"
-        print(f"[--skip-shape] 입력 경로 재지정: MIT_DIR={MIT_DIR}  HUST_DIR={HUST_DIR}")
-
-    # 단축 인자 → axis_config에 patch (PowerShell JSON 우회). 기존엔 단축 인자가 하나라도
-    # 있으면 axis_config 전체를 그 단축 인자들만으로 새로 만들어 덮어썼는데, 이러면
-    # --axis-config로 직접 넘긴 값(또는 그 기본값인 parameters.py: ACTIVE_AXIS_CONFIG)의
-    # 나머지 키가 전부 조용히 사라졌다. 이제는 이미 정해진 axis_config(기본값이든 명시
-    # 값이든) 위에 "명시적으로 준" 단축 인자만 patch한다 — 단일 소스(parameters.py)가
-    # 어느 경로로 실행해도 항상 베이스로 유지된다.
-    _quick: dict = json.loads(args.axis_config)
-    if args.n1        is not None: _quick["n1"]        = args.n1
-    if args.n2        is not None: _quick["n2"]        = args.n2
-    if args.n2_start  is not None: _quick["n2_start"]  = args.n2_start
-    if args.n2_end    is not None: _quick["n2_end"]    = args.n2_end
-    if args.n2_step   is not None: _quick["n2_step"]   = args.n2_step
-    if args.n2_seed   is not None: _quick["n2_seed"]   = args.n2_seed
-    if args.n_samples is not None: _quick["n_samples"] = args.n_samples
-    if args.ref_lag   is not None: _quick["ref_lag"]   = args.ref_lag
-    if args.noise_amp is not None: _quick["noise_amp"] = args.noise_amp
-    if args.noise_mode is not None: _quick["noise_mode"] = args.noise_mode
-    if args.noise_period_cycles is not None: _quick["noise_period_cycles"] = args.noise_period_cycles
-    if args.min_pts is not None: _quick["min_pts"] = args.min_pts
-    if args.calibration_period is not None: _quick["calibration_period"] = args.calibration_period
-    if args.calibration_mode   is not None: _quick["calibration_mode"]   = args.calibration_mode
-    if args.calibration_jitter is not None: _quick["calibration_jitter"] = args.calibration_jitter
-    if args.offset_amp is not None: _quick["offset_amp"] = args.offset_amp
-    args.axis_config = json.dumps(_quick)
-
-    _axis = args.seg_axis
-    try:
-        _axis_cfg: dict = json.loads(args.axis_config)
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] --axis-config JSON 파싱 실패: {e}"); return
+        print(f"[skip_shape] 입력 경로 재지정: MIT_DIR={MIT_DIR}  HUST_DIR={HUST_DIR}")
 
     # qfrac 이외 축은 세그먼트 이름이 달라 모듈 레벨 HI 상수를 재빌드
     if _axis != "qfrac":
@@ -1576,13 +1116,13 @@ def main():
         print(f"[hi] 세그먼트 이름 재빌드: {_seg_names_hi}")
 
     # ── 실행 조건 요약 출력 (추출 진입 전) ──────────────────────────────────
-    _print_run_config(_axis, _axis_cfg, args)
+    _print_run_config(_axis, _axis_cfg, workers, force, exclude_cv, skip_shape)
 
-    _ds_names = DATASET_GROUPS[args.dataset_group]
+    _ds_names = DATASET_GROUPS[dataset_group]
 
-    df = load_or_extract(n_workers=args.workers, force=args.force,
-                         axis=_axis, axis_cfg=_axis_cfg, exclude_cv=args.exclude_cv,
-                         no_shape=args.skip_shape, dataset_group=args.dataset_group)
+    df = load_or_extract(n_workers=workers, force=force,
+                         axis=_axis, axis_cfg=_axis_cfg, exclude_cv=exclude_cv,
+                         no_shape=skip_shape, dataset_group=dataset_group)
     print(f"\n총 사이클: {len(df):,}")
 
     print("\n=== Spearman ρ 계산 ===")
@@ -1602,12 +1142,12 @@ def main():
         _dir_suffix = f"_qfref_{_qfref_tag(_axis_cfg)}"
     else:
         _dir_suffix = f"_{_axis}"
-    if args.exclude_cv:
+    if exclude_cv:
         _dir_suffix += "_ccOnly"
-    if args.skip_shape:
+    if skip_shape:
         _dir_suffix += "_noshape"
-    if args.dataset_group != "lfp":
-        _dir_suffix += f"_{args.dataset_group}"
+    if dataset_group != "lfp":
+        _dir_suffix += f"_{dataset_group}"
     hi_plot_dir = STEP_DIR / "hi_plot" / (date.today().strftime("%m%d") + _dir_suffix)
     hi_plot_dir.mkdir(parents=True, exist_ok=True)
     out = hi_plot_dir / "hi_correlation.png"
@@ -1619,14 +1159,15 @@ def main():
     # 동일하게 예외를 잡아 경고만 출력하고 계속 진행한다 — --to-step 4처럼 캐시
     # 빌드만 필요한 실행이 순전히 플롯 문제로 실패 처리(exit!=0)되지 않게 하기 위함.
     try:
-        plot_correlation(corr, df, out, n_top=4, datasets=_ds_names)
+        plot_correlation(corr, df, out, HI_GROUPS, HI_LABELS, HI_GROUP_TAG,
+                         n_top=4, datasets=_ds_names)
     except Exception as _e:
         print(f"[경고] hi_correlation.png 생성 실패(캐시는 정상 저장됨): {_e}")
 
     out_dir = STEP_DIR / "outputs" / (date.today().strftime("%m%d") + _dir_suffix)
     print("\n=== 대표 셀 HI 플롯 ===")
     try:
-        _plot_sample_hi(df, corr, out_dir, datasets=_ds_names)
+        _plot_sample_hi(df, corr, out_dir, HI_LABELS, HI_GROUP_TAG, datasets=_ds_names)
     except Exception as _e:
         print(f"[경고] 대표 셀 HI 플롯 생성 실패(캐시는 정상 저장됨): {_e}")
 
@@ -1636,8 +1177,6 @@ def main():
         _spec = _ilu.spec_from_file_location("_hi_viz", STEP_DIR / "hi_segment_viz.py")
         _viz = _ilu.module_from_spec(_spec)
         _spec.loader.exec_module(_viz)
-        print(f"\n=== Global HI 열화 추이 ===")
-        _viz.plot_hi_trend(df, hi_plot_dir / "hi_trend.png")
         for _cat, _cat_title, _fname in _viz.CATEGORIES:
             print(f"\n=== 세그먼트 HI 추이 ({_cat}) ===")
             _viz.plot_segment_hi_trend(df, hi_plot_dir / _fname, _cat, _cat_title)

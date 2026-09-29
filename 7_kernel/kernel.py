@@ -62,7 +62,6 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -70,20 +69,10 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = PROJECT_ROOT / "model_lib" / "results"
 
-sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from log_utils import append_log_entry, current_command_str  # noqa: E402
-import parameters as P  # noqa: E402 — 축/실행 파라미터 단일 소스
-
-# seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
-# 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
-# lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다).
-DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS
-DEFAULT_AXIS_CONFIG = json.dumps(P.ACTIVE_AXIS_CONFIG)
-DEFAULT_DATA_DIR = P.FIXED_CANONICAL_DATA_DIR
-DEFAULT_SEG_DATA_DIR = P.FIXED_CANONICAL_SEG_DATA_DIR
+# data_directories/parameters/log_utils/common/models/datasets 등은 pip install -e .로
+# 어디서든 바로 import된다(pyproject.toml 참고) — sys.path 조작 불필요.
+from log_utils import append_log_entry, current_command_str
+import parameters as P  # 축/실행 파라미터 단일 소스
 
 try:
     from tqdm import tqdm as _tqdm
@@ -102,14 +91,19 @@ except ImportError:  # pragma: no cover
 
 
 def _parse_args() -> argparse.Namespace:
+    # seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
+    # 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
+    # lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다. 2026-09-29: 지역
+    # DEFAULT_* 재선언(interaction.py/synergy.py/train.py와 바이트 단위로 중복)을 없애고
+    # P.를 직접 참조).
     p = argparse.ArgumentParser(
         description="시너지 그룹(크기 2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, "
                      "추가로 넣음) + 2차 다중공선성 배제 + 정규화 통계 저장"
     )
-    p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
-    p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
-    p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="cycle pkl 경로")
-    p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR, help="seg pkl 경로")
+    p.add_argument("--seg-axis", default=P.FIXED_SEG_AXIS)
+    p.add_argument("--axis-config", default=json.dumps(P.ACTIVE_AXIS_CONFIG))
+    p.add_argument("--data-dir", default=P.FIXED_CANONICAL_DATA_DIR, help="cycle pkl 경로")
+    p.add_argument("--seg-data-dir", default=P.FIXED_CANONICAL_SEG_DATA_DIR, help="seg pkl 경로")
     p.add_argument("--datasets", nargs="+", default=P.FIXED_CANONICAL_DATASETS)
     p.add_argument("--split-seed", type=int,
                    default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED)

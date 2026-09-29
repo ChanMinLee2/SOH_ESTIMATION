@@ -35,13 +35,10 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
+# train.py는 8_train/에 있는 형제 스크립트라 그 폴더만 sys.path에 추가하면 된다
+# (data_directories/parameters/common/models/datasets/evaluation/utils 등은
+# pip install -e .로 어디서든 바로 import된다 — pyproject.toml 참고).
 sys.path.insert(0, str(PROJECT_ROOT / "8_train"))
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-_HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
 
 for _stream in (sys.stdout, sys.stderr):
     if getattr(_stream, "encoding", "").lower() not in ("utf-8", "utf8"):

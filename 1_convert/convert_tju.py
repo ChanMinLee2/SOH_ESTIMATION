@@ -39,15 +39,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from convert_unified import (  # noqa: E402
+from convert_unified import (
     PROJECT_ROOT, RAW_OUTPUT_ROOT, OUTPUT_ROOT,
     assign_phase, save_cell, _make_time_relative, _fix_time_monotonicity,
     _remove_zero_current_rest, _remove_outlier_cycles, _run,
 )
-import sys as _sys  # noqa: E402
-if str(PROJECT_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(PROJECT_ROOT))
-from data_directories import EXTERNAL_DATA_ROOT  # noqa: E402
+from data_directories import EXTERNAL_DATA_ROOT  # pip install -e . 로 import 가능
 
 # 2026-09-05: 디스크 공간 때문에 D 드라이브로 이전(data_directories.py의 기존
 # _4_data_hi 관례와 동일 원칙 — 이 저장소가 그 유일한 진입점이므로 여기서도 재사용).

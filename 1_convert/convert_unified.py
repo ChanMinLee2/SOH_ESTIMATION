@@ -50,9 +50,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 PROJECT_ROOT  = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-import parameters as P  # noqa: E402 — 실행 환경/데이터셋 선택 단일 소스
+import parameters as P  # 실행 환경/데이터셋 선택 단일 소스 (pip install -e . 로 import 가능)
 MIT_MAT_DIR   = PROJECT_ROOT / "_0_data_raw" / "FastCharge"
 HUST_PKL_DIR  = PROJECT_ROOT / "_0_data_raw" / "our_data" / "our_data"
 OUTPUT_ROOT     = PROJECT_ROOT / "_1_data_unified"

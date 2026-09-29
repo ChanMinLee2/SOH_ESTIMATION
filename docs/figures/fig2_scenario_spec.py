@@ -26,9 +26,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from data_directories import DATA_4_HI_ROOT  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # _style import(형제 모듈)용
+from data_directories import DATA_4_HI_ROOT  # pip install -e . 로 import 가능
 from _style import (INK, SUBINK, ZONE_COLOR, ZONE_BOUNDS, setup_rcparams,  # noqa: E402
                      label_panel)
 

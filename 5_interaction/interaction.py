@@ -37,11 +37,10 @@ _HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = _HERE.parent
 RESULTS_DIR = PROJECT_ROOT / "model_lib" / "results"
 
-sys.path.insert(0, str(_HERE))
+# synergy.py는 6_synergy/에 있는 형제 스크립트라 그 폴더만 sys.path에 추가하면 된다
+# (data_directories/parameters/common/models/datasets 등은 pip install -e .로
+# 어디서든 바로 import된다 — pyproject.toml 참고).
 sys.path.insert(0, str(PROJECT_ROOT / "6_synergy"))
-sys.path.insert(0, str(PROJECT_ROOT / "model_lib"))
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 for _stream in (sys.stdout, sys.stderr):
     if getattr(_stream, "encoding", "").lower() not in ("utf-8", "utf8"):
@@ -53,22 +52,18 @@ for _stream in (sys.stdout, sys.stderr):
 from synergy import _load_all_scenarios  # noqa: E402 — 중복 구현 금지, 그대로 재사용
 import parameters as P  # noqa: E402 — 축/실행/통계 파라미터 단일 소스
 
-# seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
-# 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
-# lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다 — train.py에서
-# 먼저 발견/수정한 것과 동일한 지뢰).
-DEFAULT_SEG_AXIS = P.FIXED_SEG_AXIS
-DEFAULT_AXIS_CONFIG = json.dumps(P.ACTIVE_AXIS_CONFIG)
-DEFAULT_DATA_DIR = P.FIXED_CANONICAL_DATA_DIR
-DEFAULT_SEG_DATA_DIR = P.FIXED_CANONICAL_SEG_DATA_DIR
-
-
 def _parse_args() -> argparse.Namespace:
+    # seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
+    # 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
+    # lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다 — train.py에서
+    # 먼저 발견/수정한 것과 동일한 지뢰. 2026-09-29: 각 스크립트가 이 값을 지역
+    # DEFAULT_* 상수로 재선언하던 걸 없애고 P.를 직접 참조한다 — interaction.py/
+    # synergy.py/kernel.py/train.py 4곳에 바이트 단위로 동일한 재선언이 중복돼 있었다).
     p = argparse.ArgumentParser(description="HI x 시나리오 상호작용 통계 검정 (Fisher z, train만 사용)")
-    p.add_argument("--seg-axis", default=DEFAULT_SEG_AXIS)
-    p.add_argument("--axis-config", default=DEFAULT_AXIS_CONFIG)
-    p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
-    p.add_argument("--seg-data-dir", default=DEFAULT_SEG_DATA_DIR)
+    p.add_argument("--seg-axis", default=P.FIXED_SEG_AXIS)
+    p.add_argument("--axis-config", default=json.dumps(P.ACTIVE_AXIS_CONFIG))
+    p.add_argument("--data-dir", default=P.FIXED_CANONICAL_DATA_DIR)
+    p.add_argument("--seg-data-dir", default=P.FIXED_CANONICAL_SEG_DATA_DIR)
     p.add_argument("--datasets", nargs="+", default=P.FIXED_CANONICAL_DATASETS)
     p.add_argument("--split-seed", type=int,
                    default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED)

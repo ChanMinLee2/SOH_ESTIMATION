@@ -39,10 +39,8 @@ for _font_name in ("Malgun Gothic", "AppleGothic", "NanumGothic", "Gulim"):
 matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["axes.formatter.use_mathtext"] = False
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-from common.scenario.q_frac_ref import QFracRefSegmenter  # noqa: E402
-from data_directories import DATA_4_HI_ROOT  # noqa: E402
+from common.scenario.q_frac_ref import QFracRefSegmenter  # pip install -e . 로 import 가능
+from data_directories import DATA_4_HI_ROOT
 
 CLEAN_DIR = DATA_4_HI_ROOT / "clean"
 OUT_DIR = Path(__file__).resolve().parent / "outputs"

@@ -774,12 +774,7 @@ def hi_names(*_) -> list:
 
 if __name__ == "__main__":
     import pandas as pd
-    import sys
-    from pathlib import Path
-    _root = Path(__file__).resolve().parent.parent
-    if str(_root) not in sys.path:
-        sys.path.insert(0, str(_root))
-    from data_directories import DATA_4_HI_ROOT  # noqa: E402
+    from data_directories import DATA_4_HI_ROOT  # pip install -e . 로 import 가능
     _pkl  = next((DATA_4_HI_ROOT / "MIT").glob("*.pkl"), None)
     if _pkl:
         import pickle

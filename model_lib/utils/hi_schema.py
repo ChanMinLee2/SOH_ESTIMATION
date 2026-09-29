@@ -156,10 +156,5 @@ N_HI: int = len(get_hi_cols_for_seg("dis_hi"))  # == 66 기본, EXCLUDE_STAT_LEA
 
 def spec_from_qfrac():
     """Default qfrac ScenarioSpec (backward-compat, avoids hardcoding N_SEGS/N_LEVELS)."""
-    import sys
-    from pathlib import Path as _Path
-    _root = _Path(__file__).resolve().parent.parent.parent
-    if str(_root) not in sys.path:
-        sys.path.insert(0, str(_root))
     from common.scenario.qfrac import QFracSegmenter
     return QFracSegmenter().get_spec()

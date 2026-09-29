@@ -7,7 +7,7 @@ SCR Trainer.
 루프를 직접 구현한다(이 파일에서 재사용하는 건 아래 `L0LambdaScheduler`뿐). 같이
 쓰이던 `fit_laplace()`(Laplace UQ 적합)의 유일한 소비자도 사라져서
 `model_lib/utils/uncertainty.py`/`model_lib/evaluation/scr_evaluator.py`의
-`predict_dataset_uq`/`plot_uq`도 같은 라운드에 정리했다(REFATORING.md 참고).
+`predict_dataset_uq`/`plot_uq`도 같은 라운드에 정리했다(REFACTORING.md 참고).
 """
 
 from __future__ import annotations

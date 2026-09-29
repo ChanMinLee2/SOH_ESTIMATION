@@ -28,9 +28,8 @@ import pandas as pd
 import scipy.signal as sig
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from data_directories import DATA_4_HI_ROOT  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # _style import(형제 모듈)용
+from data_directories import DATA_4_HI_ROOT  # pip install -e . 로 import 가능
 from _style import (INK, SUBINK, GRID, Z_LEFT, Z_MID, Z_RIGHT, ZONE_COLOR,  # noqa: E402
                      DATASET_COLOR, ZONE_BOUNDS, OVERLAPS, N1,
                      setup_rcparams, label_panel, strip_top_right)
