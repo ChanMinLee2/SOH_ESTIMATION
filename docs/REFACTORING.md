@@ -1374,3 +1374,1064 @@ utils 모듈로 빼야 함 — 아직 미착수. 별도로 진행한 행렬/벡�
   둘 다 `seg_rows` 21,828건/`cycle_rows` 1,820건으로 기존 검증값과 완전
   동일. 두 호출 결과의 행 dict 키 집합도 일치, 샘플 행(`seg_name='dis_hi'`,
   `cycle=2`, `capacity_Ah=1.0706892`)도 정상 값.
+
+### 2026-09-29 — `4_hi_analysis/` 파일 구조 전면 재편(main/plot/logics/constants) + Step4 결과 폴더 신설
+
+사용자가 파이프라인 전체(9개 스텝)에 새 관례 3가지를 제안: (1) 스텝 종료 시
+산출물을 실험 폴더의 `step_n_result/`에 저장, (2) 스텝별 `plot.py`가 그 결과
+폴더 경로만 받아서 그림을 다시 그리도록, (3) 스텝마다 main(진입점)/plot(그림)/
+logics(로직)/constants(값) 4파일로 분리하고 main()은 로직 함수 이름만 보고
+흐름을 알 수 있게. 리팩토링 전문가 관점 평가를 거쳐(같은 날짜 대화 기록) 다음과
+같이 조율해 `4_hi_analysis/`(Step4)에 먼저 파일럿 적용:
+- Step 1~3은 그대로 유지, Step 5~9의 산출물 재배치는 이번 라운드에서 다루지
+  않음(추후 별도 라운드).
+- (2)의 "산출물 이상탐지"는 보류 — 이번엔 폴더 참조 배선만.
+- (3) 깊이 제한("로직 함수의 하위 함수는 하위 함수를 가질 수 없음")은 채택하지
+  않음 — `_extract_one_cell → _extract_segment_rows → _seg_stat/...`처럼
+  이미 있는 자연스러운 계층을 억지로 펴면 오히려 가독성이 나빠진다는 이전
+  평가와 일관.
+
+**파일 구조**:
+- `4_hi_analysis/hi_compute.py` → `4_hi_analysis/tools/hi_compute.py`로 이동
+  (`git mv`) + `tools/__init__.py` 신설(패키지화, `from tools.hi_compute import
+  ...`로 참조). hi_compute.py는 hi_correlation.py 전용 로직이 아니라 여러
+  tools/ 스크립트가 함께 참조하는 독립적인 HI 계산 레지스트리라 logics.py
+  소유로 두지 않는다는 사용자 지침을 그대로 반영.
+- **`4_hi_analysis/constants.py`(신규)** — 경로 상수(MIT_DIR 등)/데이터셋
+  그룹/HI 라벨·세그먼트 메타/숫자 상수(DTW 밴드 등). 함수 없음.
+- **`4_hi_analysis/logics.py`(신규)** — 추출/상관분석/저장 로직 전부
+  (`_extract_one_cell`과 그 5개 헬퍼, `load_all`, `load_or_extract`,
+  `compute_correlations`, `_qfref_tag` 등 + 이번에 신설한 Step4 결과-폴더
+  관련 함수들, 아래).
+- **`4_hi_analysis/plot.py`(확장)** — 기존 `plot_correlation`/`_plot_sample_hi`에
+  더해 `hi_segment_viz.py`(별도 Step4 엔트리였던 세그먼트별 HI 추이/시나리오
+  오버레이 플롯)를 통째로 합류시키고 원본은 삭제. 합치면서 `plot_segment_cuts`
+  (Figure 1)는 가져오지 않았다 — 트리거 조건이 `_axis == "qfrac"`였는데 실제
+  축 이름이 "q_frac_ref"라 2026-09-24 비-정식 축 정리 이후 이 조건이 항상
+  거짓이 되어 사실상 죽은 코드였다(원본 git 히스토리에서 복원 가능). 이 과정에서
+  `HI_GROUPS`를 모듈 전역 import로 캐싱하던 hi_segment_viz.py의 구 패턴도
+  제거 — 모든 플롯 함수가 `hi_groups`를 인자로 받는다(plot_correlation 분리
+  때와 동일 원칙, 축에 따라 런타임 재빌드되는 값을 stale하게 들고 있지
+  않기 위함). `DS_COLOR`(hi_segment_viz.py)가 기존 `DATASET_COLORS`와 값이
+  바이트 단위로 동일해 중복 정의 없이 하나로 합침.
+- **`4_hi_analysis/hi_correlation.py`(대폭 축소)** — 이제 `main()`
+  하나만 갖는 진입점. `main()`은 이름만 보고 흐름을 알 수 있는 순서로 읽힌다:
+  파라미터 해석 → HI_GROUPS 재빌드 → 실행조건 출력 → 추출/캐시로드 → 상관계산
+  → Step4 결과 저장 → 플롯. tools/ 스크립트(profile_hi_timing.py 등)가
+  `from hi_correlation import X` 식으로 참조하는 이름들(`ALL_SEGS`/`STAT_KEYS`/
+  `HI_LABELS`/`_seg_stat`/`_qfref_tag`/`load_or_extract` 등)은 constants.py/
+  logics.py/tools.hi_compute에서 재수출해 하위호환 유지.
+
+**Step4 결과 폴더(`step_4_result/`, 신규)**: `_4_data_hi/q_frac_ref/<태그>/`
+(축-설정으로 키가 매겨진 기존 캐시 디렉터리, seg/cycle 폴더의 형제) 아래
+`step_4_result/`를 만들어 `correlation.csv`(HI×데이터셋 Spearman ρ),
+`extraction_stats.csv`(데이터셋별 셀 수 + 사이클/세그먼트 수 기초 통계량 —
+평균/중앙값/합계/최소/최대 + 게이트로 제외된 사이클 수), `manifest.json`
+(axis/axis_cfg/seg_names/cache_path/datasets 등, plot.py가 재구성에 씀),
+그리고 이 실행의 전체 플롯(11개 PNG)을 저장한다. 이미 axis-config로 키가
+매겨져 여러 실행이 공유하는 큰 데이터(df 캐시, 셀별 seg/cycle pkl, 수백MB~
+수GB)는 이 폴더에 복제하지 않고 manifest.json에 경로만 적어 둔다 — Step 1~4는
+"데이터셋·축설정 단위" 산출물이라 실험(run) 하나에 종속되는 Step5~9와 성격이
+달라서(캐시가 여러 실행에 걸쳐 재사용됨), "매 실행마다 실험 폴더 전체 복제"
+규칙을 그대로 적용하면 안 된다고 판단.
+`extraction_stats.csv`의 "게이트로 제외된 사이클 수"는 원본 clean pkl의
+사이클 수 - 추출된 사이클 수로 계산(`_extract_one_cell`의 `len(dis)<30`/
+`cap` 최소값/`q_local` 완전성 게이트 등으로 스킵된 사이클) — `_extract_one_cell`
+내부를 건드리지 않고 이미 저장된 산출물+원본만 읽어서 계산(재추출 없음).
+
+**plot.py 폴더 기반 진입점**: `plot.plot_from_result_dir(step_dir)` —
+`step_4_result/` 경로 하나만 받아 `manifest.json`/`correlation.csv`를 읽고
+manifest의 `cache_path`에서 df를 로드, `seg_names`로 hi_groups를 다시 빌드해
+전체 플롯을 그려 같은 폴더에 저장한다. `hi_correlation.py::main()`이 추출
+직후 자동 호출하지만, 이 함수 자체는 그 실행과 독립적으로 폴더 경로만 있으면
+언제든 재실행 가능(예: 플롯 스타일만 바꿔 재생성). 산출물 이상탐지는 아직
+없음(보류).
+
+**`run_pipeline.py` 동반 수정**: STEPS 목록에서 `hi_segment_viz.py` 엔트리를
+삭제(Step4가 이제 엔트리 하나 — 추출+상관분석+전체 플롯을 한 프로세스가
+전부 처리), 그에 따라 `--seg-axis`/`--axis-config`/`--force`를
+`script.endswith("hi_segment_viz.py")`로 분기 주입하던 코드도 제거(이제
+Step4 전체가 CLI를 전혀 안 받으므로 단순히 조건에서 뺌).
+
+**검증**: `py_compile` 전체 통과. 순환 import 없음(`plot.py → logics.py`
+단방향, `hi_correlation.py → {constants, logics, plot}`). tools/ 스크립트
+3개(`profile_hi_timing.py`/`seg_diagnose.py`/`seg_corr_analysis.py`)의
+실제 import 문을 그대로 재현해 전부 정상 해석됨을 확인(재수출 누락 없음).
+**실제 전체 실행**(`python 4_hi_analysis/hi_correlation.py`, 캐시 히트라
+추출은 재수행 안 함, MIT+HUST 총 244,043 사이클) — Spearman ρ 계산부터
+`step_4_result/` 저장, 11개 플롯(hi_correlation.png/sample_hi_trend.png/
+hi_segment_trend_{stat,diff,lfp,morph}.png/hi_overlay_{stat,diff,lfp,morph}.png)
+까지 끝까지 성공, "완료!" 출력 확인. `extraction_stats.csv` 실제 값 검증 —
+MIT n_cells=123/cycle_count_mean=796.78(Step3 무결성 검사 결과 "평균 796.8"과
+교차 일치), HUST n_cells=77/cycle_count_mean=1896.6, `cycles_removed_by_gate`
+MIT=1/HUST=0(게이트로 제외된 사이클 극소수, 합리적). `run_pipeline.py 4
+--to-step 4`도 실행해 디스패치 커맨드에 인자가 없고 Step4 엔트리가 이제
+하나뿐임을 확인.
+
+### 2026-09-29 — Step4의 `exclude_cv`(CC-only)/`skip_shape`(clean_noshape) 옵션 완전 제거 + `load_or_extract` 번호 주석
+
+사용자: "hi_correlation.py의 ccOnly, noShape 옵션 모두 이제 제거해줘. 앞으로
+안쓸거야." + "load_or_extract 함수의 흐름이 눈에 잘 보이지 않는거 같은데,
+주석으로 하위 함수 번호를 매겨서 각 함수당 한줄씩 설명하도록 추가."
+
+- **제거 범위**: `logics.py`의 `_extract_one_cell`(인자 tuple에서 `_exclude_cv`
+  제거 — 4/5-tuple이던 시그니처가 3/4-tuple로 줄어듦), `_prepare_charge_arrays`
+  (`exclude_cv` 파라미터 + CV 시작지점 절단 분기 삭제, `common.scenario._curves
+  .._detect_cv_start` import도 같이 제거), `load_all`/`load_or_extract`
+  (`exclude_cv`/`no_shape` 파라미터와 `_ccOnly`/`_noshape` 캐시·경로 접미사
+  로직 삭제), `_print_run_config`(두 값 출력 라인 삭제), `resolve_cache_and_axis_dir`
+  (두 파라미터 삭제). `hi_correlation.py::main()`도 `exclude_cv`/`skip_shape`
+  지역 변수 해석과 skip_shape 전용 `C.MIT_DIR`/`C.HUST_DIR` 재지정 블록을
+  통째로 제거 — 이 블록이 사라지면서 `_ds_dir()`가 "MIT_DIR이 런타임에
+  재할당될 수 있다"는 전제로 매번 `constants` 모듈 속성을 다시 읽던 이유도
+  없어져 docstring을 단순화(함수 동작 자체는 그대로 `C.MIT_DIR` 등을 참조 —
+  더 손댈 이유가 없어 유지).
+- **`parameters.py`**: `FIXED_EXCLUDE_CV` 완전 삭제(다른 어디서도 안 쓰였음).
+  `FIXED_SKIP_SHAPE`는 유지 — `2_preprocess/preprocess.py`(Step2) 자신의
+  `--skip-shape` 옵션이 이 값을 기본값으로 여전히 참조하는 별개 기능이라
+  Step4와 무관하게 남겨두고, 주석만 "Step2 전용"으로 정정.
+- **`load_or_extract` 가독성 개선**: `resolve_cache_and_axis_dir` 호출부와
+  `load_or_extract` 자체 인라인 경로 계산 로직이 중복 정의돼 있던 것도 이
+  참에 통합(`load_or_extract`가 `resolve_cache_and_axis_dir`를 호출하도록
+  변경 — 태그 규칙 단일 소스). docstring에 1)~8) 번호를 매겨 각 단계가 어떤
+  하위 함수 호출과 대응하는지 한 줄씩 설명하고, 본문 코드에도 같은 번호를
+  주석으로 붙여 "N) 무엇을 함" 형태로 읽히게 함(`_extract_one_cell` 때와
+  동일한 "이름 있는 단계로 오케스트레이션" 원칙).
+- **문서**: `parameters.py`/`docs/PARAMETERS.md`의 `FIXED_EXCLUDE_CV`/
+  `FIXED_SKIP_SHAPE` 설명 정정. 겸사겸사 `docs/PARAMETERS.md`의 "스크립트별
+  현재 CLI 옵션" 절이 이번 세션 초반 `run_pipeline.py`/`hi_correlation.py`
+  CLI 전량 제거 작업 때 갱신이 안 돼 있던 걸 발견해 같이 정정(`run_pipeline.py`
+  22개→2개, `hi_correlation.py` 23개→0개로 표기 수정).
+- **검증**: `py_compile` 전체 통과. `parameters.py`에 `FIXED_EXCLUDE_CV`
+  속성이 더 이상 없음을 `hasattr` 로 확인, `FIXED_SKIP_SHAPE`는 여전히 존재.
+  MIT `b1c0` 셀을 새 3-tuple/4-tuple(진행률 큐 포함) 시그니처 양쪽으로 직접
+  `_extract_one_cell()` 호출 — 둘 다 `seg_rows` 21,828건/`cycle_rows`
+  1,820건으로 기존 검증값과 완전 동일(인자 개수가 줄었을 뿐 추출 결과에
+  영향 없음을 확인). 코드베이스 전체에서 `FIXED_EXCLUDE_CV`/`exclude_cv`/
+  `skip_shape`/`ccOnly`/`noshape` 문자열을 grep — 남은 건 오늘 삭제를
+  설명하는 주석뿐, 실제 코드 참조는 0건.
+
+### 2026-09-30 — `hi_correlation.py`에 logics.py 호출 순서 소개 + 콘솔 전용 중복 블록 제거
+
+사용자: "hi_correlation.py에서 가장 상단 주석으로 logics.py의 어떤 함수들이
+어떤 순서로 구성되는지 간략하게 소개하는 글 추가하고, main() 함수 안에서 그
+번호대로 한줄 주석 추가." 이어서 그룹별 |ρ| 정렬 콘솔 출력 블록을 보고 "콘솔
+출력이면 없애도 돼?"라고 물어, 이미 `correlation.csv`와 `plot.py::
+_draw_heatmap`(동일한 `|ρ| 평균 내림차순` 정렬 로직)로 중복 제공되는 정보임을
+확인하고 삭제.
+
+- 모듈 docstring 상단에 `main()`이 호출하는 `logics.py` 함수 7개를 순서대로
+  나열(`build_hi_groups`→`_print_run_config`→`load_or_extract`→
+  `compute_correlations`→`resolve_cache_and_axis_dir`→`compute_extraction_stats`→
+  `save_step4_result`, `plot.py::plot_from_result_dir`는 logics.py 소속이
+  아니라 번호 밖에 별도 표기), `main()` 본문의 각 호출 지점에 동일 번호 주석을
+  붙임(`_extract_one_cell` 분리 때와 같은 "이름 있는 단계로 오케스트레이션"
+  원칙을 파일 진입점 레벨에도 적용).
+- 그룹(세그먼트×카테고리)별 `|ρ| avg` 정렬 콘솔 출력 블록 삭제 — `hi_groups`
+  반환값이 이제 `main()` 어디서도 안 쓰여 `L.build_hi_groups(...)` 언패킹도
+  `hi_groups, all_hi_keys, _` → `_, all_hi_keys, _`로 정리.
+- **검증**: `py_compile`/import 통과. 삭제 전후 실제 실행 로그를 비교해
+  "=== Spearman ρ 계산 ===" 직후 곧바로 "Step4 결과 저장"으로 넘어가고
+  그룹별 콘솔 블록이 사라졌음을 확인, 이후 단계(결과 저장/플롯)는 그대로
+  정상 진행.
+
+### 2026-09-30 — `5_interaction/interaction.py` CLI 파라미터 전량 제거(`--out-dir` 제외)
+
+사용자: "5_interaction/interaction.py 에 대해서도 cli 파라미터 제거부터
+진행." hi_correlation.py(2026-09-29)와 같은 원칙을 적용하되, interaction.py는
+`run_pipeline.py`가 여러 스텝(5~9)이 공유하는 실험 폴더(`run_dir`, 실행 시각
+타임스탬프 포함)를 계산해서 넘겨주는 `--out-dir`만은 parameters.py로 복원할
+수 없어 유일하게 남겼다 — hi_correlation.py(axis-config만으로 전부 결정되는
+캐시 경로)와의 핵심적 차이.
+
+- **제거**: `--seg-axis`/`--axis-config`/`--data-dir`/`--seg-data-dir`/
+  `--datasets`/`--split-seed`/`--alpha`/`--min-effect-size`/`--shuffle-from`/
+  `--shuffle-seed`/`--tag`(필수 인자였음) 전부 삭제, `main()`이
+  `parameters.py`(`FIXED_SEG_AXIS`/`ACTIVE_AXIS_CONFIG`/`FIXED_CANONICAL_*`/
+  `ACTIVE_SPLIT_SEED`/`FIXED_INTERACTION_ALPHA`/`FIXED_INTERACTION_MIN_EFFECT_SIZE`/
+  `FIXED_SHUFFLE_SEED`/`FIXED_INTERACTION_SHUFFLE_FROM`(신규)/
+  `FIXED_INTERACTION_TAG`)에서 직접 읽는 지역 변수로 대체. `tag`는
+  `P.FIXED_INTERACTION_TAG or f"{P.ACTIVE_P1_TAG}_interaction"`으로 해석 —
+  `run_pipeline.py`가 이미 계산하던 값과 정확히 동일한 식이라 정보 손실 없음.
+- **`FIXED_INTERACTION_SHUFFLE_FROM`(parameters.py 신규)**: 구
+  `--shuffle-from`(v4-ctrl 대조군 전용, 기본 `None`=일반 통계검정 모드).
+  `FIXED_SHUFFLE_SEED`는 기존에 이미 parameters.py에 있었는데 `--shuffle-from`
+  경로만 CLI 전용으로 남아 있던 비대칭을 정리. 겸사겸사 `FIXED_INTERACTION_*`
+  세 상수 위의 스텝 번호 주석이 "Step 6"으로 잘못돼 있던 것(interaction.py는
+  Step 5)도 "Step 5"로 정정.
+- **`_load_all_scenarios(args)` 하위호환**: `synergy.py`가 소유한 공유 함수라
+  (`중복 구현 금지 원칙`) 이번엔 그 함수 시그니처를 안 건드리고, interaction.py가
+  `types.SimpleNamespace`로 필요한 필드(`data_dir`/`seg_data_dir`/`datasets`/
+  `split_seed`/`axis_config`/`seg_axis`)만 채운 가짜 args를 만들어 그대로
+  넘기는 방식으로 CLI 제거 — synergy.py 자신의 CLI 정리 때 이 함수도 explicit
+  kwargs로 바뀌면 이 부분도 맞춰 정리 예정(현재는 한 스텝씩 순서대로 진행 중).
+- **`run_pipeline.py` 동반 수정**: Step 5~8 공용이던 `--seg-axis`/`--axis-config`
+  주입 조건을 `if num in (5,6,7,8)`→`if num in (6,7,8)`로 좁히고, Step 5 전용
+  블록에서 `--split-seed`/`--alpha`/`--min-effect-size`/`--tag`/`--data-dir`/
+  `--seg-data-dir` 주입을 전부 제거 — `--out-dir`만 남음(`interaction_tag`
+  자체는 run_pipeline.py가 Step 8의 산출물 재사용 판단에 계속 쓰므로 그
+  계산 로직은 유지, CLI로 넘기던 것만 뺌).
+- **검증**: `py_compile` 통과. `python 5_interaction/interaction.py --help`가
+  `--out-dir` 하나만 노출함을 확인. **실제 전체 실행**(`--out-dir` 임시
+  폴더 지정, 일반 통계검정 모드) — 120 train/40 val/40 test 셀, 세그먼트
+  1,676,366/582,720/661,248건 정상 로드, HI 66개 중 효과크기 기준 유의
+  39개(과거 기록 "0.1 문턱에서 약 39/64 통과"와 정합적), 출력 파일명이
+  `hi_scenario_interaction_p1v4_full_interaction.json`로 `tag` 해석이
+  `run_pipeline.py`의 `interaction_tag` 계산과 정확히 일치함을 확인.
+  `run_pipeline.py 5 --to-step 5`도 실행해 디스패치 커맨드가
+  `interaction.py --out-dir <run_dir>` 하나뿐임을 확인.
+
+### 2026-09-30 — `interaction.py` 핵심 로직 함수 분리 + 흐름 소개 주석(hi_correlation.py와 동일 원칙)
+
+사용자: "그 전에(synergy.py로 넘어가기 전에) 핵심 로직별로 함수를 분리하고
+흐름별 설명 상단 주석과 메인 함수 내에서 한줄주석 추가." hi_correlation.py의
+`_extract_one_cell` 분리(2026-09-29)와 `main()` 번호 주석(2026-09-30)을
+`interaction.py`에도 동일하게 적용 — 단, `4_hi_analysis/`처럼 main/plot/
+logics/constants 4파일로 쪼개진 않고, 파일 하나 안에서 함수만 분리했다
+(이 스크립트는 플롯을 안 만들고 상수도 적어 4파일 분리까지는 불필요 판단).
+
+- **새로 뽑아낸 함수 5개**(전부 `main()` 앞, `_bh_adjust` 뒤에 배치):
+  - `_compute_per_scenario_correlations(x_all, y_all, scen_idx_all, n_scen)`
+    — 시나리오별 (HI, capacity) Pearson r/n 계산
+  - `_compute_pairwise_min_p(r_by_scen, n_by_scen, n_scen)` — 시나리오 15쌍
+    전부에 Fisher z 검정 → HI별 최소 p/최악 쌍
+  - `_build_per_hi_result(...)` — HI별 결과 dict 조립(유의성 판정 포함)
+  - `_save_json(out_dir_arg, tag, payload)` — 일반 모드/v4-ctrl 모드 **공용**
+    저장 함수(기존엔 두 분기에 거의 같은 4줄이 복사돼 있었음 — 통합하며
+    중복도 같이 제거)
+  - `_print_top5(result)` — 콘솔 요약 출력
+- **`main()`**은 이제 얇은 오케스트레이터 — 일반 모드 1)~7), v4-ctrl 모드
+  1)~2)로 각각 번호를 매겨 어느 함수가 무슨 일을 하는지 본문 주석만 보고
+  추적 가능. 모듈 docstring 상단에도 두 모드(상호배타적, 
+  `FIXED_INTERACTION_SHUFFLE_FROM` 값으로 갈림)를 나눠 같은 번호로 소개하는
+  목록을 추가.
+- **검증**: `py_compile` 통과. 분리 전/후 동일 조건(`--out-dir` 임시 폴더,
+  일반 모드) 실제 실행 결과가 완전히 동일함을 확인 — top5 HI 이름/`std_r`
+  값/`worst_pair`/`r_by_scenario`까지 바이트 단위로 일치(`n_significant`
+  39/66 동일), 함수 분리가 순수 리팩토링임을 실행 결과로 재확인.
+
+### 2026-09-30 — `interaction.py` Fisher z 검정 + BH 보정 전면 제거 → 셀 단위 직접 계산으로 교체
+
+대화로 Fisher z 검정의 실제 쓰임을 짚다가 드러난 문제: 최종 판정(`significant`)은
+처음부터 `std_r_across_scenarios >= min_effect_size`(효과크기) 기준이었고,
+Fisher z + BH가 만드는 `p_significant`/`min_p_raw`/`p_adj_bh`는 어디서도 판정에
+안 쓰이는 죽은 계산이었다(코드 자신의 주석도 "참고용"이라고 이미 인정하고
+있었음). 근본 원인을 더 정확히 짚으면 "표본이 커서 항상 유의하다"가 아니라
+**유사반복(pseudo-replication)** — Fisher 검정의 표준오차가 세그먼트 행 개수
+(시나리오당 ~28만 건)를 독립 표본 수로 썼는데, 같은 셀에서 나온 세그먼트
+수백~수천 개는 서로 강하게 상관된 비독립 표본이라 진짜 정보 단위(셀 개수,
+train 120개)보다 수천 배 부풀려진 표본 크기를 쓴 것 — 그래서 z값이 88처럼
+나와 사실상 모든 HI가 유의하게 나왔다(실측 66/66).
+
+사용자 질문("p-value 검정이 필요 없는 거 아니야?" → "그럼 std_r 기준의 근거는?")
+끝에 **셀 단위 직접 계산**으로 교체 결정: 셀 하나하나에서(다른 셀과 안 섞고)
+독립적으로 `std_r_across_scenarios`를 구하고, 그 분포의 95% CI 하한이 0보다
+큰지로 "풀링했을 때만 보이는 집계 착시(심슨의 역설류)가 아님"을 확인한다.
+셀을 단위로 쓰면 유사반복 문제 자체가 없다(셀이 곧 진짜 독립 단위).
+
+- **제거**: `_fisher_z_test`, `_compute_pairwise_min_p`, `_bh_adjust` 함수 전부
+  삭제, `itertools` import 제거(단순 쌍 생성으로 대체돼 불필요). `parameters.py`의
+  `FIXED_INTERACTION_ALPHA`(BH 유의수준, 다른 어디서도 안 쓰였음)도 같이 삭제.
+- **신설**: `FIXED_INTERACTION_MIN_SEGS_PER_CELL = 10`(parameters.py) — 셀 단위
+  계산 시 "이 셀, 이 시나리오" 세그먼트 수가 이 값 미만이면 상관계수가
+  불안정해지므로 그 셀 전체를 제외.
+- **`synergy.py::_load_all_scenarios` 반환값 확장**: `x_all, y_all, scen_idx_all,
+  spec, names_by_seg` 5-tuple → 끝에 `cell_ids`(`train_ds.cell_ids`, 행 순서
+  동일)를 추가한 6-tuple로 변경 — 셀 단위 계산엔 어느 행이 어느 셀인지가
+  필수인데 기존 반환값엔 없었음. 유일한 다른 호출부(synergy.py 자신의 `main()`)도
+  `_cell_ids`로 받아 무시하도록 맞춰 수정(synergy.py는 아직 셀 단위 계산을
+  안 씀).
+- **interaction.py 신규 함수 3개**:
+  - `_pearson_corr_vec(x, y)` — 열별 Pearson r을 한 번에 벡터화 계산(`np.corrcoef`를
+    열마다 따로 부르는 것과 동일한 값이지만, 셀×시나리오 조합마다(120×6=720회)
+    66개 HI를 다시 계산해야 해서 벡터화 필요). 별도 단위테스트로 `np.corrcoef`와
+    완전히 동일한 값(diff~1e-17)을 내고, 분산 0 열(상수 컬럼)에서 NaN 대신 0.0을
+    반환함을 확인.
+  - `_compute_per_cell_std_r(...)` — 셀마다 독립적으로 시나리오별 r을 구해
+    `std_r_across_scenarios`를 계산, 세그먼트 부족한 셀은 제외. 반환:
+    `(n_cells_used, n_hi)` 배열.
+  - `_cell_level_ci(per_cell_std_r)` — 셀간 분포의 HI별 평균/95% CI(정규근사,
+    mean±1.96×SE).
+  - 기존 `_compute_pairwise_min_p`가 하던 "worst_pair 찾기"는 통계 검정 없이
+    `_find_most_different_pair`(순수 `argmax|Δr|`)로 단순화 — 실측 결과 이게
+    오히려 Fisher 방식보다 "진짜 가장 다른 쌍"을 더 정확히 찾음을 확인했다(아래
+    검증 참고, Fisher 방식은 표본 크기 왜곡 때문에 최대 Δr 쌍을 못 찾는 경우가
+    있었음).
+- **`_build_per_hi_result` 재작성**: 최종 `significant`가 이제
+  `effect_size_meaningful(풀링 std_r>=0.1) AND cell_level_confirmed(셀 단위 CI
+  하한>0)` **둘 다** 만족해야 True. 결과 dict에서 `min_p_raw`/`p_adj_bh`/
+  `p_significant` 삭제, `cell_level_std_r_mean`/`cell_level_std_r_ci_lower`/
+  `cell_level_std_r_ci_upper`/`cell_level_confirmed` 신설.
+- **검증**: `py_compile` 전체(`interaction.py`/`synergy.py`/`parameters.py`)
+  통과. `_pearson_corr_vec` 단위검증 통과(위 참고). **실제 전체 실행** —
+  120 train 셀 전부가 `min_segs_per_cell=10` 기준을 통과해 셀 단위 계산에
+  사용됨, `r_by_scenario`/`std_r_across_scenarios` 값은 기존과 완전 동일(풀링
+  계산 로직 자체는 안 건드렸으므로 당연한 결과, 교차검증 목적), 효과크기 통과
+  39개와 셀 단위 확인까지 통과한 최종 `significant` 39개가 **정확히 일치**
+  (이번 데이터에서는 효과크기를 넘은 HI가 전부 셀 단위에서도 재현됨 — CI
+  하한이 전부 0.2~0.57대로 넉넉하게 양수). `worst_pair`가 예전 Fisher 방식과
+  달라진 사례 실측 확인(`stat_v_p10`: Fisher 방식 `['chg_lo','chg_mid']`
+  Δr=0.167 → 새 방식 `['chg_mid','dis_hi']` Δr=0.600) — 새 방식이 실제로 더 큰
+  차이를 찾아내 "표본 크기로 왜곡된 Fisher 선택"이라는 진단이 실측으로도
+  확인됨. `run_pipeline.py`/`9_eval/`/`model_lib/` 전체에서 제거된 필드명
+  (`p_significant`/`min_p_raw`/`p_adj_bh`)과 `FIXED_INTERACTION_ALPHA`를
+  grep — 과거 산출물 JSON(아카이브) 외엔 코드 참조 0건.
+
+### 2026-10-01 `_load_all_scenarios` 소유권 방향 교정 (synergy.py → interaction.py)
+
+`_load_all_scenarios`(train split 로더, x_all/y_all/scen_idx_all/spec/
+names_by_seg/cell_ids 반환)가 원래 `6_synergy/synergy.py`(Step 6)에 정의돼
+있고 `5_interaction/interaction.py`(Step 5)가 그걸 가져다 쓰는 구조였다 —
+파이프라인 실행 순서(5번이 6번보다 먼저 실행)와 의존 방향이 거꾸로였다는
+지적을 받아 교정.
+
+- **이동**: 함수 본체를 `synergy.py`에서 `interaction.py`로 옮김(`_parse_args`
+  바로 다음, `_shuffle_significant` 앞). docstring에 "synergy.py(Step 6)가
+  이 함수를 그대로 가져다 쓴다"로 소유권 명시.
+- **synergy.py**: 함수 정의 삭제, 대신
+  `sys.path.insert(0, str(PROJECT_ROOT / "5_interaction"))` +
+  `from interaction import _load_all_scenarios  # noqa: E402`로 교체(이
+  파일 최상단 import에 `sys` 추가). 왜 이 방향인지(Step 번호 낮은 쪽이
+  "기반" 코드를 갖고 뒤 단계가 가져다 쓴다) 주석으로 명시.
+- **interaction.py**: 더는 필요 없어진 `sys.path.insert(0, ... "6_synergy")`
+  + `from synergy import _load_all_scenarios` 제거. 모듈 docstring의 소유권
+  서술도 갱신.
+- **중복 구현 금지 원칙은 그대로 유지** — 구현은 한 곳(interaction.py)에만
+  존재, synergy.py는 import로만 재사용.
+- **검증**: `py_compile` 둘 다 통과. `synergy._load_all_scenarios is
+  interaction._load_all_scenarios` → `True`(순환 import 없이 동일 객체
+  참조 확인). `interaction.py` 단독 실행 결과가 이동 전과 완전 동일(top5
+  HI의 `r_by_scenario`/`std_r_across_scenarios`/`worst_pair`/`cell_ci`
+  값 전부 일치). `synergy.py --help` 성공(모듈 최상단에서 cross-step
+  import가 entry-script 실행 시에도 안 깨짐을 확인). **`synergy.py` 실제
+  알고리즘 전체 실행**(`--tag refactor_verify_test`, train 120셀/166만
+  세그먼트 기준 약 3분 38초 소요) 성공 — 시나리오 6개 전부 그룹 구성 완료
+  (`chg_lo`~`dis_lo` 각 66개 HI → 16~18개 그룹), 결과 JSON 정상 생성. 검증용
+  산출물(`/tmp/synergy_test*`)과 검증 실행이 `docs/phase1_lab/RESULTS_LOG.md`에
+  자동 남긴 테스트 로그 항목은 정리 삭제.
+
+### 2026-10-01 interaction.py 기능 분리 — 상관계수 차이(기능 1) vs 시나리오
+### 구분력(기능 2), effect_size 기준 시행착오 끝에 Cohen 관행값으로 복귀
+
+"HI x 시나리오" 분석이 사실 서로 다른 두 질문을 섞고 있었다는 지적을 받아
+`interaction.py`를 두 기능으로 분리하고, 기능 1의 effect-size 문턱을 두 번의
+시행착오 끝에 원래 상수(Cohen 0.1)로 되돌렸다(비교 대상만 교정).
+
+**배경 — 풀링이 효과크기를 체계적으로 깎는다는 발견**: 기존 `effect_size_meaningful`
+판정은 전체 풀링(120개 셀을 섞어서 계산한) `std_r_across_scenarios`를 Cohen(1988)
+상관계수 "작음" 관행 문턱 0.1과 비교했다. 실제 JSON에 이미 저장돼 있던
+`cell_level_std_r_mean`(셀 단위로 따로 계산한 뒤 평균 낸 값, 편향 없음)과
+비교해보니 **66개 HI 전부에서 풀링값 < 셀 단위 평균**(평균 2.63배, 중앙값
+2.53배, 예: `stat_v_p10` 풀링 0.206 vs 셀 단위 0.511)이었다 — 셀마다 절대
+용량 수준(베이스라인)이 달라서 풀링하면 심슨의 역설류로 값이 깎인다는 뜻(toy
+예시로 재현: 셀 A `HI=[1,2,3]→cap=[9,8,7]`, 셀 B `HI=[4,5,6]→cap=[12,11,10]`,
+각 셀 내 r=-1인데 풀링하면 r=+0.54로 부호까지 뒤집힘). 즉 "0.1이 근거 없는
+임의값"이 문제가 아니라 "0.1을 잘못된(깎인) 통계치에 비교했다"가 진짜 문제였다.
+
+**시행착오 1 — 시나리오 내부 분할-재계산(split-half) 노이즈**: 같은 시나리오의
+세그먼트를 무작위로 반으로 나눠 r을 두 번 계산, 그 차이를 "우연한 흔들림"
+기준선으로 쓰려 했다. 실측 결과 66개 HI 전부가 이 노이즈의 3.5~20배로
+통과해(최소 margin도 3.5배) 변별력이 전혀 없었다 — 한 시나리오 안의 세그먼트가
+부드럽고 촘촘한 열화 곡선을 따라가서 반으로 쪼개도 거의 같은 곡선이 복원되기
+때문("r 추정 자체의 정밀도"만 쟀을 뿐, "라벨이 의미 없을 때도 이만큼 편차가
+날까"라는 질문엔 답하지 못함).
+
+**시행착오 2 — 순열(permutation) 귀무기준선**: 셀의 전체 세그먼트(6개 시나리오
+전부)를 모아 무작위로 섞은 뒤 실제 시나리오별 개수와 같은 크기로 재분할해
+"가짜 시나리오" std_r을 구했다(라벨 자체를 무작위화하므로 시행착오 1보다
+직접적인 귀무가설 검정). 이번엔 질문엔 제대로 답했지만(실측: 가장 약한 HI도
+노이즈의 7.7배, 평균 12.9배) — 120개라는 넉넉한 독립 셀 수 때문에 작은 실제
+효과도 쉽게 "우연이 아님"으로 나오는 게 통계적으로 정상이라, 66개 전부가
+다시 통과했다. 즉 이 방법은 "통계적으로 우연이 아니다"(유의성)엔 답이 되지만
+애초에 풀려던 질문 "실용적으로 게이트를 나눌 만큼 크기가 충분하다"(효과크기)엔
+원리적으로 답할 수 없는 방법이었다 — 표본이 크면 작은 효과도 당연히 유의하게
+나오기 때문.
+
+**최종 결정**: 두 시행착오 모두 코드에서 제거(기록은 여기 남김)하고, Cohen
+0.1 문턱을 **비교 대상만 `cell_level_std_r_mean`(편향 없는 추정치)로 바꿔서**
+그대로 재적용했다 — "통계적 유의성"(`cell_level_confirmed`, 셀 단위 CI 하한>0,
+기존 그대로)과 "실용적 효과크기"(`effect_size_meaningful`, Cohen 관행값, 이번에
+교정)를 분리해서 보고하는 표준적인 형태. `effect_size_band`(negligible/small/
+medium/large) 필드를 신설해 리포팅 세분화.
+
+**기능 2 신설 후 즉시 제거 — `hi_scenario_similarity_{tag}.json`**: 사용자가
+"상관계수 차이"와 "HI 값 자체의 유사도"는 다른 질문이라고 지적해, 셀마다
+시나리오별 HI **평균값**(target 무관)을 셀을 반복측정 단위로 하는
+일원분산분석에 넣어 η²(eta-squared, Cohen 1988 관행 0.01/0.06/0.14)를
+구하는 기능을 `_compute_scenario_similarity`/`_build_similarity_result`/
+`_save_similarity_json`/`_print_similarity_summary`로 한 라운드 구현하고
+실제 실행까지 검증했다(66개 HI, η² 범위 0.0035~0.95 — `stat_v_mean_cw`는
+η²=0.95(large, SOC 구간상 당연히 전압 평균이 다름)이면서 기능 1 cell_mean도
+≈0.52로 큼, `stat_q_abs`는 η²=0.0035(negligible)이고 기능 1 cell_mean도
+≈0.03으로 미달 — 두 지표가 다른 질문에 답한다는 설계(toy 예시: 값은 같은데
+관계는 반대인 HI, 값은 다른데 관계는 같은 HI)가 실측으로도 확인됨). 하지만
+바로 다음 라운드에서 "기능 2는 모두 제거하자"는 결정에 따라 네 함수와
+module docstring/main()의 관련 블록을 전부 삭제했다 — 이 스크립트는 v4 게이트
+결정(기능 1)이라는 단일 질문에만 집중하기로 함. 시나리오 구분력 분석이 다시
+필요해지면 이 기록(및 git 히스토리)에서 복원 가능.
+
+**parameters.py**: `FIXED_INTERACTION_MIN_EFFECT_SIZE = 0.1` 복원(주석 전면
+교정 — 왜 0.1이 맞는 값인지, 두 시행착오가 왜 폐기됐는지 기록). 쓸모없어진
+`FIXED_INTERACTION_NOISE_SPLIT_SEED` 제거.
+
+**검증**: `py_compile` 통과. **실제 전체 실행**(`python 5_interaction/interaction.py
+--out-dir ...`) 기능 2 제거 전/후 두 번 모두 성공, 결과 동일 — HI 66개 중
+효과크기 통과 63개(= CI 확인까지 통과한 최종 판정 63개, 둘이 정확히 일치 —
+셀 120개 모두 효과크기 기준에서도 CI 기준에서도 같은 방향으로 갈렸다는 뜻),
+제외된 3개(`stat_q_abs`, `diff_dqdv_valley_h`, `stat_energy_seg`)는 전부
+cell_mean<0.1로 예상과 일치. 테스트 산출물(`/tmp/interaction_*_test*`) 정리
+삭제.
+
+### 2026-10-01 전체 풀링 기준 상관계수/최다-차이쌍 코드 완전 제거
+
+판정이 `cell_level_std_r_mean`/`cell_level_confirmed`로 완전히 이전된 뒤
+(바로 위 라운드), 전체 풀링 기준 `_compute_per_scenario_correlations`/
+`_find_most_different_pair`는 판정에 안 쓰이는 순수 진단 필드(`r_by_scenario`/
+`std_r_across_scenarios`/`worst_pair`/`worst_pair_delta_r`)만 만들고 있었다.
+그마저도 "풀링값은 셀 간 베이스라인 차이로 체계적으로 깎인다"(평균 2.6배,
+바로 위 라운드에서 확인)는 걸 이미 알고 있는 상태라, 남겨두면 읽는 사람이
+이 값을 실제 판정 근거로 오해할 위험이 있었다. 지적을 받아 전부 제거.
+
+- **제거**: `_compute_per_scenario_correlations`/`_find_most_different_pair`
+  함수 삭제. `_build_per_hi_result` 시그니처에서 `r_by_scen`/`worst_pair`
+  파라미터 제거, 출력 dict에서 `r_by_scenario`/`std_r_across_scenarios`/
+  `worst_pair`/`worst_pair_delta_r` 4개 필드 제거(남은 필드:
+  `cell_level_std_r_mean`/`cell_level_std_r_ci_lower`/`cell_level_std_r_ci_upper`/
+  `effect_size_band`/`effect_size_meaningful`/`cell_level_confirmed`/
+  `significant`).
+- **`_print_top5`**: 정렬/출력 기준을 `std_r_across_scenarios`(풀링) →
+  `cell_level_std_r_mean`(셀 단위)로 교체, `worst_pair`/`r_by_scenario` 출력
+  제거.
+- **`main()`**: 모듈 docstring의 일반 모드 흐름이 8단계 → 6단계로 줄었다
+  (`_load_all_scenarios` → `_compute_per_cell_std_r` → `_cell_level_ci` →
+  `_build_per_hi_result` → `_save_json` → `_print_top5`).
+- **`plot.py` 연쇄 수정**: JSON에서 `std_r_across_scenarios`를 읽어 정렬/제목에
+  쓰던 부분이 깨지므로 — 애초에 `plot.py`는 `_compute_per_cell_std_r`/
+  `_cell_level_ci`로 셀 단위 통계를 로컬에서 직접 다시 계산하고 있었으니(JSON의
+  집계값 자체를 안 읽음), 정렬/제목 모두 그 로컬 `cell_mean`을 쓰도록 바꿨다 —
+  결과적으로 JSON에서 읽는 필드는 `significant`(제목 색) 하나만 남아 오히려
+  더 단순해짐.
+- **검증**: `py_compile` 통과. `interaction.py` 실제 전체 실행 — 66개 중 63개
+  유의(이전 라운드와 동일), 콘솔 top5 출력이 `cell_level_std_r_mean` 기준으로
+  정상 작동. `plot.py` 실제 전체 실행 — "significant=63개" 정상 출력, 생성된
+  격자 그림에서 초록(유의) 63개/회색(비유의) 3개(`stat_q_abs`/
+  `diff_dqdv_valley_h`/`stat_energy_seg`, 그림 맨 끝에 배치)가 정확히 일치,
+  `cell_mean` 내림차순 정렬도 정상(1위 `diff_dqdv_peak_v` 0.560).
+
+### 2026-10-01 `logics.py::load_all` → `extract_dataset_cells` 개명
+
+`load_all`이 실제로 하는 일(`_extract_one_cell`을 `ProcessPoolExecutor`로
+병렬 배치하고 결과를 DataFrame으로 합쳐 반환)이 "불러오기"가 아니라 "추출"
+이라는 지적을 받아 개명 — "이미 있는 걸 로드한다"가 아니라 "실제 추출을
+수행한다"는 의미가 이름에 드러나야 한다는 취지. `extract_all_datasets`
+(데이터셋마다 이 함수를 한 번씩 호출하는 바로 위 상위 함수)와도 이름이
+짝을 이루게 됐다.
+
+- **변경**: 정의 1곳(`logics.py`), 호출부 1곳(`extract_all_datasets` 내부),
+  주석 참조 1곳, `hi_correlation.py`의 재수출 import 1곳 — 총 4곳 수정.
+  다른 파일에서 참조한 곳 없음(사전 grep 확인).
+- **검증**: `py_compile` 통과, `hi_correlation.py` 실제 전체 실행(캐시 hit
+  경로) 성공 — 244,043 사이클, Step4 플롯 10개 전부 정상 저장.
+
+### 2026-10-01 Step4 진단 플롯 통합 — 1단계(plot_cell_cycles/plot_cycle_segments/
+### plot_all_mit_cells → plot.py)
+
+`4_hi_analysis/tools/`에 독립 실행용 진단 플롯 스크립트 5개(총 ~4,600줄, 플롯
+함수 18개+)가 각자 발전해오며 한국어 폰트 폴백 블록이 6곳에 중복되고, 데이터셋
+색상이 `plot.py`의 `DATASET_COLORS`와 어긋나는 곳(`seg_diagnose.py`의
+`{"MIT":"#3498db","HUST":"#e74c3c"}`)이 생기고, `plot_all_mit_cells.py`가
+`plot_cell_cycles.py`를 subprocess로 호출하는 비효율 구조가 쌓여 있었다.
+요구사항(①함수명이 뭘 그리는지 드러나야 함 ②호출 depth 최대 2단계 ③공통
+스타일 동기화 ④모든 플롯 함수명 `_plot_step4_` 접두) 아래 `plot.py` 하나로
+통합하기로 하고, 범위가 커서(43개 함수, `seg_diagnose.py`만 2,564줄) 단계적으로
+진행 — **1단계는 가장 작고 서로 의존적인 3개 파일**(`plot_cell_cycles.py`+
+`plot_cycle_segments.py`+`plot_all_mit_cells.py`, 합쳐 ~690줄, 함수 10개)만
+다뤘다. `seg_corr_analysis.py`/`seg_diagnose.py`는 2단계/3단계로 이후 별도 진행
+(계획 파일 `C:\Users\ksshin\.claude\plans\composed-discovering-dolphin.md` 참고).
+
+- **이름 매핑**: `plot_overlay`→`_plot_step4_cell_cycle_overlay_panel`(2단계,
+  패널 하나), `main()`(2x2 figure)→`_plot_step4_cell_cycle_overlay`(1단계,
+  셀 하나). `draw_seg_bands`→`_plot_step4_segment_bands_panel`(2단계),
+  `main()`(3행 figure)→`_plot_step4_cycle_segments`(1단계, 사이클 하나).
+  `plot_all_mit_cells.py`(subprocess 배치 러너)→
+  `_plot_step4_dataset_cell_cycle_overlay`(1단계, 데이터셋 전체 셀 — 이게
+  사용자가 예로 든 "데이터셋 전체 셀 → 셀 하나" 2단계 구조 그 자체). 계산/로드
+  헬퍼는 `_compute_step4_*`/`_load_step4_*`.
+- **중복 제거**: `plot_cell_cycles.py::compute_qfrac`와
+  `plot_cycle_segments.py::compute_seg_times`가 각자 구현하던 같은 전하량
+  적분(q_cum/q_tot 계산 + q_tot<0.05 조기종료)을 `_compute_step4_qfrac`
+  하나로 통합 — 오버레이 쪽은 (q_frac,v)만, 세그먼트 밴드 쪽은 t/q_tot까지
+  활용.
+- **스타일 동기화**: 한국어 폰트 폴백을 `plot_correlation()` 내부 인라인+
+  흡수해온 3개 파일의 중복 블록(총 4곳)을 전부 제거하고 모듈 레벨 1곳으로
+  통합. 사이클 순번 컬러맵(`RdYlGn_r`)을 `CYCLE_RANK_CMAP` 상수로, SOC-zone
+  색상을 `STEP4_CHG_ZONE_COLORS`/`STEP4_DIS_ZONE_COLORS`로 승격(기존
+  `constants.py`의 `CHG_SEGS`/`DIS_SEGS`와 이름 겹침 방지 위해 `STEP4_` 접두).
+  이번 3개 파일은 데이터셋-정체성 색상을 안 써서 `DATASET_COLORS`와 충돌은
+  없었지만, 앞으로(2단계 `seg_diagnose.py`) 데이터셋 색상이 필요하면 반드시
+  기존 `DATASET_COLORS`만 참조하고 새 로컬 딕셔너리를 안 만든다는 규칙을
+  `plot.py` 모듈 docstring에 못박아둠.
+- **진입점**: `plot.py`에 `STEP4_DIAG_PLOTS`(번호→(설명,함수) 레지스트리)와
+  `main()`(번호 선택형 CLI, `python 4_hi_analysis/plot.py <번호>`) 신설 — 옛
+  3개 스크립트 각자의 argparse CLI를 대체. 데이터셋/셀/사이클/임계값 등 실제
+  파라미터는 CLI로 안 받고 `parameters.py`(`FIXED_STEP4_DIAG_*`, 옛 argparse
+  기본값 그대로 이전)에서만 읽는다(run_pipeline.py와 동일 원칙).
+- **경로**: 세 파일 다 `_1_data_unified/{MIT,HUST,TJU,CALCE}`(전처리 **이전**
+  원본 — `constants.py`의 `MIT_DIR` 등 전처리 **이후** 경로와 다름, 의도적 —
+  `plot_cell_cycles`가 `2_preprocess/outputs/shape_outlier_report.csv`를 원본
+  위에 겹쳐 그리는 용도라서)를 각자 하드코딩하고 있던 걸 `STEP4_DIAG_DATASET_DIRS`
+  하나로 합침. **발견(수정 안 함, 범위 밖)**: `_1_data_unified/MIT`·`HUST`가
+  로컬(C:)엔 더 이상 없고 D:(`EXTERNAL_DATA_ROOT`)에만 있다 — 이건 이번
+  마이그레이션과 무관한 기존 환경 상태로, 옛 스크립트를 오늘 그대로 실행했어도
+  똑같이 실패했을 것(아래 검증에서 CALCE/TJU로 대체 검증한 이유).
+- **버그 발견 및 수정(마이그레이션 중 실측)**: `_plot_step4_dataset_cell_cycle_overlay`
+  최초 구현이 `ThreadPoolExecutor`로 `_plot_step4_cell_cycle_overlay`를
+  동시 호출했는데, matplotlib pyplot의 전역 figure 상태가 스레드 세이프하지
+  않아(공식 문서 명시 제약) 16개 중 7개가 `RendererAgg`/"Figure.draw 안 불림"
+  에러로 실패했다. `_STEP4_PLOT_LOCK`(threading.Lock)으로 그림 생성~저장
+  구간만 직렬화하고 데이터 로드는 계속 병렬로 두는 방식으로 수정, 재검증
+  16/16 성공. `plt.savefig`→`fig.savefig`(객체 메서드, 전역 상태 안 거침)도
+  같이 교정.
+- **삭제**: `plot_cell_cycles.py`/`plot_cycle_segments.py`/`plot_all_mit_cells.py`
+  3개 파일 전체(다른 파일에서 import된 적 없음, 사전 확인 완료).
+- **검증**: `py_compile` 통과. 로컬에 MIT/HUST 원본이 없어 **CALCE/TJU로
+  대체 실측** — `_plot_step4_cell_cycle_overlay`(CALCE/CS2_21): 마이그레이션
+  전 원본 스크립트를 같은 입력으로 돌린 결과와 **픽셀 단위로 동일**(같은 파일에
+  순서대로 저장해 직접 비교). `_plot_step4_cycle_segments`(CALCE/CS2_21/
+  cycle=2): 상/중단 패널이 비었는데, 원인을 추적해보니 이 특정 셀의 충전
+  전하량(q_tot=0.0179Ah)이 원본에도 있던 고정 임계값(0.05Ah) 미만이라 조기
+  종료 — 마이그레이션 버그 아니라 기존에도 있던 임계값과 이 데이터의 상호작용
+  (CALCE는 원래 이 스크립트가 공식 지원하던 데이터셋이 아니었음). `main()`
+  CLI 디스패처로 번호 1/3 둘 다 end-to-end 확인. `_plot_step4_dataset_cell_cycle_overlay`
+  (CALCE 전체 16셀): 수정 후 16/16 성공. 검증 중 생성된 CALCE 테스트 산출물은
+  정리 삭제, MIT/HUST/TJU 기존 산출물(이전 세션들 결과물)은 손대지 않음.
+
+### 2026-10-01 plot.py 기존 함수에도 `_plot_step4_` 네이밍 적용 + MIT/HUST
+### 경로 폴백 버그 발견·수정
+
+1단계에서 새로 흡수한 함수만 `_plot_step4_` 접두를 달고 있었는데, `plot.py`에
+원래 있던 함수들(`plot_correlation` 등)은 그대로였다 — 지적을 받아 전체
+일관성을 맞췄다.
+
+- **개명**(9개, 전부 word-boundary `sed`로 일괄 치환 후 grep으로 잔존 참조
+  없음 확인): `_draw_heatmap`→`_plot_step4_correlation_heatmap_panel`(2단계),
+  `plot_correlation`→`_plot_step4_correlation`(1단계), `_plot_sample_hi`→
+  `_plot_step4_sample_hi_trend`(1단계), `_draw_trend_cell`→
+  `_plot_step4_segment_hi_trend_panel`(2단계), `plot_segment_hi_trend`→
+  `_plot_step4_segment_hi_trend`(1단계), `plot_segment_hi_overlay`→
+  `_plot_step4_segment_hi_overlay`(1단계), `plot_from_result_dir`→
+  `_plot_step4_from_result_dir`(외부 진입점, `hi_correlation.py`가
+  `PLOT._plot_step4_from_result_dir(step_dir)`로 호출 — Step 5/6의
+  `_load_all_scenarios`처럼 밑줄 접두 함수를 다른 모듈이 가져다 쓰는 기존
+  선례와 같은 패턴). 플롯 아닌 헬퍼 2개는 다른 접두로: `_plain_label`→
+  `_compute_step4_plain_label`, `_build_seg_meta`→`_compute_step4_seg_meta`.
+  `hi_correlation.py`의 호출부·주석 3곳도 같이 교정.
+- **버그 발견·수정(사용자 지적)**: `_1_data_unified`(원본, 전처리 전)가 로컬
+  엔 MIT/HUST가 없고 TJU/CALCE만 있어서(D: 드라이브로 옮겨감, 1단계 때
+  "발견(수정 안 함)"으로만 적어뒀던 항목) Step4 진단 플롯이 MIT/HUST를 못
+  찾고 있었다 — `data_directories.py`의 `EXTERNAL_DATA_ROOT`가 바로 이
+  용도로 이미 있었고(`2_preprocess/preprocess.py::_resolve_unified_src`가
+  동일 패턴 사용 중) 1단계 마이그레이션이 이 기존 관례를 놓쳤었다. `STEP4_
+  DIAG_DATASET_DIRS`(정적 dict)를 `_resolve_step4_dataset_dir(dataset)`
+  함수로 바꿔 로컬 우선, 없으면 `EXTERNAL_DATA_ROOT`로 폴백하도록 수정 —
+  `_plot_step4_cell_cycle_overlay`/`_plot_step4_dataset_cell_cycle_overlay`/
+  `_plot_step4_cycle_segments` 3곳의 호출부도 맞춰 수정. 부수적으로
+  `cm.get_cmap(CYCLE_RANK_CMAP)`(matplotlib 3.7+ deprecated, 1단계에서
+  문자열 상수로 바꾸며 의도치 않게 도입된 경고)도 `matplotlib.colormaps[...]`
+  로 교정.
+- **검증**: `py_compile` 통과. `python 4_hi_analysis/plot.py 1`을 실제 MIT
+  b1c0으로 재실행 — EXTERNAL_DATA_ROOT 폴백으로 정상 로드, deprecation
+  경고 없이 저장 성공, 생성된 그림 확인(열화 곡선·V-q_frac 오버레이·제거
+  후보 표시 전부 정상). 테스트 산출물 정리 삭제.
+
+### 2026-10-01 `synergy.py`(Step 6) argparse 제거
+
+`hi_correlation.py`(Step 4)/`interaction.py`(Step 5)와 동일한 CLI 제거
+원칙을 `synergy.py`에도 적용 — `--out-dir`만 남기고(run_pipeline.py가 여러
+스텝이 공유하는 실험 폴더를 넘겨주는 용도라 parameters.py로 복원 불가) 나머지
+(seg-axis/axis-config/data-dir/seg-data-dir/datasets/split-seed/
+max-group-size/redundancy-threshold/min-partial-corr/prefilter-top-m/
+global-dedup/shuffle-from/shuffle-seed/tag, 13개)는 전부 parameters.py에서
+읽는다.
+
+- **신설**: `FIXED_SYNERGY_SHUFFLE_FROM = None`(구 `--shuffle-from`, synergy.py
+  자체 v-ctrl 전용 — `FIXED_INTERACTION_SHUFFLE_FROM`과 짝이지만 서로 다른
+  스텝 기능이라 상수 공유 안 함). `tag`는 `FIXED_SYNERGY_TAG or
+  f"{ACTIVE_P1_TAG}_groups"`로 파생(run_pipeline.py의 기존 파생 규칙과 동일
+  문자열로 맞춤 — 전에는 `--tag`가 `required=True`라 run_pipeline.py가 항상
+  명시적으로 계산해서 넘겨줬었음).
+- **`_load_all_scenarios` 호출**: 자체 CLI가 사라졌으므로 interaction.py와
+  동일하게 필요한 필드만 담은 `SimpleNamespace`를 구성해 넘긴다(기존 `args`
+  객체 그대로 넘기던 방식에서 전환).
+- **`run_pipeline.py` 동반 수정**: Step 6 dispatch 블록을 `--out-dir` 하나로
+  축소(기존 중복 블록 — 옛 코드가 이미 있는 상태에서 실수로 새 블록을 하나
+  더 추가했다가 즉시 발견해 옛 블록 삭제). 축 정보 주입 조건을 `(6,7,8)` →
+  `(7,8)`로 좁힘(Step 4/5처럼 Step 6도 이제 `--seg-axis`/`--axis-config`를
+  CLI로 안 받으므로). `max_group_size`/`synergy_redundancy_threshold`/
+  `p1_data_dir`/`p1_seg_data_dir` 변수 자체는 Step 7(kernel.py, 아직 CLI
+  정리 전)과 요약 출력에 계속 쓰이므로 그대로 유지.
+- **검증**: `py_compile` 통과(synergy.py/run_pipeline.py/parameters.py).
+  `synergy.py --help`로 CLI가 `--out-dir`만 남았음을 확인. **`run_pipeline.py
+  6 --to-step 6` 실제 전체 실행 성공**(exit 0) — 실행 커맨드가
+  `synergy.py --out-dir <run_dir>` 하나로 축소된 것을 RESULTS_LOG.md
+  자동 기록에서 확인, 시나리오 6개 전부 그룹 구성 완료(`chg_lo`~`dis_lo`,
+  HI 64개 → 18~22개 그룹), `synergy_groups_p1v4_full_groups.json` 정상
+  생성 — 태그가 run_pipeline.py의 기존 파생 규칙과 정확히 일치. 이 결과는
+  정식 태그(`p1v4_full_groups`)로 생성된 재사용 가능한 산출물이라(이전
+  라운드의 `refactor_verify_test` 같은 일회성 테스트 태그가 아님) 정리
+  삭제하지 않고 그대로 둠.
+
+### 2026-10-01 `6_synergy/plot.py` 신설 — 삭제됐던 시너지 시각화 3종 복원
+
+`synergy_groups_{tag}.json`(Step 6 산출물)을 그려주던 스크립트가 2026-09-21
+커밋(`893cb97`)에서 구 `5_model/experiments/phase1_lab/` 통째로 삭제되며 같이
+없어졌었는데, 필요해져서 복원 요청 — git 히스토리에서 원본 3개
+(`plot_synergy_groups.py`/`plot_cluster_structure.py`/`plot_combined_redundancy.py`)
+를 꺼내 확인한 뒤, `cluster_structure_*.png`를 만드는 `plot_cluster_structure.py`까지
+이번 라운드에 같이 흡수(`plot_combined_redundancy.py`는 `kernel.py`/Step 7 산출물
+전용이라 범위 밖 — 나중에 `7_kernel/plot.py` 신설 시 별도 처리).
+
+- **경로/태그 해석**: 옛 스크립트는 `--input <json 경로>`로 직접 지정받았지만, 이번
+  세션 관례(parameters.py 단일 소스, CLI는 `--out-dir`만 예외)에 맞춰 재설계 —
+  `tag = P.FIXED_SYNERGY_TAG or f"{P.ACTIVE_P1_TAG}_groups"`(synergy.py와 동일 파생
+  규칙)로 태그를 구하고, `--out-dir`(선택, synergy.py 실행 때 쓴 값과 동일하게 넘기면
+  됨 — 기본은 `RESULTS_DIR`)로 그 폴더의 `synergy_groups_{tag}.json`을 찾는다.
+- **그림 1/2 복원**(`plot_synergy_groups.py` 유래): 그룹 크기 분포(시나리오별 묶음
+  막대) + 그룹 스코어 폭포(최대 그룹 top-3, 시드 단순상관→편상관 이어짐). JSON
+  스키마(`seg_{s}_groups`/`_group_names`/`_group_scores`/`max_group_size`/
+  `min_partial_corr`)가 옛 스크립트 기대 형식과 그대로 호환돼 로직은 거의 그대로,
+  경로 해석만 교체.
+- **그림 3 흡수**(`plot_cluster_structure.py` 유래): 시나리오별 HI×HI raw correlation
+  정렬 히트맵(그룹 순서로 재배열, 그룹 경계선 표시) + 상관관계 네트워크 그래프(같은
+  그룹=같은 색, 굵은 실선=다중공선성으로 제거된 관계, 점선=참고용 약한 관계,
+  큰 원=survivor/작은 사각형=attached). synergy_groups JSON엔 raw correlation 행렬
+  자체가 없어 interaction.py 소유 `_load_all_scenarios`로 세그먼트 데이터를 다시 로드해
+  그 자리에서 재계산(중복 구현 금지 원칙, synergy.py main()과 동일 `SimpleNamespace`
+  패턴). 시각화 전용 문턱값 `min_edge_corr`는 `parameters.py`에
+  `FIXED_SYNERGY_PLOT_MIN_EDGE_CORR = 0.5`로 신설(옛 CLI 기본값 그대로, 동작 변화
+  없음) — 굵은 실선 문턱(`redundancy_threshold`)은 이미 있던
+  `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`를 그대로 재사용.
+- **버그 발견·수정(실제 실행 중 발견)**: 그림 3을 처음 실행하자 `KeyError: 64`로 즉시
+  죽었다 — 원인 분석 결과, JSON에 저장된 그룹 멤버는 정수 인덱스인데, 이 인덱스가
+  "저장 당시 HI 카탈로그 순서"에 묶여 있어서 지금 다시 `_load_all_scenarios`로
+  로드하면 카탈로그가 바뀌어(이번 세션 중 HI 2개 추가 — `stat_energy`/`stat_q_abs` —
+  뿐 아니라 기존 64개끼리의 순서 자체도 54/64개가 자리바뀜, 실측 확인) 완전히 다른
+  HI를 가리키게 된다는 걸 확인했다. 정수 인덱스를 그대로 믿는 건 저장 시점과 로드
+  시점의 코드가 100% 동일할 때만 우연히 맞는, 원래부터 취약한 가정이었다(옛
+  `plot_cluster_structure.py`도 이 가정을 그대로 썼었음 — 과거엔 안 걸렸을 뿐).
+  수정: JSON의 `seg_{s}_group_names`(이름 문자열, 안정적)를 지금 로드된
+  `names_by_seg[s]`에서 이름으로 재조회해 로컬 인덱스를 새로 부여하고, raw_corr도
+  그룹에 실제로 쓰인 HI 열만 골라 그 로컬 인덱스 순서로 재계산하도록 변경 — 저장된
+  정수 인덱스는 더 이상 사용 안 함. 카탈로그에서 이름 자체가 사라진 경우엔 해당
+  시나리오를 에러 없이 건너뛰고 경고만 출력.
+- **검증**: `py_compile` 통과. 실제 실행(`--out-dir`에 기존
+  `1001_1828_p1v2_p1v4_full_seed42` run 폴더 지정) — 그림 1/2는 즉시 성공, 그림 3은
+  버그 수정 전 1차 실행에서 위 `KeyError`로 실패 확인 → 수정 후 2차 실행에서 6개
+  시나리오(`chg_lo/chg_mid/chg_hi/dis_hi/dis_mid/dis_lo`) 전부 성공. `cluster_structure_
+  p1v4_full_groups_chg_lo.png` 육안 확인 — 히트맵 대각 블록(그룹 내부) 선명, 네트워크
+  그래프에 그룹색/survivor·attached 구분 정상 표시. 블록 밖(그룹 간)에도 진한
+  빨강/파랑 칸이 보이는 건 버그가 아니라 `FIXED_GLOBAL_DEDUP=False`(synergy.py
+  docstring에 이미 기록된 기존 한계 — "그룹 간 중복 미검사")가 실제로 드러난 것 —
+  오히려 이 그림이 그 한계를 눈으로 확인하는 용도로 의도대로 작동함을 보여줌.
+
+### 2026-10-02 `kernel.py`(Step 7) argparse 제거
+
+hi_correlation.py(Step 4)/interaction.py(Step 5)/synergy.py(Step 6)와 동일한
+CLI 제거 원칙을 `kernel.py`에도 적용 — `--out-dir`만 남기고(run_pipeline.py가
+Step 6~8이 공유하는 실험 폴더를 넘겨주는 용도라 parameters.py로 복원 불가)
+나머지(seg-axis/axis-config/data-dir/seg-data-dir/datasets/split-seed/
+synergy-groups-json/alpha/gamma/n-components/redundancy-threshold/
+max-features/min-raw-partial-corr/combined-redundancy-threshold/tag, 14개)는
+전부 parameters.py에서 읽는다.
+
+- **`synergy-groups-json` 자동 탐색**: 예전엔 `--synergy-groups-json`이
+  `required=True`라 run_pipeline.py가 매번 `synergy.py`(Step 6) 산출물 경로를
+  직접 계산해 넘겨줬다. CLI가 사라지면서 kernel.py 자신이 synergy.py와 **동일한
+  태그 파생 규칙**(`synergy_tag = FIXED_SYNERGY_TAG or f"{ACTIVE_P1_TAG}_groups"`)
+  으로 같은 `--out-dir`(run_pipeline.py가 Step 6~7에 넘기는 같은 run_dir) 아래
+  `synergy_groups_{synergy_tag}.json`을 직접 찾는다 — `FIXED_KERNEL_SYNERGY_
+  GROUPS_JSON`이 설정돼 있으면 그 경로가 우선. `--tag`도 synergy.py와 동일
+  패턴으로 `FIXED_KERNEL_TAG or f"{ACTIVE_P1_TAG}_kernel"`로 파생.
+- **`_load_train_split` 호출**: 자체 CLI가 사라졌으므로 interaction.py/synergy.py와
+  동일하게 필요한 필드만 담은 `SimpleNamespace`를 구성해 넘긴다(기존 `args`
+  객체 그대로 넘기던 방식에서 전환) — 함수 본문은 무변경.
+- **`run_pipeline.py` 동반 수정**: 축 정보 주입 조건을 `(7, 8)` → `8`로 좁힘
+  (kernel.py도 이제 `--seg-axis`/`--axis-config`를 CLI로 안 받으므로 — 이로써
+  축 정보를 CLI로 받는 파이프라인 스텝은 Step 8(train.py) 하나만 남음). Step 7
+  dispatch 블록을 `--out-dir` 하나로 축소. 입력 파일 존재 여부 경고(시너지
+  그룹 json 없으면 "Step 6을 범위에 포함시키세요")는 `synergy_out.exists()`
+  직접 검사로 바꿔 유지(사용자에게 유용한 사전 안내라 CLI와 무관하게 남겨둠).
+- **검증**: `py_compile` 통과(kernel.py/run_pipeline.py). `kernel.py --help`로
+  CLI가 `--out-dir`만 남았음을 확인. **`run_pipeline.py 6 --to-step 7` 실제
+  전체 실행 성공**(exit 0, Step 6 4분53초 + Step 7 9분55초) — 실행 커맨드가
+  둘 다 `--out-dir <run_dir>` 하나로 축소된 것을 로그에서 확인. Step 7이 Step 6
+  산출물(`synergy_groups_p1v4_full_groups.json`)을 경로 없이 자동으로 찾아
+  정상 소비(그룹 18~22개 × 6시나리오 → 커널 후보 90개, 2차 다중공선성 배제 0개
+  제거 → 최종 90개, 평균 train R²=0.3980), `kernel_group_features_
+  p1v4_full_kernel.pkl` + `_combined_redundancy.json`(raw 78개/kernel 0개
+  제거 대상) 둘 다 정상 생성. pkl을 다시 로드해 구조(`tag`/`alpha`/`gamma`/
+  `n_components`/`redundancy_threshold`/`max_features`가 parameters.py 기본값과
+  일치, `features[0]` 키 구성 정상) 확인 완료.
+- Step 4~7 전부 CLI 제거가 끝나 축 정보를 CLI로 받는 스텝은 Step 8(train.py)
+  하나만 남았다 — 다음 후보는 `8_train/train.py`/`9_eval/test.py`(남아있는
+  이슈로 `docs/261001_REPORT.md`에 이미 기록됨).
+
+### 2026-10-02 `7_kernel/plot.py` 신설 — 삭제됐던 결합 다중공선성 배제 시각화 복원
+
+`kernel_group_features_{tag}_combined_redundancy.json`(Step 7 산출물)을 그려주던
+`plot_combined_redundancy.py`도 2026-09-21 커밋(`893cb97`)에서 구 `5_model/
+experiments/phase1_lab/` 통째로 삭제되며 같이 없어졌었다 — `6_synergy/plot.py`
+복원(2026-10-01) 때 범위 밖으로 미뤄뒀던 항목을 이번에 처리.
+
+- **범위 단순화**: 원본은 `--input`에 여러 tag의 json을 같이 줘서(noscen/scen 등
+  조건 비교) 패널을 나란히 배치하는 기능이 있었는데, 이번 세션의 단일-실행-단일-
+  결과 관례(tag는 `FIXED_KERNEL_TAG or f"{ACTIVE_P1_TAG}_kernel"`로 자동 파생,
+  `--out-dir`만 CLI 예외)에 맞춰 1개 tag만 그리도록 단순화 — 다른 조건과
+  비교하려면 그림을 두 번 생성해서 나란히 보면 됨.
+- **하드코딩 제거(사전 예방)**: 원본은 raw HI 카탈로그 폭을 `N_RAW_TOTAL = 64`
+  모듈 상수로 하드코딩했었는데, 바로 전날(2026-10-01) `6_synergy/plot.py`
+  작업에서 "HI 카탈로그가 세션 도중에도 바뀔 수 있다"는 걸 실측으로 확인한 바
+  있어(저장 시점 64개 → 로드 시점 66개, cluster_structure 플롯이 `KeyError`로
+  죽었던 사례) 이번엔 처음부터 하드코딩하지 않음 — 같은 tag의
+  `kernel_group_features_{tag}.pkl`에 실제로 저장된 "시나리오별 최종 커널 HI
+  개수"(`features[*]["scenario"]` 집계)를 `n_total_checked`에서 빼서 raw 폭을
+  시나리오별로 직접 역산한다. 전부 일치해야 정상(같은 raw 카탈로그를 공유하므로)
+  — 불일치하면 경고만 출력하고 계속 진행(에러로 죽지 않음, pkl/json 태그가
+  어긋난 상황을 사용자가 알아챌 수 있게).
+- **그림**: 시나리오별 raw/kernel 제거 개수 묶음 막대 1장(원본과 동일 레이아웃,
+  막대 위에 `제거개수/전체개수(퍼센트)` 라벨).
+- **검증**: `py_compile` 통과. 실제 실행(`--out-dir`에 직전 Step 6~7 검증 run
+  `1002_0101_p1v2_p1v4_full_seed42` 지정) — raw-폭 불일치 경고 없이(=역산 로직이
+  정상 작동, 6개 시나리오 전부 64로 일치) 한 번에 성공. 육안 확인 결과 막대 위
+  라벨(`20/64`, `0/16` 등)이 kernel.py 콘솔 로그의 "시나리오별 최종 커널 HI
+  개수"(chg_lo=16, chg_mid=15, chg_hi=15, dis_hi=14, dis_mid=15, dis_lo=15)와
+  정확히 일치, kernel 제거 0개(앞서 kernel.py 로그의 "kernel 0개 제거 대상"과
+  일치)도 막대 높이 0으로 올바르게 표시됨.
+- 이것으로 `plot_cluster_structure.py`/`plot_combined_redundancy.py`/
+  `plot_synergy_groups.py` 3개 모두 복원 완료 — Step 6/7(synergy/kernel)의
+  진단 플롯이 각 스텝 폴더의 `plot.py`로 정리됨.
+
+### 2026-10-02 `train.py`(Step 8) argparse 제거 — 다른 스텝과 달리 해석 로직 이식 필요
+
+hi_correlation.py/interaction.py/synergy.py/kernel.py와 동일한 CLI 제거 원칙을
+`train.py`에도 적용 — `--output-dir`만 남기고 나머지(seg-axis/axis-config/
+data-dir/seg-data-dir/charge-m/discharge-m/scen-k/seed/split-seed/
+train-cycle-frac/beta-min/device/max-epochs/patience/batch-size/tag/
+lambda-l0-override/l0-warmup-epochs-override/l0-norm-constant/
+hi-cost-weighted-l0/val-rmse-epsilon, 19개)는 전부 parameters.py에서 읽는다.
+단, 이번 라운드는 앞선 4개 스텝과 달리 **단순 CLI 삭제로 끝나지 않았다** —
+사용자에게 미리 "argparse만 지우면 끝나는 게 아니다"라고 설명하고 승인을 받은
+뒤 진행한 작업.
+
+- **3단 우선순위 해석 로직 이식**: `--kernel-features-pkl`/
+  `--combined-redundancy-json`/`--interaction-json` 3개는 parameters.py 값
+  하나로 끝나지 않고, 원래 `run_pipeline.py`에만 있던 `_resolve_kernel_paths`/
+  `_resolve_interaction_path`(① parameters.py 명시값 최우선 ② 같은
+  `--output-dir`에 Step 5~7이 만든 자동경로 파일이 있으면 그걸 ③ 그것도
+  없으면 v4 정식 레시피 고정 경로로 fallback)에 의존하고 있었다. 이 두 함수를
+  train.py 자신에 그대로 이식(동일 이름, 동일 로직 — 동일 함수가 두 파일에
+  독립 존재하는 건 `_residualize`가 synergy.py/kernel.py에 각각 있는 기존
+  선례와 같은 원칙)하고, `output_dir`을 데이터 로딩 **전**으로 끌어올려
+  자동탐색이 그 경로를 기준으로 동작하게 했다.
+- **동반 behavior 변화(의도적, 숨기지 않음)**: 예전엔 이 3단 해석이
+  run_pipeline.py에만 있어서, train.py를 **단독 실행**하면(CLI 기본값이 그냥
+  parameters.py 값이라) 자동탐색/legacy fallback 없이 조용히 "커널/상호작용
+  피처 미사용"이 됐었다. 이제 로직 자체가 train.py 안에 있어 단독 실행도
+  파이프라인 경유 실행과 동일하게 동작 — `--output-dir` 없이 단독 실행하면
+  매번 새 빈 타임스탬프 폴더라 자동탐색이 거의 항상 실패하고 legacy fallback
+  (v4 정식 레시피 고정 파일)으로 떨어지므로, "커널/상호작용 미사용"이 아니라
+  "v4 정식 레시피 고정 파일 사용"이 새 기본 동작이 된다. 완전히 끄려면
+  `ACTIVE_KERNEL_FEATURES_PKL=""`/`ACTIVE_INTERACTION_JSON=""`로 명시
+  비활성화(기존 v0/v2/v3 재현 관례와 동일, 빈 문자열은 None과 다르게 처리됨).
+  모듈 docstring에 이 변화를 명시적으로 적어둠.
+- **legacy 고정 경로 단일 소스화**: `run_pipeline.py`의 `P1V4_KERNEL_FEATURES_PKL`/
+  `P1V4_INTERACTION_JSON`을 `parameters.py`: `FIXED_LEGACY_V4_KERNEL_FEATURES_PKL`/
+  `FIXED_LEGACY_V4_INTERACTION_JSON`으로 이전(train.py도 이제 이 값을 알아야
+  하므로) — `run_pipeline.py`는 이제 이 상수를 참조하는 별칭만 유지.
+- **신규 parameters.py 상수**: `FIXED_CHARGE_PROBE_M`/`FIXED_DISCHARGE_PROBE_M`/
+  `FIXED_SCEN_K_COUNT`(전부 `None` 기본 — run_pipeline.py가 전달한 적 없는
+  수동 ablation 전용 오버라이드, 동작 변화 없음).
+- **run_pipeline.py 동반 수정**: 축 정보 CLI 주입 블록(`if num == 8:
+  --seg-axis/--axis-config`) 완전 제거 — train.py가 마지막까지 이걸 CLI로
+  받던 스텝이었는데 이제 파이프라인 스텝 중 축 정보를 CLI로 받는 스텝이
+  하나도 없음. Step 8 dispatch 블록을 `--output-dir` 하나로 축소하되,
+  Step 9(test.py)는 아직 `--kernel-features-pkl`/`--combined-redundancy-json`/
+  `--interaction-json`을 CLI로 받으므로 `resolved_kernel_pkl`/
+  `resolved_combined_redundancy`/`resolved_interaction` 재계산 로직은 그대로
+  유지(용도만 "train.py에 전달"에서 "Step 9에 전달"로 바뀜). 이제 안 쓰이는
+  `split_seed`/`_split_seed` 지역 변수 삭제. `# ── 학습(Step 9) ──` 절 제목
+  stale 주석(parameters.py)도 "Step 8"로 수정(kernel.py의 "Step 8(커널 HI
+  피처 생성)"→"Step 7" 오타 수정과 동일 종류).
+- **검증**: `py_compile` 통과(train.py/run_pipeline.py/parameters.py).
+  `train.py --help`로 CLI가 `--output-dir`만 남은 것 확인. **실제 스모크 검증**
+  — parameters.py: `ACTIVE_MAX_EPOCHS`를 임시로 3으로 낮추고(전체 500에폭은
+  검증 목적상 너무 오래 걸림, 검증 후 즉시 `None`으로 원복) `run_pipeline.py 8
+  --to-step 8` 실행(fresh run_dir — Step 5~7을 이번 범위에서 뺐으므로 legacy
+  fallback 경로가 실제로 타는지까지 확인하는 가장 엄격한 케이스): exit 0,
+  로그에 `kernel-features-pkl 적용: legacy_results/.../kernel_group_features_
+  k25_full_N2_kernel_v3.pkl`/`interaction-json 적용: legacy_results/.../
+  hi_scenario_interaction_k25_full_N2.json`이 정확히 찍혀 3단 우선순위의
+  마지막 단(legacy fallback)이 의도대로 작동함을 확인 — N_HI=64 env 주입도
+  legacy 파일(64-HI 스키마)과 정확히 맞물려 shape 불일치 없이 통과. 3에폭
+  학습 → 체크포인트/게이트 JSON/gate_probs.png/p1v2_summary.json 전부 정상
+  생성, `run_pipeline.py`의 실행 커맨드 출력도 `train.py --output-dir <run_dir>`
+  하나로 축소된 것을 직접 확인. 검증용 run 디렉터리(3에폭짜리라 실사용 불가능한
+  더미 체크포인트)는 정리 삭제, RESULTS_LOG.md는 train.py가 애초에 로그를
+  안 남기는 스크립트라 영향 없음(확인 완료).
+
+### 2026-10-02 `train.py` 콘솔 출력에 kernel/combined-redundancy/interaction 경로 추가
+
+바로 위 CLI 제거 라운드에서 3단 우선순위(명시값/자동탐색/legacy fallback) 해석이
+생겼는데, 그 결과가 "뭘 쓰는지"는 기존엔 `_apply_kernel_features` 내부 print(적용
+*후*, 즉 데이터 로딩이 끝난 뒤)에서만 간접적으로 드러났고 combined-redundancy는
+`None`이면 아예 아무 출력도 없었다 — 데이터 로딩(수 분)을 기다리지 않고도 이번 run이
+어느 pkl/json을 쓰는지 바로 확인하고 싶다는 요청으로 `build_datasets` 호출 **직전**에
+3줄 요약 print를 추가했다. 각 줄에 경로뿐 아니라 `[parameters.py 명시값]`/
+`[자동탐색(이번 run_dir)]`/`[legacy v4 기본값]` 중 어느 단계에서 resolve됐는지도
+같이 표시(`_kernel_source` 로컬 헬퍼, resolved 값을 자동탐색 경로 문자열과 직접
+비교해서 판별 — 새 상태를 추가로 들고 다니지 않음). 기존에 있던 "적용:" 류 print들
+(데이터 로딩 후, 실제 적용 시점)은 그대로 둠 — 이번 추가는 보완이지 대체가 아님.
+
+검증: `py_compile` 통과. 1에폭 스모크 테스트(`ACTIVE_MAX_EPOCHS` 임시 1 → 검증 후
+`None` 원복)로 `run_pipeline.py 8 --to-step 8` 실행 — 새 3줄이 `[dataset] cells...`
+보다 먼저 찍히는 것, `combined-redundancy-json: (미사용)` 렌더링, 출처 태그가
+전부 `legacy v4 기본값`로 정확히 표시되는 것(이번 run_dir엔 Step 5~7 산출물이
+없었으므로) 확인. 테스트 run 디렉터리는 정리 삭제.
+
+### 2026-10-02 `train.py` 코드 정리 — main() 내부 함수/인라인 import 제거
+
+CLI 제거 라운드를 거치며 `main()` 안에 `_kernel_source`(콘솔 출력용 헬퍼, 바로 위
+항목에서 추가)와 `import copy`/`import pickle`(각각 main()/`_apply_kernel_features`
+안)이 들어가 있던 게 눈에 띄어 정리 — 함수 선언은 전부 모듈 최상위로, import는
+전부 파일 맨 위로 모았다(동작 변화 없는 순수 스타일 정리):
+- `_kernel_source`를 `main()` 밖으로 꺼내 `_resolve_interaction_path` 바로 뒤,
+  `_resolve_device` 바로 앞에 배치(기존 경로-해석 헬퍼들과 같은 그룹).
+- `import copy`(main() 안)/`import pickle`(`_apply_kernel_features` 안)를 파일
+  상단 표준 라이브러리 import 블록으로 이동.
+
+검증: `py_compile` 통과. 1에폭 스모크 테스트(`ACTIVE_MAX_EPOCHS` 임시 1 → 검증 후
+`None` 원복)로 재실행 — 콘솔 출력(kernel-features-pkl/combined-redundancy-json/
+interaction-json 3줄 포함)이 정리 전과 한 글자도 다르지 않게 동일, exit 0 동일하게
+확인. 테스트 run 디렉터리는 정리 삭제.
+
+### 2026-10-02 `train.py` main() 단일 책임 원칙 분리 + 변수명 가독성 정리
+
+사용자가 `main()`의 구성을 "1) 파라미터/컨피그 세팅 2) pkl/json 로드 3) 텐서
+마스킹 4) 모델 선언·하이퍼파라미터 세팅 5) 출력 경로·형식 정의 6) 학습 에폭
+반복문 7) 결과 저장" 7단계로 짚어주며, 단일 책임 원칙에 따라 서브함수로
+분리하고 `main()`은 함수 호출만 하도록 요청 — 사용자가 짚은 경계를 그대로
+따라 `t1_set_params_and_config`~`t7_save_results` 7개 모듈 최상위 함수로
+쪼갰다(동작 변화 없는 순수 구조 정리).
+
+- **단계 경계**: output_dir 계산(2026-10-01 CLI 제거 라운드에서 데이터 로딩
+  전으로 이미 당겨져 있었음)과 kernel/interaction 경로 resolve+실제 로드를
+  한 번에 `t2_load_pkl_json`으로 묶고, redundancy_mask/shared_hi_mask 생성을
+  `t3_build_tensor_masks`로 분리 — 원래 코드에서 shared_hi_mask 블록이
+  batch_size 오버라이드/로더 생성(현재 `t4`)보다 뒤에 있었는데, 의존성을
+  추적해보니 `spec`/`interaction_json`만 있으면 되고 `t4`의 어떤 결과물도
+  필요 없어서 `t3`로 앞당겼다 — 콘솔 print 순서가 살짝 바뀐 것 외엔(combined-
+  redundancy-json/interaction-json 적용 로그가 batch_size 오버라이드 로그보다
+  먼저 찍힘) 동작 차이 없음.
+- **단계 간 데이터 전달**: 각 단계가 `SimpleNamespace`를 반환하고 다음
+  단계가 필요한 필드만 읽는다(interaction.py/synergy.py의 `_loader_args`
+  패턴과 동일 원칙). `cfg`/`loss_cfg`/`tr_cfg` 같은 딕셔너리는 단계마다
+  새 사본이 아니라 **참조를 그대로 주고받으며 제자리에서 mutate**한다 —
+  `t1`이 만든 `cfg`를 `t4`가 `training`/`loss` 서브딕셔너리까지 직접 고치고,
+  `t5`가 그 최종 상태를 `config.yaml`에 쓰는 식(원래 `main()` 하나였을 때와
+  동일한 가변 공유 방식, 복사 추가 없음).
+- **변수명 정리(후속 요청)**: 처음엔 단계 결과를 `p`(params)/`d`(data)/
+  `m`(masks)/`h`(hyperparams) 한 글자로 받았는데, "가독성이 안 좋다"는
+  지적을 받아 `params`/`data`/`hyperparams`로 전부 풀어쓰고, `m`은 요청받은
+  이름("model")이 아니라 **`masks`로 명명** — `t3`가 실제로 반환하는 건
+  `redundancy_mask`/`shared_hi_mask` 텐서 묶음이지 모델이 아니고, 진짜 모델
+  객체는 `hyperparams.model`에 있어서 `m`에 "model"을 붙이면 오히려
+  `hyperparams.model`과 혼동을 유발할 것 같아 의도적으로 다르게 명명했다
+  (사용자에게 변경 사유를 바로 설명하고 진행).
+- **검증**: `py_compile` 통과. `main()`부터 끝까지(`\bp\b`/`\bd\b`/`\bm\b`/
+  `\bh\b` 단어경계 정규식) 치환 후 동일 패턴으로 재검색해 단일문자 잔재가
+  전혀 없음을 확인(단, `_parse_args`의 `argparse.ArgumentParser` 지역변수
+  `p`처럼 7단계 함수 바깥의 무관한 `p`는 범위 밖이라 그대로 둠). 1에폭
+  스모크 테스트를 **분리 직후**와 **변수명 정리 후** 두 번 모두 실행 —
+  둘 다 exit 0, 콘솔 출력(kernel/interaction 경로+출처, 적용 로그, 선택된
+  epoch 등) 기존과 동일하게 확인. 테스트 run 디렉터리는 둘 다 정리 삭제.
+
+### 2026-10-02 `test.py`(Step 9) argparse 제거 + main() 함수 분리
+
+hi_correlation.py~train.py와 동일한 CLI 제거 원칙을 `9_eval/test.py`에도
+적용 — `--run-dir`만 남기고(다른 스텝의 `--out-dir`/`--output-dir`과 동일한
+예외, 평가 대상 run을 고르는 값이라 parameters.py 단일 소스로 복원 불가)
+`checkpoint`/`interaction-json`/`kernel-features-pkl`/
+`combined-redundancy-json`/`rep-cells`/`data-dir`/`seg-data-dir`/`device`
+(8개)는 전부 parameters.py에서 읽는다. 사용자가 "먼저 argparse 지우고
+기능별 함수들로 분리해봐"라고 한 번에 요청해 같은 라운드에 `main()` 분리도
+함께 진행했다.
+
+- **train.py보다 단순했던 이유**: `--kernel-features-pkl`/`--interaction-json`/
+  `--combined-redundancy-json`은 train.py처럼 run_pipeline.py의 3단
+  우선순위(자동탐색/legacy fallback)를 이식할 필요가 없었다 — 이 값들은
+  train.py가 실행 시점에 `<run-dir>/p1v2_summary.json`에 이미 정확히
+  기록해두므로, test.py는 원래부터 "CLI 명시값 > 그 run의 summary.json
+  기록" 2단만으로 충분했다(summary.json 쪽 경로가 옛 cwd 기준 상대경로일
+  수 있어 PROJECT_ROOT 기준으로 재해석하는 `_resolve_summary_path`는
+  그대로 유지). CLI를 걷어내고 나니 이 2단 우선순위의 "명시값"이 그냥
+  `parameters.py: ACTIVE_*`로 바뀌는 것뿐이라 변경이 단순했다.
+- **신규 parameters.py 상수**: `FIXED_TEST_CHECKPOINT_OVERRIDE = None`
+  (구 `--checkpoint`, run_pipeline.py가 넘긴 적 없는 수동 오버라이드) —
+  train.py의 `FIXED_CHARGE_PROBE_M` 등과 동일 성격. "Step 9(평가)" 절을
+  parameters.py에 새로 만들어 배치.
+- **main() 함수 분리**(단일 책임 원칙, train.py의 t1~t7과 동일 원칙이지만
+  이 파일은 원래부터 `_resolve_device`/`_pick_rep_cells`/`_plot_*` 등을
+  밑줄 접두 설명형 이름으로 모듈 최상위에 두던 기존 관례가 있어 그 관례를
+  따르고 번호 접두사는 안 붙임): `_resolve_run_and_config`(run_dir/device/
+  config.yaml/summary.json) → `_load_checkpoint` → `_build_dataset_and_kernel`
+  (spec/데이터셋/커널 HI/redundancy_mask) → `_build_shared_mask`
+  (interaction.py 기반 shared_hi_mask) → `_build_and_load_model` →
+  `_run_evaluation`(oracle/hard/soft 평가 + 플롯 전부) →
+  `_export_for_visualize`(기존 함수 재사용, 새로 안 만듦). `main()` 안에
+  중첩돼 있던 `_resolve_summary_path`도 모듈 최상위로 승격(두 단계에서
+  공용으로 필요해짐). `for m in modes:` 루프 변수도 `mode`로 개명(단일문자
+  변수 지양 — train.py p/d/m/h 가독성 지적과 같은 원칙 선제 적용).
+- **부수 발견(run_pipeline.py 죽은 변수 정리)**: Step 9 CLI 주입 블록을
+  걷어내다가, train.py(Step 8) CLI 제거 라운드에서 이미 죽어 있었어야 할
+  변수 6개(`p1_max_epochs`/`p1_patience`/`p1_batch_size`/`rep_cells`/
+  `p1_data_dir`/`p1_seg_data_dir` — 당시 `step_extra += [...]` 줄만
+  지우고 그 값을 만들던 대입문은 안 지웠던 누락)를 추가로 발견해 같이
+  삭제. `resolved_kernel_pkl`/`resolved_combined_redundancy`/
+  `resolved_interaction`은 Step 8의 "안내" 재계산/미리보기 print에 계속
+  쓰이므로 유지(더 이상 Step 9 CLI로는 안 흘러가지만 콘솔 정보용으로는
+  여전히 유효).
+- **검증**: `py_compile` 통과(test.py/run_pipeline.py/parameters.py).
+  `test.py --help`로 CLI가 `--run-dir`만 남은 것 확인. **`run_pipeline.py 8
+  --to-step 9` 실제 전체 체인 실행**(에폭 1개로 임시 축소, 검증 후 `None`
+  원복) — Step 8/9 둘 다 exit 0, 로그에 `test.py --run-dir <run_dir>` 하나로
+  축소된 커맨드 확인. test.py가 kernel-features-pkl/interaction-json을
+  CLI 없이 그 run의 `p1v2_summary.json`에서 정확히 자동탐지(legacy
+  fallback 경로 그대로 반영)하는 것도 로그로 확인. oracle/hard/soft 3모드
+  전부 평가 완료, scatter/confusion/error-heatmap/capacity-curve/
+  hi-importance-ranking 플롯과 metrics/predictions/routing 산출물까지
+  전부 정상 생성, Step 9 이후 자동 실행되는
+  `9_eval/plot_hi_selection_matrix.py`도 정상 완주. 테스트 run 디렉터리는
+  정리 삭제, RESULTS_LOG.md는 train.py/test.py 둘 다 로그를 안 남기는
+  스크립트라 영향 없음(확인 완료).
+- 이것으로 Step 4~9 전 스텝의 CLI 제거가 끝났다 — 파이프라인에서 CLI 인자를
+  받는 스크립트는 공유 실행 폴더/평가 대상 run을 가리키는 `--out-dir`/
+  `--output-dir`/`--run-dir` 계열 단일 인자만 남았다.
+
+### 2026-10-02 Step 4~9 최종 점검 — import 위치 / 저장경로 문서화 / PIPELINE.md 정합성
+
+CLI 제거 + 함수분리가 끝난 뒤 사용자가 요청한 3가지 마무리 점검 — ① 함수
+중간에 있는 import를 상단으로, ② 저장경로를 단일 실행/파이프라인 실행에서
+각각 어떻게 컨트롤하는지, ③ `docs/PIPELINE.md`에 합의된 내용과 실제 코드가
+다른 부분이 있는지.
+
+**① import 위치 정리** — `grep -n "^\s+import \|^\s+from .* import "`로 Step
+4~9 전 파일을 기계적으로 훑어서 발견:
+- `4_hi_analysis/logics.py`: `multiprocessing`/`queue`/`threading`(3곳 합쳐 1곳),
+  `common.scenario.get_segmenter`(서로 다른 별칭으로 4곳 중복), `q_frac_ref`의
+  `n2_path_tag`/`calib_path_tag`/`offset_path_tag`(2곳) — 전부 중복 import였고
+  최상단으로 합쳐 올림(별칭 제거, 호출부도 원래 이름으로 통일).
+- `7_kernel/kernel.py`: `_load_train_split` 안의 `import copy`만 상단으로.
+- `9_eval/test.py`: `_smoothed_error_grid`의 `scipy.ndimage.gaussian_filter`,
+  `_export_for_visualize`의 `csv` — 상단으로.
+- **의도적으로 안 옮긴 것**(전부 모듈 최상단의 `try/except ImportError` 선택적
+  의존성 가드라 "함수 중간"이 아니고, 올리면 그 패키지가 없을 때 스크립트
+  전체가 즉시 죽는 동작 변화가 생김): `synergy.py`/`kernel.py`의 tqdm,
+  `test.py`의 matplotlib, `6_synergy/plot.py`의 networkx(모듈 docstring에
+  "networkx 없으면 이 그림만 건너뜀"이라고 이미 명시돼 있음). `kernel.py`의
+  `build_datasets`/`get_segmenter`/`get_hi_cols_for_seg`도 안 옮김 — 모듈
+  docstring에 "analyze_hi_synergy.py와 동일 이유로 torch 의존 import는 최상단에
+  안 둔다"는 기존 설계 의도가 이미 적혀 있어 그대로 존중.
+- **검증**: `py_compile` 전부 통과. `4_hi_analysis/hi_correlation.py`를 실제
+  실행(exit 0) — 캐시 히트 경로로 244,043 사이클 로드 + Spearman 상관분석 +
+  플롯 10장 전부 정상 생성. 이 실행으로 `_print_run_config`(호이스트한
+  `get_segmenter` 사용)와 `_qfref_tag`/`_qfw_tag`(호이스트한 `*_path_tag` 3종
+  사용, 캐시 파일명에 `calib-100_offA-5mA`가 정확히 반영됨)는 런타임까지
+  확인됨. 다만 이번 실행은 캐시 히트라 `_extract_one_cell`(멀티프로세싱 워커,
+  호이스트한 `get_segmenter`/`multiprocessing`/`queue`/`threading` 사용)은
+  실제로 재실행되지 않았다 — 심볼을 옮기기만 한 기계적 변경(동작 동일)이라
+  별도로 강제 재추출(수십 분 이상 소요 예상)까지는 안 돌리기로 판단.
+
+**② 저장경로 컨트롤 — 단일 실행 vs 파이프라인**: 코드 조사 결과를
+`docs/PIPELINE.md` §15(신규)로 문서화 — Step4는 CLI/파라미터로 전혀 조정 불가
+(`data_directories.py`의 `_D_ROOT` + `ACTIVE_AXIS_CONFIG`로 자동 결정되는 전역
+캐시), Step5~7은 `--out-dir`(선택, 생략 시 `RESULTS_DIR`), Step8은
+`--output-dir`(선택, 생략 시 타임스탬프 폴더 새로 생성), Step9는 `--run-dir`
+(필수, 평가 대상 지정용 — 저장 위치가 아님). 실제 사용자가 만지는 다이얼은
+거의 다 `parameters.py`(`ACTIVE_P1_TAG`/`ACTIVE_SEED`)이고 `--out-dir`류는
+"여러 스텝이 같은 폴더를 쓰게 강제"하는 내부 배선이라는 점도 명시.
+
+**③ PIPELINE.md 정합성 — 실제 로직과 다른 서술 2건 발견, 전부 이번 세션
+이전(더 이른 세션)의 알고리즘 교정이 문서에 반영 안 됐던 경우**:
+1. §7 Step 5(Interaction test) — PIPELINE.md는 "Fisher z-변환 검정 15쌍 +
+   Benjamini-Hochberg 보정 → 풀링 표준편차 임계값"을 설명하고 있었으나, 이
+   방법론은 2026-09-30에 **유사반복으로 표준오차가 수천 배 과소추정된 죽은
+   계산**으로 판명돼 완전히 삭제됐고, 실제 판정 기준은 셀 단위로 독립 계산한
+   std_r의 평균+95% CI이며 `effect_size_meaningful` AND `cell_level_confirmed`
+   두 조건을 모두 요구하는 구조로 바뀌어 있었다(단일 조건 아님). 출력 JSON
+   필드도 PIPELINE.md 기재(`p_adj_bh`/`std_r_across_scenarios`)와 실제
+   (`cell_level_std_r_mean`/`_ci_lower`/`_ci_upper`/`effect_size_meaningful`/
+   `cell_level_confirmed`)가 전혀 다름. → §7 전면 재작성 + "방법론 변경 이력"
+   단락 추가.
+2. §10.4 Step 8(모델 학습) — "체크포인트는 saturation 기준 최적 epoch"이라고
+   서술돼 있었는데, 2026-09-18부터 실제로는 **val_rmse가 1순위, saturation은
+   그 조건을 못 채울 때만 쓰는 2순위 fallback**으로 이미 뒤집혀 있었다. 이
+   stale 서술은 `train.py` 자기 자신의 모듈 docstring 1번 항목에도 그대로
+   남아 있었다(§3 참고 — PIPELINE.md가 베낀 원본 자체가 이미 낡아 있었던
+   것) → PIPELINE.md §10.4와 `train.py` 모듈 docstring 둘 다 실제 2단계
+   기준으로 교정.
+   - 덧붙여 `train.py` 모듈 docstring이 "기존 SCRTrainer.fit() 대비 차이점"
+     설명·출력 레이아웃 단락을 어느 시점엔가 통째로 잃어버린 상태였음을
+     발견(git diff 추적 결과 이번 세션의 의도된 편집으로는 설명 안 됨) —
+     원인 규명보다 복원을 우선해 해당 내용을 되살리면서 위 교정을 반영.
+
+그 외 CLI 표면 staleness(알고리즘 변화 아님, 2026-09-29~10-02 CLI 제거의
+부산물): §8 Step 6의 `--max-group-size`/`--redundancy-threshold`/
+`--prefilter-top-m`/`--min-partial-corr`, §10.3 Step 8의
+`--hi-cost-weighted-l0`, §14의 "ACTIVE_*는 CLI로 노출된다" 총괄 서술 — 전부
+parameters.py 상수명으로 교체. Step 2의 `--skip-shape`는 실측 결과 지금도
+실제 CLI 플래그라 그대로 둠(Step 1~3은 이번 리팩토링 범위 밖).
+
+**검증**: `py_compile` 통과(`train.py`/`logics.py`/`kernel.py`/`test.py`).
+PIPELINE.md는 `grep`으로 CLI 플래그(`--[a-z-]+`) 패턴을 재검색해 새로 남긴
+서술(§15의 `--out-dir` 등 실제로 살아있는 경로 인자) 외에는 stale 참조가 없음을
+확인.
+
+### 2026-10-02 `kernel.py`(Step 7) main() 단일 책임 원칙 분리
+
+`train.py`(t1~t7)/`test.py`(단일 책임 함수 분리) 때와 동일한 요청 — `kernel.py`의
+`main()`이 316줄짜리 단일 함수(파라미터 해석 -> 데이터 로드 -> 그룹별 커널 피팅
+-> 2차 다중공선성 배제 -> max-features 캡 -> 정규화 통계 -> 3차 결합
+다중공선성 배제 -> 저장+로그까지 전부 한 함수 안)였던 걸 8개 서브함수로 분리.
+`_parse_args`/`_load_train_split`/`_fit_group_kernel`/`_residualize`/
+`_raw_conditioned_partial_corr`/`_round_robin_select`는 이미 분리돼 있던
+기존 헬퍼라 손대지 않음 — 이번 분리 대상은 `main()` 본문뿐.
+
+새 함수(전부 `k` + 단계번호 접두사, `train.py`의 `t1`~`t7`과 동일 관례):
+`k1_resolve_params_and_paths`(파라미터/경로 결정) ->
+`k2_load_data`(train split + raw HI 비용 + synergy 그룹 로드) ->
+`k3_fit_group_kernels`(그룹 -> 커널 HI 피팅, candidates/rejected 생성) ->
+`k4_dedupe_kernels`(2차 배제 — 커널끼리 pooled 상관) ->
+`k5_apply_feature_cap`(max-features 캡, 시나리오별 라운드로빈) ->
+`k6_compute_normalization`(own-scenario mean/std, final 리스트에 제자리로 채움) ->
+`k7_build_combined_redundancy`(3차 배제 — raw+kernel 결합, 시나리오별) ->
+`k8_save_results`(pkl/json 저장 + 콘솔 요약 + RESULTS_LOG 기록). `main()`은 이
+8개를 순서대로 호출하는 얇은 함수로 바뀌었고, 각 호출부에 그 단계가 뭘
+하는지 한 줄 주석을 달았다. `candidates`/`rejected`/`final` 같은 리스트는
+여러 단계가 같은 객체를 참조로 공유하며 그 자리에서 append/mutate하던 원래
+방식을 그대로 유지(복사 없음 — 동작 변화 없는 순수 구조 정리). `k6`에서
+`final_idx_arr`를 구할 때 원래 `candidates.index(f)`로 매번 선형 탐색하던 걸
+`k5`가 이미 계산해 둔 `final_idx`를 그대로 재사용하도록 바꿨다(같은 값, 중복
+탐색 제거 — 동작 동일).
+
+**검증**: `py_compile` 통과. 실제 실행으로 `run_pipeline.py 5 --to-step 7`
+전체(Step 5 상호작용 검정 -> Step 6 시너지 그룹 -> Step 7 커널, 총 16분 22초)를
+새 스크래치 run 폴더에 돌려 Step 7이 exit=0으로 완주하는 것을 확인했고, 콘솔
+출력 문자열(`[kernel] chg_lo: 그룹 18개...` 등)이 리팩토링 이전 코드와 동일한
+포맷으로 찍히는 것도 확인. 특히 핵심 수치(후보 90개 -> 최종 90개, 평균 train
+R^2=0.3980, 시나리오별 개수 `{chg_lo:16, chg_mid:15, chg_hi:15, dis_hi:14,
+dis_mid:15, dis_lo:15}`, 결합 다중공선성 배제 raw 78개/kernel 0개)가 바로 전
+세션(2026-10-02 01:15, argparse 제거 직후 분리 전 코드로 돌린 `p1v4_full` run)
+의 결과와 완전히 일치 — 순수 구조 리팩토링이 수치에 전혀 영향을 주지 않았음을
+입증. 검증용 스크래치 run 폴더(`p1v2_runs/1002_1206_p1v2_refact_seed42`)와
+`RESULTS_LOG.md`에 자동 추가됐던 해당 2개 항목(synergy_groups_refact_groups/
+kernel_group_features_refact_kernel)은 검증 후 삭제/제거해 되돌림.

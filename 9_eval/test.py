@@ -16,23 +16,43 @@ forward 참고) — 입력 형태가 SCREvaluator.set_classifier()와 완전히 
 
 사용 예(--run-dir은 2026-09-23 재배치 이전의 기존 run 경로도 그대로 쓸 수 있다 — results/
 자체는 안 옮겼음):
-  python 9_eval/test.py \
-      --run-dir legacy_results/experiments/phase1_lab/results/p1v2_runs/<v4_run> \
-      --rep-cells b1c0 b1c1
+  python 9_eval/test.py --run-dir legacy_results/experiments/phase1_lab/results/p1v2_runs/<v4_run>
 
-  # interaction_json이 p1v2_summary.json에 없거나 산출물을 옮겼다면 다시 지정:
-  python 9_eval/test.py \
-      --run-dir legacy_results/experiments/phase1_lab/results/p1v2_runs/<v4_run> \
-      --interaction-json legacy_results/experiments/phase1_lab/results/hi_scenario_interaction_k25_full_N2.json \
-      --rep-cells b1c0
+2026-10-02: --run-dir을 제외한 모든 CLI 인자를 제거했다(hi_correlation.py/
+interaction.py/synergy.py/kernel.py/train.py 정리와 동일 원칙) — checkpoint/
+interaction-json/kernel-features-pkl/combined-redundancy-json/rep-cells/data-dir/
+seg-data-dir/device 전부 parameters.py에서만 읽는다. --run-dir만 예외인 이유는
+다른 스텝의 --out-dir/--output-dir과 동일(평가 대상 run을 고르는 값이라 parameters.py
+단일 소스로 복원 불가 — run_pipeline.py가 직전 Step 8 run 또는 최신 run을 찾아 넘겨줌).
+
+train.py와 달리 interaction-json/kernel-features-pkl/combined-redundancy-json은
+run_pipeline.py의 3단 우선순위(자동탐색/legacy fallback)를 이식할 필요가 없다 —
+이 값들은 train.py가 실행 시점에 `<run-dir>/p1v2_summary.json`에 이미 정확히
+기록해두므로, parameters.py: ACTIVE_*가 명시돼 있으면 그걸 최우선으로 쓰고
+없으면 그 run 자신의 summary.json 기록을 그대로 읽으면 된다(기존 로직 그대로,
+CLI 경유만 없앴을 뿐).
+
+같은 라운드에 main()도 단일 책임 원칙에 따라 서브함수로 분리했다(동작 변화 없는
+순수 구조 정리) — _resolve_run_and_config(run_dir/device/config.yaml/summary.json)
+-> _load_checkpoint -> _build_dataset_and_kernel(spec/데이터셋/커널 HI/
+redundancy_mask) -> _build_shared_mask(interaction.py 기반 shared_hi_mask) ->
+_build_and_load_model -> _run_evaluation(oracle/hard/soft 평가 + 플롯 전부) ->
+_export_for_visualize(기존 함수 재사용). train.py의 t1~t7과 동일 원칙이지만, 이
+파일은 원래부터 `_resolve_device`/`_pick_rep_cells`/`_plot_*` 등을 전부 밑줄
+접두 설명형 이름으로 모듈 최상위에 두던 기존 관례가 있어 그 관례를 그대로
+따르고 번호 접두사(t1_...)는 붙이지 않았다.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+from scipy.ndimage import gaussian_filter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # train.py는 8_train/에 있는 형제 스크립트라 그 폴더만 sys.path에 추가하면 된다
@@ -123,46 +143,44 @@ class _KernelAugmentedDataset(torch.utils.data.Dataset):
 
 
 def _parse_args() -> argparse.Namespace:
+    # 2026-10-02: --run-dir 하나만 남기고 전부 제거 — 나머지는 이미 parameters.py가
+    # 단일 소스인 값의 CLI 통로였을 뿐이다(train.py 등 정리와 동일 원칙). --run-dir만
+    # 예외인 이유는 모듈 docstring 참고.
     p = argparse.ArgumentParser(
         description="train.py 체크포인트 test 평가 + 대표 셀 용량곡선 비교 플랏"
     )
     p.add_argument("--run-dir", required=True, dest="run_dir",
                    help="results/p1v2_runs/<run> 디렉터리(config.yaml/p1v2_summary.json이 있는 곳)")
-    p.add_argument("--checkpoint", default=None,
-                   help="기본값: <run-dir>/checkpoints/best_by_saturation.pt")
-    p.add_argument("--interaction-json", default=P.ACTIVE_INTERACTION_JSON, dest="interaction_json",
-                   help="shared_gate(v4) 구성 — 보통 p1v2_summary.json에 기록된 경로가 자동 "
-                        "적용되므로, 그 기록이 없거나 산출물을 옮겼을 때만 지정하면 됨 "
-                        "(parameters.py 기본 None=자동 탐지)")
-    p.add_argument("--kernel-features-pkl", default=P.ACTIVE_KERNEL_FEATURES_PKL,
-                   dest="kernel_features_pkl",
-                   help="p1v2_summary.json에 기록된 경로를 무시하고 이 값을 쓴다. 학습 후 "
-                        "산출물을 옮긴 경우(예: run_dir 재구성) summary.json의 기록이 낡아져 "
-                        "FileNotFoundError가 나는데, 그럴 때 직접 지정하는 용도 — 보통은 자동"
-                        "탐지로 충분하니 안 줘도 됨(parameters.py 기본 None).")
-    p.add_argument("--combined-redundancy-json", default=P.ACTIVE_COMBINED_REDUNDANCY_JSON,
-                   dest="combined_redundancy_json",
-                   help="위와 동일 이유의 오버라이드(kernel-features-pkl과 짝을 이루는 파일이라 "
-                        "보통 같이 옮겨졌을 것). parameters.py 기본 None.")
-    p.add_argument("--rep-cells", nargs="+", default=P.ACTIVE_REP_CELLS, dest="rep_cells",
-                   help="비교 플랏을 그릴 셀 ID(들). 미지정 시 데이터셋별 5개 자동 선정"
-                        "(2026-09-18, 기존 1개 -> 5개)")
-    p.add_argument("--data-dir", default=P.ACTIVE_DATA_DIR, dest="data_dir",
-                   help="config.yaml의 data.data_dir 오버라이드 — run마다 학습 당시 머신의 "
-                        "경로(상대경로 또는 다른 드라이브)가 그대로 박혀있어, 이 스크립트를 "
-                        "돌리는 머신에 그 경로가 없으면 필요")
-    p.add_argument("--seg-data-dir", default=P.ACTIVE_SEG_DATA_DIR, dest="seg_data_dir",
-                   help="config.yaml의 data.seg_data_dir 오버라이드 (위와 동일 이유)")
-    p.add_argument("--device", default=P.FIXED_DEVICE or "auto")
     return p.parse_args()
 
 
-def main() -> None:
-    args = _parse_args()
-    device = _resolve_device(args.device)
+def _resolve_summary_path(v):
+    """p1v2_summary.json에는 트레이너 실행 당시 cwd 기준 상대경로가 그대로 남아있을 수
+    있어(예: "legacy_results/experiments/.../kernel_v3.pkl"), 이 스크립트를 다른 cwd에서
+    실행해도 항상 찾도록 PROJECT_ROOT 기준으로 고정한다."""
+    if not v:
+        return None
+    path = Path(v)
+    resolved = path if path.is_absolute() else PROJECT_ROOT / path
+    if resolved.exists():
+        return resolved
+    # results/ 정리(v3/v4 입력만 남기고 나머지는 results/outputs/로 이동, 260827
+    # 세션) 이전에 학습된 run은 summary.json에 옛 경로가 그대로 박혀있다 — 파일명만
+    # 살아있는 outputs/ 하위에서 한 번 더 찾는다.
+    fallback = resolved.parent / "outputs" / resolved.name
+    if fallback.exists():
+        print(f"[test_p1] {resolved} 없음 — {fallback}에서 발견(results/ 정리 이전 경로)")
+        return fallback
+    return resolved
+
+
+def _resolve_run_and_config(run_dir_arg: str) -> SimpleNamespace:
+    """평가 대상 run_dir를 확정하고, 그 run이 학습 당시 저장해둔 config.yaml/
+    p1v2_summary.json을 로드한다(data-dir/seg-data-dir 오버라이드 적용 포함)."""
+    device = _resolve_device(P.FIXED_DEVICE or "auto")
     print(f"[test_p1] device={device}")
 
-    run_dir = Path(args.run_dir)
+    run_dir = Path(run_dir_arg)
     if not run_dir.is_absolute():
         run_dir = PROJECT_ROOT / run_dir
 
@@ -172,41 +190,23 @@ def main() -> None:
             f"{cfg_path} 없음 — train.py가 만든 run 디렉터리가 맞는지 확인하세요"
         )
     cfg = load_config(str(cfg_path))
-    if args.data_dir is not None:
-        cfg["data"]["data_dir"] = args.data_dir
-        print(f"[test_p1] data_dir 오버라이드: {args.data_dir}")
-    if args.seg_data_dir is not None:
-        cfg["data"]["seg_data_dir"] = args.seg_data_dir
-        print(f"[test_p1] seg_data_dir 오버라이드: {args.seg_data_dir}")
+    if P.ACTIVE_DATA_DIR is not None:
+        cfg["data"]["data_dir"] = P.ACTIVE_DATA_DIR
+        print(f"[test_p1] data_dir 오버라이드: {P.ACTIVE_DATA_DIR}")
+    if P.ACTIVE_SEG_DATA_DIR is not None:
+        cfg["data"]["seg_data_dir"] = P.ACTIVE_SEG_DATA_DIR
+        print(f"[test_p1] seg_data_dir 오버라이드: {P.ACTIVE_SEG_DATA_DIR}")
 
     summary_path = run_dir / "p1v2_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
 
-    def _resolve_summary_path(v):
-        # p1v2_summary.json에는 트레이너 실행 당시 cwd 기준 상대경로가 그대로 남아있을 수
-        # 있어(예: "legacy_results/experiments/.../kernel_v3.pkl"), 이 스크립트를 다른 cwd에서
-        # 실행해도 항상 찾도록 PROJECT_ROOT 기준으로 고정한다.
-        if not v:
-            return None
-        p = Path(v)
-        resolved = p if p.is_absolute() else PROJECT_ROOT / p
-        if resolved.exists():
-            return resolved
-        # results/ 정리(v3/v4 입력만 남기고 나머지는 results/outputs/로 이동, 260827
-        # 세션) 이전에 학습된 run은 summary.json에 옛 경로가 그대로 박혀있다 — 파일명만
-        # 살아있는 outputs/ 하위에서 한 번 더 찾는다.
-        fallback = resolved.parent / "outputs" / resolved.name
-        if fallback.exists():
-            print(f"[test_p1] {resolved} 없음 — {fallback}에서 발견(results/ 정리 이전 경로)")
-            return fallback
-        return resolved
+    return SimpleNamespace(device=device, run_dir=run_dir, cfg=cfg, summary=summary)
 
-    kernel_features_pkl = (Path(args.kernel_features_pkl) if args.kernel_features_pkl
-                            else _resolve_summary_path(summary.get("kernel_features_pkl")))
-    combined_redundancy_json = (Path(args.combined_redundancy_json) if args.combined_redundancy_json
-                                 else _resolve_summary_path(summary.get("combined_redundancy_json")))
 
-    ckpt_path = (Path(args.checkpoint) if args.checkpoint
+def _load_checkpoint(run_dir: Path) -> SimpleNamespace:
+    """체크포인트 경로를 확정해 로드하고 핵심 지표(epoch/gate_saturation/val_rmse)를
+    콘솔에 보여준다."""
+    ckpt_path = (Path(P.FIXED_TEST_CHECKPOINT_OVERRIDE) if P.FIXED_TEST_CHECKPOINT_OVERRIDE
                  else run_dir / "checkpoints" / "best_by_saturation.pt")
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
@@ -215,11 +215,22 @@ def main() -> None:
     print(f"[test_p1] epoch={ckpt.get('epoch')} "
           f"gate_saturation={ckpt.get('gate_saturation', float('nan')):.4f} "
           f"val_rmse={ckpt.get('val_rmse', float('nan')):.6f}")
+    return SimpleNamespace(ckpt_path=ckpt_path, ckpt=ckpt)
 
+
+def _build_dataset_and_kernel(cfg: dict, summary: dict) -> SimpleNamespace:
+    """spec과 train/val/test 데이터셋을 만들고, kernel-features-pkl/
+    combined-redundancy-json을 resolve(parameters.py 명시값 우선, 없으면 이 run의
+    p1v2_summary.json 기록)해 커널 HI 적용 + redundancy_mask까지 구성한다."""
     spec = get_segmenter(
         cfg["scenario"]["axis"], {cfg["scenario"]["axis"]: cfg["scenario"]["axis_config"]}
     ).get_spec()
     train_ds, val_ds, test_ds, norm = build_datasets(cfg, spec=spec)
+
+    kernel_features_pkl = (Path(P.ACTIVE_KERNEL_FEATURES_PKL) if P.ACTIVE_KERNEL_FEATURES_PKL
+                            else _resolve_summary_path(summary.get("kernel_features_pkl")))
+    combined_redundancy_json = (Path(P.ACTIVE_COMBINED_REDUNDANCY_JSON) if P.ACTIVE_COMBINED_REDUNDANCY_JSON
+                                 else _resolve_summary_path(summary.get("combined_redundancy_json")))
 
     kernel_hi_counts = None
     kernel_costs_by_scen = None
@@ -241,25 +252,40 @@ def main() -> None:
         print(f"[test_p1] combined-redundancy-json 자동 적용(p1v2_summary.json): {combined_redundancy_json} "
               f"(게이트 출력 0-강제만 적용, {int((~redundancy_mask).sum().item())}개 (시나리오,HI) 조합 배제)")
 
-    interaction_json = args.interaction_json or (
+    return SimpleNamespace(
+        spec=spec, train_ds=train_ds, val_ds=val_ds, test_ds=test_ds, norm=norm,
+        kernel_hi_counts=kernel_hi_counts, kernel_costs_by_scen=kernel_costs_by_scen,
+        redundancy_mask=redundancy_mask,
+    )
+
+
+def _build_shared_mask(spec, summary: dict) -> torch.Tensor | None:
+    """interaction.py 산출물(parameters.py 명시값 우선, 없으면 이 run의 p1v2_summary.json
+    기록)을 resolve해 shared_hi_mask 텐서를 만든다. 둘 다 없으면 None(= shared_gate 미사용)."""
+    interaction_json = P.ACTIVE_INTERACTION_JSON or (
         str(_resolve_summary_path(summary.get("interaction_json"))) if summary.get("interaction_json") else None
     )
-    shared_hi_mask = None
-    if interaction_json:
-        interaction_data = json.loads(Path(interaction_json).read_text(encoding="utf-8"))
-        ref_seg_name = spec.scenario_names[0]
-        ref_cols = get_hi_cols_for_seg(ref_seg_name)
-        suffix = f"_{ref_seg_name}"
-        concepts_in_order = [c[: -len(suffix)] if c.endswith(suffix) else c for c in ref_cols]
-        per_hi = interaction_data["per_hi"]
-        shared_hi_mask = torch.tensor(
-            [not per_hi.get(c, {"significant": False})["significant"] for c in concepts_in_order],
-            dtype=torch.bool,
-        )
-        n_shared = int(shared_hi_mask.sum().item())
-        print(f"[test_p1] interaction-json 적용: {interaction_json} "
-              f"({n_shared}/{len(shared_hi_mask)}개 HI -> shared_gate)")
+    if not interaction_json:
+        return None
+    interaction_data = json.loads(Path(interaction_json).read_text(encoding="utf-8"))
+    ref_seg_name = spec.scenario_names[0]
+    ref_cols = get_hi_cols_for_seg(ref_seg_name)
+    suffix = f"_{ref_seg_name}"
+    concepts_in_order = [c[: -len(suffix)] if c.endswith(suffix) else c for c in ref_cols]
+    per_hi = interaction_data["per_hi"]
+    shared_hi_mask = torch.tensor(
+        [not per_hi.get(c, {"significant": False})["significant"] for c in concepts_in_order],
+        dtype=torch.bool,
+    )
+    n_shared = int(shared_hi_mask.sum().item())
+    print(f"[test_p1] interaction-json 적용: {interaction_json} "
+          f"({n_shared}/{len(shared_hi_mask)}개 HI -> shared_gate)")
+    return shared_hi_mask
 
+
+def _build_and_load_model(cfg: dict, data: SimpleNamespace, shared_hi_mask,
+                           device: torch.device, ckpt: dict) -> SCRModel:
+    """SCRModel을 cfg/spec/마스크 조합으로 선언하고 체크포인트 가중치를 로드한다."""
     lambda_scen = cfg.get("loss", {}).get("lambda_scen", 0.0)
     with_probe_mlp = lambda_scen > 0
     # regression_model은 항상 cfg["model"]의 저장값(v4는 항상 "mlp") 그대로 쓴다 — 다른
@@ -270,24 +296,32 @@ def main() -> None:
 
     model = SCRModel(
         d_probe=cfg["model"]["d_probe"], d_head=cfg["model"]["d_head"], dropout=cfg["model"]["dropout"],
-        spec=spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
+        spec=data.spec, with_probe_mlp=with_probe_mlp, model_cfg=p1_model_cfg,
         shared_hi_mask=shared_hi_mask,
-        kernel_hi_counts=kernel_hi_counts,
-        kernel_hi_costs=kernel_costs_by_scen,
-        redundancy_mask=redundancy_mask,
+        kernel_hi_counts=data.kernel_hi_counts,
+        kernel_hi_costs=data.kernel_costs_by_scen,
+        redundancy_mask=data.redundancy_mask,
     ).to(device)
     model.load_state_dict(ckpt["model_state"], strict=True)
     model.eval()
+    return model
 
+
+def _run_evaluation(model: SCRModel, device: torch.device, data: SimpleNamespace,
+                     cfg: dict, run_dir: Path) -> SimpleNamespace:
+    """oracle/hard/soft 라우팅 평가를 실행하고 scatter/confusion/error-heatmap/
+    capacity-curve/HI-중요도 플롯까지 전부 저장한다."""
+    spec = data.spec
+    test_ds = data.test_ds
     if hasattr(test_ds, "x_kernel"):
         test_ds = _KernelAugmentedDataset(test_ds)
 
-    rep_cells = args.rep_cells or _pick_rep_cells(test_ds, cfg, 5)
+    rep_cells = P.ACTIVE_REP_CELLS or _pick_rep_cells(test_ds, cfg, 5)
     print(f"[test_p1] rep_cells: {rep_cells}")
 
     figures_dir = run_dir / "figures"
     evaluator = SCREvaluator(
-        model=model, normalizer=norm, device=device,
+        model=model, normalizer=data.norm, device=device,
         figures_dir=figures_dir, rep_cells=rep_cells,
     )
 
@@ -307,25 +341,37 @@ def main() -> None:
               "불가능해 oracle만 평가합니다.")
 
     test_modes = evaluator.evaluate_modes(test_ds, modes=modes)
-    for m in modes:
-        print(f"[test_p1] test {m} capacity metrics: {test_modes[m]['capacity']}")
-        if m != "oracle":
-            print(f"[test_p1] test {m} classification: {test_modes[m]['classification']}")
-        evaluator._plot_scatter(test_modes[m]["_pred"], tag=f"test_{m}")
-        if m != "oracle":
-            evaluator._plot_confusion_matrix(test_modes[m]["_pred"], tag=f"test_{m}")
-        _plot_error_heatmaps(test_modes[m]["_pred"], spec, figures_dir, tag=f"test_{m}")
+    for mode in modes:
+        print(f"[test_p1] test {mode} capacity metrics: {test_modes[mode]['capacity']}")
+        if mode != "oracle":
+            print(f"[test_p1] test {mode} classification: {test_modes[mode]['classification']}")
+        evaluator._plot_scatter(test_modes[mode]["_pred"], tag=f"test_{mode}")
+        if mode != "oracle":
+            evaluator._plot_confusion_matrix(test_modes[mode]["_pred"], tag=f"test_{mode}")
+        _plot_error_heatmaps(test_modes[mode]["_pred"], spec, figures_dir, tag=f"test_{mode}")
     # 용량곡선(capacity_curve_*.png)은 test_scr.py와 동일한 관례로 파일명에 모드 태그가
     # 없어 한 모드만 그릴 수 있다 — 실배포 기준(hard)이 있으면 그쪽, 없으면 oracle.
-    _curve_mode = "hard" if "hard" in modes else "oracle"
-    evaluator._plot_capacity_curves(test_modes[_curve_mode]["_pred"])
+    curve_mode = "hard" if "hard" in modes else "oracle"
+    evaluator._plot_capacity_curves(test_modes[curve_mode]["_pred"])
     _plot_hi_importance_ranking(run_dir, figures_dir, spec)
     print(f"[test_p1] 저장: {figures_dir}")
+
+    return SimpleNamespace(test_modes=test_modes, evaluator=evaluator)
+
+
+def main() -> None:
+    args = _parse_args()
+    run = _resolve_run_and_config(args.run_dir)
+    ckpt_info = _load_checkpoint(run.run_dir)
+    data = _build_dataset_and_kernel(run.cfg, run.summary)
+    shared_hi_mask = _build_shared_mask(data.spec, run.summary)
+    model = _build_and_load_model(run.cfg, data, shared_hi_mask, run.device, ckpt_info.ckpt)
+    result = _run_evaluation(model, run.device, data, run.cfg, run.run_dir)
 
     # 2026-09-06: metrics/metrics.json 등은 기본으로 항상 저장(예전엔 --export-for-visualize
     # 없이 돌리면 콘솔 출력·figures/ PNG만 남고 metrics.json 자체가 아예 안 생겨서 혼동을
     # 일으켰다). 플래그는 하위 호환을 위해 그대로 받되 더 이상 이 저장 여부를 좌우하지 않는다.
-    _export_for_visualize(run_dir, evaluator, test_modes, spec)
+    _export_for_visualize(run.run_dir, result.evaluator, result.test_modes, data.spec)
 
 
 def _smoothed_error_grid(x: np.ndarray, y: np.ndarray, err: np.ndarray,
@@ -337,8 +383,6 @@ def _smoothed_error_grid(x: np.ndarray, y: np.ndarray, err: np.ndarray,
     후 나누면(Nadaraya-Watson류 커널 평균과 동치) 빈 칸도 이웃 값으로 자연스럽게 채워져
     imshow가 레퍼런스 이미지처럼 매끈한 그라데이션으로 보인다. sigma의 어느 축이든 0이면
     그 축으론 블렌딩하지 않는다(카테고리 x축을 서로 안 섞이게 할 때 씀)."""
-    from scipy.ndimage import gaussian_filter
-
     n_y = len(y_edges) - 1
     n_x = len(x_edges) - 1
     x_bin = np.clip(np.digitize(x, x_edges) - 1, 0, n_x - 1)
@@ -578,8 +622,6 @@ def _export_for_visualize(run_dir: Path, evaluator: SCREvaluator, test_modes: di
     scenario_spec.json, gates/*.json은 train.py가 이미 저장해두므로 손댈 필요
     없음 — 여기서 부족한 세 파일만 채운다(RunBundle/_plot_capacity_curve_comparison 코드는
     무수정)."""
-    import csv
-
     pred = test_modes["oracle"]["_pred"]
 
     metrics_dir = run_dir / "metrics"

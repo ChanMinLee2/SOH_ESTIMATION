@@ -91,7 +91,7 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 | `FIXED_L0_NORM_CONSTANT` | None(=n_scenarios) | Step8 L0 정규화 상수 |
 | `FIXED_VAL_RMSE_EPSILON` | 0.0005 | Step8 체크포인트 선택 tie-break 기준 |
 | `FIXED_DEVICE` | None(auto) | Step8~9 연산 장치 |
-| `FIXED_EXCLUDE_CV` / `FIXED_SKIP_SHAPE` | False / False | Step2/4 데이터 변형 옵션(이번 정식 레시피 미사용) |
+| `FIXED_SKIP_SHAPE` | False | Step2(`preprocess.py`) 형상 이상치 필터 비활성화 옵션(이번 정식 레시피 미사용) — `FIXED_EXCLUDE_CV`(구 Step4 CC-only 옵션)는 2026-09-29 Step4가 그 옵션 자체를 제거하면서 함께 삭제 |
 
 ### `P1_MODEL_CONFIG` — Step 5~9 공통 모델/학습 설정 딕셔너리
 
@@ -117,13 +117,12 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 
 ## 스크립트별 현재 CLI 옵션
 
-### `run_pipeline.py` (오케스트레이터, 22개)
-`from_step`(위치인자), `--to-step`, `--workers`, `--force-extract`,
-`--kernel-features-pkl`, `--interaction-json`, `--combined-redundancy-json`,
-`--max-group-size`, `--synergy-redundancy-threshold`, `--max-epochs`, `--patience`,
-`--batch-size`, `--hi-cost-weighted-l0`, `--n-hi`, `--p1-tag`, `--rep-cells`,
-`--axis-config`, `--data-dir`, `--seg-data-dir`, `--lambda-l0-override`, `--seed`,
-`--split-seed` — 전부 `parameters.py: ACTIVE_*`를 기본값으로 참조.
+### `run_pipeline.py` (오케스트레이터, 2개)
+`from_step`(위치인자), `--to-step` — 그 외 모든 실행 파라미터(워커 수/축 설정/
+학습 하이퍼파라미터/시드 등)는 2026-09-29부로 CLI에서 전부 제거되고
+`parameters.py: ACTIVE_*/FIXED_*`에서만 읽는다(`docs/REFACTORING.md` 2026-09-29
+"run_pipeline.py의 CLI 파라미터 전량 제거" 항목 참고) — 예전엔 이 오케스트레이터
+자신도 `parameters.py`를 우회하는 CLI 오버라이드 경로였다.
 
 ### `1_convert/convert_unified.py` (Step 1, 4개)
 `--dataset`(`P.ACTIVE_DATASET`), `--output-root`, `--workers`(`P.ACTIVE_WORKERS`),
@@ -137,15 +136,14 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 ### `3_integrity/check_integrity.py` (Step 3, 1개)
 `--workers`(`P.ACTIVE_WORKERS`) — 가장 군더더기 없는 스크립트, 그대로 유지.
 
-### `4_hi_analysis/hi_correlation.py` (Step 4, 23개)
-공통: `--workers`, `--force`, `--dataset-group`(`P.FIXED_DATASET_GROUP`), `--seg-axis`,
-`--axis-config`, `--exclude-cv`, `--skip-shape`.
-축 파라미터 단축 인자(`--axis-config` JSON을 CLI 한 줄로 편하게 쓰기 위한 통로):
-`--n1`/`--n2`/`--n-samples`/`--ref-lag`/`--noise-amp`/`--noise-mode`/`--noise-period`/
-`--min-pts`/`--calibration-period`/`--offset-amp` (정식 레시피에서 실사용) +
-`--n2-start`/`--n2-end`/`--n2-step`/`--n2-seed`/`--calibration-mode`/
-`--calibration-jitter`(세그먼트 길이 랜덤화 등 **ablation 실험 전용**, 정식 레시피
-미사용 — Bucket B, 삭제하지 않고 유지).
+### `4_hi_analysis/hi_correlation.py` (Step 4, 0개)
+2026-09-29부로 CLI 인자가 전혀 없다 — 워커 수/캐시 강제 재추출 여부/데이터셋
+그룹/세그멘테이션 축/축 파라미터 전부 `parameters.py`(`ACTIVE_WORKERS`/
+`ACTIVE_FORCE_EXTRACT`/`FIXED_DATASET_GROUP`/`FIXED_SEG_AXIS`/`ACTIVE_AXIS_CONFIG`)
+에서만 읽는다. 실험 조건을 바꾸려면 `parameters.py`를 직접 고치고 실행(여러
+조건을 순차 실행하려면 매 케이스 전에 패치→실행→원복하는 드라이버 스크립트를
+쓴다). 같은 날 `exclude_cv`(CC-only 구간 제외)/`skip_shape`(clean_noshape 입력)
+옵션 자체를 완전히 제거했다(git 히스토리에서 복원 가능).
 
 ### `5_interaction/interaction.py` (Step 5, 12개)
 `--seg-axis`, `--axis-config`, `--data-dir`, `--seg-data-dir`, `--datasets`,

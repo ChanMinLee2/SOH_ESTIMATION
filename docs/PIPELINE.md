@@ -187,21 +187,39 @@ capacity_Ah, segment_id, seg_name(chg_lo 등), scen, zone, q_frac_lo/hi` +
 "시나리오마다 유용성이 크게 다른 특징"인지 판정해서, 모델의 게이트 구조(공유
 게이트 vs 시나리오별 게이트, §10.2)를 미리 정한다.
 
-**처리**: (train split만 사용, val/test 누수 방지)
-1. HI 개념마다 6개 시나리오 각각에서 SOH와의 상관계수 r을 구한다.
-2. 6개 중 2개씩 짝지은 15쌍(6C2) 전부에 Fisher z-변환 상관계수 동일성 검정(귀무가설:
-   두 시나리오의 r이 같다)을 수행하고, 15쌍 중 최소 p-value를 그 HI의 "상호작용
-   증거"로 삼아 Benjamini–Hochberg로 다중비교 보정한다.
-3. 표본이 매우 커서(수십만~백만 행) p-value만으로는 변별력이 없어, **최종 판정은
-   시나리오 간 상관계수의 표준편차가 임계값(`min_effect_size`, 기본 0.1) 이상인가**로
-   내린다.
-4. 임계값을 넘으면(`significant=True`) 그 HI는 시나리오별 게이트(`scen_gates`)로,
-   못 넘으면 시나리오 공유 게이트(`shared_gate`)로 분류된다.
+**처리**: (train split만 사용, val/test 누수 방지. 2026-10-02 갱신 — 2026-09-30
+방법론 변경을 반영, 아래 "방법론 변경 이력" 참고)
+1. 셀 하나하나에서(다른 셀과 안 섞고) 독립적으로 6개 시나리오 각각의 raw HI–SOH
+   피어슨 상관계수 r을 구한다. 6개 시나리오 중 하나라도 그 셀의 세그먼트 수가
+   `FIXED_INTERACTION_MIN_SEGS_PER_CELL`(기본 10) 미만이면 상관계수가 불안정해
+   그 셀 전체를 계산에서 제외한다.
+2. 셀마다 구한 6개 r의 표준편차(`std_r`, 시나리오 간 차이의 크기)를 구하고, 그
+   값들의 셀 간 평균 + 95% CI(정규근사, mean ± 1.96·SE)를 계산한다.
+3. **최종 판정(`significant`)은 두 조건을 모두 만족해야 한다**:
+   (a) `effect_size_meaningful` — 셀 단위 평균 std_r이 Cohen(1988) 상관계수
+   효과크기 "작음" 문턱(`FIXED_INTERACTION_MIN_EFFECT_SIZE`, 기본 0.1) 이상,
+   (b) `cell_level_confirmed` — 95% CI 하한이 0보다 큼(=개별 셀 수준에서도
+   재현되는 효과 — 전체를 풀링해서 계산하면 셀 간 베이스라인 차이로 값이
+   체계적으로 깎이는 집계 착시가 있었음, 아래 참고).
+4. `significant=True`인 HI는 시나리오별 게이트(`scen_gates`)로, 아니면 시나리오
+   공유 게이트(`shared_gate`)로 분류된다.
 
-**출력**: `hi_scenario_interaction_{tag}.json` — HI 개념마다 `r_by_scenario`,
-`std_r_across_scenarios`, `p_adj_bh`, `significant` 등을 담은 `per_hi` 딕셔너리.
-검증에 쓰인 실제 실행 결과 예: raw HI 64개 중 24개 → `shared_gate`, 40개 →
-기존 `scen_gates`.
+**방법론 변경 이력(2026-09-30)**: 원래는 6개 중 2개씩 짝지은 15쌍(6C2) 전부에
+Fisher z-변환 상관계수 동일성 검정을 수행하고 Benjamini–Hochberg로 다중비교
+보정하는 방식이었으나, 세그먼트 행(수십만~백만 개)을 독립 표본처럼 취급하는
+유사반복으로 표준오차가 수천 배 과소추정돼 있어 **이 검정 전체가 실제 최종
+판정에는 안 쓰이는 죽은 계산**이었음이 드러나 완전히 제거됐다. 또한 "전체
+풀링" 기준으로 계산한 std_r_across_scenarios는 셀 간 베이스라인 차이 때문에
+66개 HI 전부에서 셀 단위 평균보다 체계적으로(평균 2.6배) 작게 나와, 비교 대상
+자체를 셀 단위 평균(위 2번)으로 교정했다(상세 경위: `docs/REFACTORING.md`,
+`docs/261001_REPORT.md` §3).
+
+**출력**: `hi_scenario_interaction_{tag}.json` — HI 개념마다 `cell_level_std_r_mean`,
+`cell_level_std_r_ci_lower`/`_ci_upper`, `effect_size_band`(Cohen 구간 라벨,
+리포팅용), `effect_size_meaningful`, `cell_level_confirmed`, `significant`를
+담은 `per_hi` 딕셔너리(옛 `r_by_scenario`/`std_r_across_scenarios`/`p_adj_bh`
+필드는 위 변경으로 더 이상 없음). 검증에 쓰인 실제 실행 결과 예: raw HI 64개
+중 24~25개 → `shared_gate`, 나머지 → 기존 `scen_gates`.
 
 ---
 
@@ -210,16 +228,18 @@ capacity_Ah, segment_id, seg_name(chg_lo 등), scen, zone, q_frac_lo/hi` +
 **목적**: 시나리오별로 "서로 중복되지 않으면서 함께 쓰면 시너지가 있는" HI들을
 미리 그룹으로 묶어, Step 7의 커널 융합 대상으로 넘긴다.
 
-**처리** (시나리오별 독립 수행):
+**처리** (시나리오별 독립 수행, 전부 `parameters.py` 값 — 2026-10-01부로 CLI
+플래그 아님):
 1. 전체 HI를 SOH와의 단순상관 절대값 내림차순 정렬(시드 순서로 사용).
-2. 미배정 HI 하나로 새 그룹을 시작해 `--max-group-size`(기본 4)까지 그리디하게
-   확장한다.
+2. 미배정 HI 하나로 새 그룹을 시작해 `ACTIVE_MAX_GROUP_SIZE`(기본 4)까지
+   그리디하게 확장한다.
 3. 매 확장 단계: (a) 현재 그룹 멤버 전부와 raw 상관 절대값이
-   `--redundancy-threshold`(기본 0.9) 미만인 후보만 남겨 다중공선성을 배제하고,
-   (b) 그중 SOH 단순상관 상위 `--prefilter-top-m`개만 저비용으로 걸러낸 뒤,
-   (c) 그 소수에 대해서만 **편상관계수**(그룹 전체로 SOH/후보를 회귀한 잔차 간
-   상관)를 정밀 계산해 최댓값을 채택한다. 채택값이 `--min-partial-corr` 미만이면
-   그룹 성장을 멈춘다.
+   `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`(기본 0.9) 미만인 후보만 남겨
+   다중공선성을 배제하고, (b) 그중 SOH 단순상관 상위 `FIXED_PREFILTER_TOP_M`
+   (기본 15)개만 저비용으로 걸러낸 뒤, (c) 그 소수에 대해서만 **편상관계수**
+   (그룹 전체로 SOH/후보를 회귀한 잔차 간 상관)를 정밀 계산해 최댓값을
+   채택한다. 채택값이 `FIXED_MIN_PARTIAL_CORR`(기본 0.02) 미만이면 그룹
+   성장을 멈춘다.
 4. 모든 HI가 배정될 때까지 반복 — 약한 HI는 크기 1짜리 그룹으로 남고, 이런
    그룹은 Step 7의 커널 융합 대상에서 제외된다.
 
@@ -334,21 +354,29 @@ L = MSE(cap_pred, SOH 정답)
 ```
 
 `L0_penalty`는 시나리오마다 "활성 HI들의 비용 기댓값"을 계산한다(기본은 균일
-비용 1.0 — 즉 활성 게이트 "개수"만 페널티가 된다; `--hi-cost-weighted-l0`로
-카테고리별 실측 계산비용 가중치를 켤 수 있다). 이 항 덕분에 학습이 끝나면
-시나리오마다 실제로 쓰는 HI 목록이 좁게 수렴한다 — 검증 실행에서
-`gate_saturation`(게이트가 얼마나 극단값 0/1에 붙었는지) 0.004 수준까지 수렴함을
-확인했다.
+비용 1.0 — 즉 활성 게이트 "개수"만 페널티가 된다; `parameters.py:
+ACTIVE_HI_COST_WEIGHTED_L0=True`로 카테고리별 실측 계산비용 가중치를 켤 수
+있다). 이 항 덕분에 학습이 끝나면 시나리오마다 실제로 쓰는 HI 목록이 좁게
+수렴한다 — 검증 실행에서 `gate_saturation`(게이트가 얼마나 극단값 0/1에
+붙었는지) 0.004 수준까지 수렴함을 확인했다.
 
 ### 10.4 학습 루프
 
 `8_train/train.py`가 500 epoch을 상한으로 학습하며, `lambda_l0`를 warmup 구간
-동안 서서히 올리고(`delayed_warmup`), val 성능과 gate saturation이 일정 기간
-개선되지 않으면 조기 종료한다. 체크포인트는 `checkpoints/best_by_saturation.pt`
-(saturation 기준 최적 epoch)에 저장되고, `config.yaml`/`p1v2_summary.json`에
-그 run의 완전한 설정이 기록된다. **seed 지정 시 전체 파이프라인이 바이트 단위로
-재현 가능** — 이 프로젝트의 모든 리팩토링은 동일 seed로 재학습한 체크포인트의
-MD5가 리팩토링 전후로 완전히 일치하는지로 검증되어 왔다.
+동안 서서히 올린다(`delayed_warmup`). 체크포인트 선택은 2단계 기준이다 —
+L0 램프(warmup+ramp)가 완전히 끝난 이후 에폭만 후보로 삼고, 그중 val RMSE가
+best보다 `FIXED_VAL_RMSE_EPSILON`(기본 0.0005) 이상 좋아지면 그 epoch을
+1순위로 채택, 그 조건을 못 채우면(개선폭이 epsilon 미만이거나 악화돼도) gate
+saturation이 더 낮은 epoch을 2순위 fallback으로 채택한다(2026-09-18 변경 —
+원래는 saturation이 1순위였다). `ACTIVE_PATIENCE`(기본 60) 에폭 동안 best
+갱신이 없으면 조기 종료하지만, 베스트 체크포인트 자체는 이미 저장된 값
+그대로라 결과에는 영향 없이 학습 시간만 절약된다. 선택된 체크포인트는
+`checkpoints/best_by_saturation.pt`(파일명은 과거 saturation-전용 기준 시절
+이름이 그대로 남은 것 — 실제 선택 기준은 위 2단계)에 저장되고,
+`config.yaml`/`p1v2_summary.json`에 그 run의 완전한 설정이 기록된다. **seed
+지정 시 전체 파이프라인이 바이트 단위로 재현 가능** — 이 프로젝트의 모든
+리팩토링은 동일 seed로 재학습한 체크포인트의 MD5가 리팩토링 전후로 완전히
+일치하는지로 검증되어 왔다.
 
 ---
 
@@ -420,6 +448,42 @@ python run_pipeline.py 8 --to-step 8   # 학습만(평가 제외)
 python run_pipeline.py 9               # 평가만(직전 run 자동 탐색)
 ```
 
-자주 바꾸는 파라미터(`ACTIVE_*`)는 CLI 플래그로 노출되고, 거의 안 바꾸는
-파라미터(`FIXED_*`)는 `parameters.py`를 직접 수정해야 한다(`docs/PARAMETERS.md`에
-전체 목록, `docs/REFACTORING.md`에 변경 이력).
+**2026-10-02 갱신**: `ACTIVE_*`도 더 이상 CLI 플래그로 노출되지 않는다 — Step
+4~9 전 스텝에서 공유 실행 폴더/평가 대상 run을 가리키는 단일 경로 인자
+(`--out-dir`/`--output-dir`/`--run-dir`, 아래 §15 참고) 말고는 CLI가 전부
+제거됐다. `ACTIVE_*`(자주 바꾸는 값)든 `FIXED_*`(거의 안 바꾸는 값)든 전부
+`parameters.py`를 직접 수정해야 한다(`docs/PARAMETERS.md`에 전체 목록,
+`docs/REFACTORING.md`에 변경 이력). `run_pipeline.py` 자신의 CLI도 스텝
+범위(`from_step`/`--to-step`)만 남아 있다 — 실험값을 한 번만 다르게 돌려보고
+싶으면 `run_pipeline.py`를 거치지 말고 해당 스텝 스크립트를 직접 실행할 것
+(예: `python 8_train/train.py`).
+
+---
+
+## 15. 산출물 저장 경로 제어 — 단일 실행 vs 파이프라인
+
+Step 4~9는 전부 "결과를 어디에 저장할지"를 CLI로 받지 않는다(Step 9의
+`--run-dir`은 예외 — 저장이 아니라 "어느 run을 **평가할지**"를 고르는 값).
+대신 각 스텝이 parameters.py 값으로 경로를 스스로 계산하고, 여러 스텝이
+같은 실험 폴더를 공유해야 할 때만 `run_pipeline.py`가 그 폴더 하나를 계산해서
+넘겨준다.
+
+| Step | 경로 관련 CLI | 단일 스크립트 직접 실행 시 | `run_pipeline.py` 경유 시 |
+|---|---|---|---|
+| 4 `hi_correlation.py` | 없음 | `PKL_CACHE_ROOT`(`data_directories.py`의 `_D_ROOT`, 코드 상수) 밑에 `ACTIVE_AXIS_CONFIG`로부터 자동 유도된 파일명 — **사용자가 바꿀 CLI/파라미터 자체가 없음**(바꾸려면 `data_directories.py` 코드 수정) | 동일(Step4 산출물은 run_dir과 무관한 축-키 전역 캐시) |
+| 5 `interaction.py` | `--out-dir`(선택) | 생략 시 `model_lib/results/`(`RESULTS_DIR`) | run_pipeline이 계산한 공유 `run_dir` |
+| 6 `synergy.py` | `--out-dir`(선택) | 〃 | 〃 |
+| 7 `kernel.py` | `--out-dir`(선택) | 〃 (+ 같은 폴더에서 Step 6 산출물 자동탐색) | 〃 |
+| 8 `train.py` | `--output-dir`(선택) | 생략 시 `model_lib/results/p1v2_runs/{timestamp}_p1v2_{tag}_seed{seed}/` 새 폴더 자동 생성 | 〃 |
+| 9 `test.py` | `--run-dir`(**필수**) | 생략 불가 — 평가할 run 폴더를 반드시 지정 | run_pipeline이 직전 Step 8 결과(없으면 최신 run) 자동 탐색해 전달 |
+
+**실제로 사용자가 컨트롤하는 지점**: `run_pipeline.py` 경유 실행의 공유 폴더
+이름(`{timestamp}_p1v2_{tag}_seed{seed}`) 중 `tag`/`seed`는
+`parameters.py: ACTIVE_P1_TAG`/`ACTIVE_SEED`로 정해지고, 최상위 루트
+(`model_lib/results/p1v2_runs/`)는 `run_pipeline.py`의 `P1V2_RUNS_DIR` 상수로만
+바뀐다 — 즉 "어디에 저장할지"는 거의 전부 `parameters.py`(Step 4는 아예
+`data_directories.py` 코드)가 결정하고, `--out-dir`류 CLI는 사용자가 직접
+조작하라고 만든 다이얼이 아니라 "이번 실행에서 여러 스텝이 같은 폴더를 쓰게
+강제"하는 내부 배선용이다. 특정 폴더에 결과를 모으고 싶으면 해당 스텝을
+`--out-dir`/`--output-dir`로 직접 지정하면 되고, Step 9는 평가하고 싶은 run
+폴더를 `--run-dir`로 항상 명시해야 한다.

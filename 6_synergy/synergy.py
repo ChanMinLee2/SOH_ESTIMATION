@@ -3,19 +3,6 @@
 
 Phase1 학습 이전에 실행하는 "시너지 그룹" 사전 구성 스크립트 (기존 model_lib 코드 무변경).
 
-설계 배경 (세션 논의 요약):
-  - 다중공선성 제거를 먼저 하고 시너지를 나중에 찾으면, "클러스터 대표"를 뭘로 뽑을지가
-    시너지 정보 없이 정해져야 하는 순환 논리 문제가 생긴다.
-  - 그래서 순서를 뒤집지 않고, 편상관계수(partial correlation) 필터 하나로
-    "다중공선성 배제"와 "시너지 후보 발굴"을 동시에 수행한다:
-      - 이미 그룹에 있는 멤버와 거의 같은 정보(|raw corr| >= redundancy-threshold)인 후보는
-        애초에 후보에서 제외 (= 다중공선성 배제, Stage4의 클러스터 임계값과 동일 기준 재사용)
-      - 살아남은 후보 중, 그룹으로 conditioning했을 때도 target과의 관계가 여전히/더 강하게
-        남는(편상관계수가 큰) 후보를 추가 (= 시너지 있는 조합 우선)
-  - 시간복잡도: 그룹 성장 단계마다 전체 후보를 다 정밀 검사(회귀 기반 편상관계수)하지 않고,
-    먼저 "그 seed와의 단순 상관계수"로 상위 --prefilter-top-m개만 추린 뒤에만 정밀 계산 —
-    O(N^2 * S) -> O(N^2) 필터 + O(N * M * S) 본검사로 완화(N=HI 후보 수, S=표본 수, M=prefilter 폭).
-
 알고리즘 (시나리오별로 독립 수행):
   1. 전체 HI를 target과의 단순 상관계수 |r| 내림차순으로 정렬 -> seed 순서.
   2. 아직 어느 그룹에도 안 속한 seed를 하나씩 꺼내 새 그룹 시작.
@@ -27,20 +14,24 @@ Phase1 학습 이전에 실행하는 "시너지 그룹" 사전 구성 스크립�
         가장 큰 후보를 채택. 채택 기준(|편상관계수|) < --min-partial-corr면 이 그룹은 그만 채움.
   4. 모든 HI가 정확히 하나의 그룹에 배정될 때까지 반복 (약한 HI는 크기 1짜리 그룹으로 남음).
 
-출력은 기존 gates JSON과 같은 "seg_{s}_..." 키 컨벤션을 따른다 — 나중에 Phase1이 이 파일을
-그대로 읽어 그룹 단위로 후보를 제한하도록 확장할 때 다른 스크립트와 동일한 패턴을 쓸 수 있게.
+2026-10-01: --out-dir를 제외한 모든 CLI 인자를 제거했다
+실행은 그냥:
+    python 6_synergy/synergy.py
 
-사용 예(--seg-axis/--axis-config/--data-dir/--seg-data-dir 전부 표준 조합(q_frac_ref,
-n1=0.35/n2=0.20/n_samples=2)이면 생략 가능 — 기본값 자동 적용, 다른 조합이면 넷 다 같이 오버라이드):
-  python 6_synergy/synergy.py \
-      --split-seed 42 --tag k25_full_N2_groups
+main()이 호출하는 핵심 흐름(아래 번호는 main() 본문의 동일 번호 주석과 대응):
+  1) _load_all_scenarios        — (interaction.py 공용) train split 데이터 로드
+  2) build_groups/build_groups_shuffled — 시나리오별로 그룹 구성(v-ctrl이면 후자)
+  3) 저장                       — synergy_groups_{tag}.json
+  4) append_log_entry           — docs/phase1_lab/RESULTS_LOG.md에 실험 기록 자동 추가
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -72,80 +63,24 @@ except ImportError:  # pragma: no cover
 
 
 def _parse_args() -> argparse.Namespace:
-    # seg-axis/axis-config/data-dir/seg-data-dir 전부 parameters.py가 단일 소스다(2026-09-23 —
-    # 예전엔 여기 독자적으로 하드코딩된 값(ref_lag=0, min_pts/calibration/offset 없음, 경로도
-    # lag-0)이 parameters.py: ACTIVE_AXIS_CONFIG와 조용히 어긋나 있었다. 2026-09-29: 지역
-    # DEFAULT_* 재선언(interaction.py/kernel.py/train.py와 바이트 단위로 중복)을 없애고
-    # P.를 직접 참조).
+    # 2026-10-01: --out-dir 하나만 남기고 전부 제거 — 나머지는 이미 parameters.py가
+    # 단일 소스인 값의 CLI 통로였을 뿐이다(hi_correlation.py/interaction.py 정리와
+    # 동일 원칙). --out-dir만 예외인 이유는 모듈 docstring 참고(run_pipeline.py가
+    # 여러 스텝이 공유하는 실험 폴더를 넘겨주는 용도라 parameters.py로 복원 불가).
     p = argparse.ArgumentParser(description="Phase1 이전 HI 시너지 그룹 사전 구성 (다중공선성 배제 필터 통합)")
-    p.add_argument("--seg-axis", default=P.FIXED_SEG_AXIS)
-    p.add_argument("--axis-config", default=json.dumps(P.ACTIVE_AXIS_CONFIG))
-    p.add_argument("--data-dir", default=P.FIXED_CANONICAL_DATA_DIR, help="cycle pkl 경로")
-    p.add_argument("--seg-data-dir", default=P.FIXED_CANONICAL_SEG_DATA_DIR, help="seg pkl 경로")
-    p.add_argument("--datasets", nargs="+", default=P.FIXED_CANONICAL_DATASETS)
-    p.add_argument("--split-seed", type=int,
-                   default=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED)
-    p.add_argument("--max-group-size", type=int, default=P.ACTIVE_MAX_GROUP_SIZE,
-                   help=f"그룹당 최대 HI 개수 (parameters.py 기본 {P.ACTIVE_MAX_GROUP_SIZE})")
-    p.add_argument("--redundancy-threshold", type=float,
-                   default=P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD,
-                   help=f"|raw corr| >= 이 값이면 같은 그룹에 같이 못 들어감 (parameters.py 기본 "
-                        f"{P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD}, Stage4 클러스터 threshold와 동일 기준)")
-    p.add_argument("--min-partial-corr", type=float, default=P.FIXED_MIN_PARTIAL_CORR,
-                   help=f"그룹 성장을 멈추는 기준 — 편상관계수 절댓값이 이보다 작으면 더 안 채움 "
-                        f"(parameters.py 기본 {P.FIXED_MIN_PARTIAL_CORR})")
-    p.add_argument("--prefilter-top-m", type=int, default=P.FIXED_PREFILTER_TOP_M,
-                   help="그룹 성장 단계마다 정밀 검사(편상관계수)할 후보 수 상한 — "
-                        "먼저 단순 상관계수로 이 개수만 추린 뒤에만 정밀 계산 (시간복잡도 완화, "
-                        f"parameters.py 기본 {P.FIXED_PREFILTER_TOP_M})")
-    p.add_argument("--global-dedup", action="store_true", dest="global_dedup",
-                   default=P.FIXED_GLOBAL_DEDUP,
-                   help="v3 전용: 그룹 성장을 시작하기 전에 raw HI끼리 1:1로 |corr|>=threshold인 "
-                        "쌍을 먼저 정리한다(타깃과의 단순상관이 더 낮은 쪽을 후보군에서 제외, "
-                        "가장 상관 높았던 survivor에 사후 귀속). 이러면 그룹 성장 단계에 진입하는 "
-                        "survivor들끼리는 서로 |corr|<threshold가 항상 보장돼 그룹 간 다중공선성이 "
-                        "원리적으로 발생할 수 없다(구 버전의 순서 의존적 '브릿지 HI' 문제 해소). "
-                        "기본값 꺼짐 = 기존(v0/v1/v2) 동작과 100%% 동일.")
-    p.add_argument("--shuffle-from", default=None, dest="shuffle_from",
-                   help="v-ctrl 전용: 이 경로의 synergy_groups_*.json이 가진 시나리오별 "
-                        "그룹 크기 분포를 그대로 두고, 멤버만 무작위로 재배정한다 — "
-                        "진짜 편상관 기반 그리디 알고리즘(build_groups)은 아예 안 돌리고 "
-                        "건너뛴다. 최종 그룹 개수·크기가 참조 파일과 동일해서 커널 HI "
-                        "개수(=피처 개수)가 v2/v3와 정확히 같아진다(대조군 성립 조건).")
-    p.add_argument("--shuffle-seed", type=int, default=P.FIXED_SHUFFLE_SEED, dest="shuffle_seed",
-                   help=f"--shuffle-from 전용 무작위 배정 시드 (parameters.py 기본 "
-                        f"{P.FIXED_SHUFFLE_SEED})")
-    p.add_argument("--tag", required=True)
     p.add_argument("--out-dir", default=None, dest="out_dir",
                    help="산출물 저장 위치(기본: results/) — run_pipeline.py가 Step 9 학습 "
                         "run 폴더로 넘길 때 씀(2026-09-19).")
     return p.parse_args()
 
 
-def _load_all_scenarios(args) -> tuple:
-    import copy
-    from datasets.segment_dataset import build_datasets
-    from common.scenario import get_segmenter
-    from utils.hi_schema import get_hi_cols_for_seg
-
-    cfg = copy.deepcopy(P.P1_MODEL_CONFIG)
-    cfg["data"]["data_dir"] = args.data_dir
-    cfg["data"]["seg_data_dir"] = args.seg_data_dir
-    cfg["data"]["datasets"] = args.datasets
-    cfg["data"]["split_seed"] = args.split_seed
-
-    axis_cfg = json.loads(args.axis_config)
-    spec = get_segmenter(args.seg_axis, {args.seg_axis: axis_cfg}).get_spec()
-    train_ds, _val_ds, _test_ds, _norm = build_datasets(cfg, spec=spec)
-
-    x_all = train_ds.x_hi.numpy()
-    y_all = train_ds.target.numpy()
-    scen_idx_all = train_ds.scen_idx.numpy()
-    # 시나리오별 실제 HI 공식 이름 (get_hi_cols_for_seg는 seg 접미사만 다르고 순서는
-    # 항상 동일 — hi_schema.py 참고) — hi_00 같은 자리표시자 대신 diff_dqdv_area_chg_lo처럼
-    # 바로 읽을 수 있는 이름을 쓰기 위해 시나리오별로 하나씩 만들어둔다.
-    names_by_seg = {s: get_hi_cols_for_seg(name) for s, name in enumerate(spec.scenario_names)}
-    return x_all, y_all, scen_idx_all, spec, names_by_seg
+# _load_all_scenarios는 5_interaction/interaction.py(Step 5, synergy.py보다 먼저
+# 실행됨) 소유 — 파이프라인 실행 순서상 더 앞 단계가 "기반" 코드를 갖고 뒤 단계가
+# 가져다 쓰는 게 자연스럽다(2026-09-30, 원래는 반대 방향이었음 — synergy.py가
+# 정의하고 interaction.py가 가져다 썼는데, Step 번호와 의존 방향이 거꾸로였다는
+# 지적을 받아 교정). 중복 구현 금지 원칙은 그대로 유지.
+sys.path.insert(0, str(PROJECT_ROOT / "5_interaction"))
+from interaction import _load_all_scenarios  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -165,19 +100,15 @@ def _prune_redundant_raw(
     marg_signed: np.ndarray, raw_corr: np.ndarray, redundancy_threshold: float,
 ) -> tuple[list[int], dict[int, int]]:
     """그룹 성장을 시작하기 전에 raw HI끼리 |raw corr|>=threshold인 쌍을 미리 정리한다.
-
-    **연결요소(Union-Find) 방식** — 순차 그리디(각 HI를 "그 시점까지의 survivor 목록"하고만
-    비교)를 먼저 시도했으나 실측(전체 raw 데이터)에서 실패했다: survivor끼리는 0건으로
-    완벽했지만, 탈락한 HI를 사후에 최적 survivor의 그룹에 "귀속"시키는 단계에서 133건의
-    새 위반이 나왔다 — 탈락한 HI는 귀속될 때 그 survivor하고만 비교됐지, 최종적으로 다른
-    그룹에 남는 HI들과는 한 번도 비교된 적이 없었기 때문(같은 종류의 순서 의존적 누락이
-    한 단계 아래로 옮겨간 것). **완전한 해법은 전체 64개 HI로 그래프를 만들어(|raw
-    corr|>=threshold인 쌍끼리 변) 연결요소를 구하는 것** — 정의상 서로 다른 연결요소에
-    속한 두 HI 사이에는 (경유하는 다른 HI가 있든 없든) 직접 변이 존재하지 않으므로
-    |raw corr|<threshold가 무조건 보장된다. 각 연결요소 안에서 타깃과의 단순상관
-    |marg_signed|가 가장 큰 HI를 대표(survivor)로 뽑아 그룹 성장에 참여시키고, 나머지는
-    그 대표가 속한 최종 그룹에 귀속시킨다 — survivor든 귀속된 HI든 관계없이, 서로 다른
-    그룹에 속한 임의의 두 HI는 항상 서로 다른 연결요소 출신이라 |corr|<threshold가
+    
+    완전한 해법은 전체 64개 HI로 그래프를 만들어(|raw corr|>=threshold인 쌍끼리 변) 
+    연결요소를 구하는 것 — 정의상 서로 다른 연결요소에 속한 두 HI 사이에는 
+    (경유하는 다른 HI가 있든 없든) 직접 변이 존재하지 않으므로
+    |raw corr|<threshold가 무조건 보장된다. 
+    
+    각 연결요소 안에서 타깃과의 단순상관 |marg_signed|가 가장 큰 HI를 대표(survivor)로 뽑아 
+    그룹 성장에 참여시키고, 나머지는 그 대표가 속한 최종 그룹에 귀속시킨다 — survivor든 귀속된 HI든 관계없이, 
+    서로 다른 그룹에 속한 임의의 두 HI는 항상 서로 다른 연결요소 출신이라 |corr|<threshold가
     보장된다(생존자만이 아니라 전체 64개 HI에 대해 완전하다)."""
     n_hi = len(marg_signed)
     parent = list(range(n_hi))
@@ -366,21 +297,46 @@ def build_groups_shuffled(
 
 def main() -> None:
     args = _parse_args()
-    x_all, y_all, scen_idx_all, spec, names_by_seg = _load_all_scenarios(args)
+
+    # parameters.py에서 그대로 읽는 실행 파라미터 — --out-dir 외엔 전부 여기서 해석
+    # (main() 위 docstring 참고).
+    seg_axis = P.FIXED_SEG_AXIS
+    axis_config = json.dumps(P.ACTIVE_AXIS_CONFIG)
+    data_dir = P.FIXED_CANONICAL_DATA_DIR
+    seg_data_dir = P.FIXED_CANONICAL_SEG_DATA_DIR
+    datasets = P.FIXED_CANONICAL_DATASETS
+    split_seed = P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED
+    max_group_size = P.ACTIVE_MAX_GROUP_SIZE
+    redundancy_threshold = P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD
+    min_partial_corr = P.FIXED_MIN_PARTIAL_CORR
+    prefilter_top_m = P.FIXED_PREFILTER_TOP_M
+    global_dedup = P.FIXED_GLOBAL_DEDUP
+    shuffle_from = P.FIXED_SYNERGY_SHUFFLE_FROM
+    shuffle_seed = P.FIXED_SHUFFLE_SEED
+    tag = P.FIXED_SYNERGY_TAG or f"{P.ACTIVE_P1_TAG}_groups"
+
+    # 1) _load_all_scenarios — train split 데이터 로드(interaction.py 소유, 중복 구현 금지) —
+    # 여기 CLI는 없앴으므로 필요한 필드만 담은 SimpleNamespace를 대신 넘긴다.
+    _loader_args = SimpleNamespace(
+        data_dir=data_dir, seg_data_dir=seg_data_dir, datasets=datasets,
+        split_seed=split_seed, axis_config=axis_config, seg_axis=seg_axis,
+    )
+    x_all, y_all, scen_idx_all, spec, names_by_seg, _cell_ids = _load_all_scenarios(_loader_args)
 
     ref_report = None
-    if args.shuffle_from:
-        ref_report = json.loads(Path(args.shuffle_from).read_text(encoding="utf-8"))
-        print(f"[groups] v-ctrl 모드: {args.shuffle_from}의 그룹 크기 분포를 그대로 쓰고 "
-              f"멤버만 무작위 재배정(shuffle-seed={args.shuffle_seed})")
+    if shuffle_from:
+        ref_report = json.loads(Path(shuffle_from).read_text(encoding="utf-8"))
+        print(f"[groups] v-ctrl 모드: {shuffle_from}의 그룹 크기 분포를 그대로 쓰고 "
+            f"멤버만 무작위 재배정(shuffle-seed={shuffle_seed})")
 
-    report: dict = {"tag": args.tag, "max_group_size": args.max_group_size,
-                     "redundancy_threshold": args.redundancy_threshold,
-                     "min_partial_corr": args.min_partial_corr,
-                     "prefilter_top_m": args.prefilter_top_m,
-                     "global_dedup": args.global_dedup,
-                     "shuffle_from": args.shuffle_from, "shuffle_seed": args.shuffle_seed}
+    report: dict = {"tag": tag, "max_group_size": max_group_size,
+                    "redundancy_threshold": redundancy_threshold,
+                    "min_partial_corr": min_partial_corr,
+                    "prefilter_top_m": prefilter_top_m,
+                    "global_dedup": global_dedup,
+                    "shuffle_from": shuffle_from, "shuffle_seed": shuffle_seed}
 
+    # 2) build_groups/build_groups_shuffled — 시나리오별로 그룹 구성(v-ctrl이면 후자)
     all_group_sizes: list[int] = []
     for s, seg_name in enumerate(tqdm(spec.scenario_names, desc="시나리오별 그룹 구성", unit="scenario")):
         sel = scen_idx_all == s
@@ -395,16 +351,16 @@ def main() -> None:
                 continue
             ref_sizes = [len(g) for g in ref_report[f"seg_{s}_groups"]]
             groups = build_groups_shuffled(
-                x_scen, y_scen, ref_sizes, seed=args.shuffle_seed + s,
+                x_scen, y_scen, ref_sizes, seed=shuffle_seed + s,
             )
         else:
             groups = build_groups(
                 x_scen, y_scen,
-                max_group_size=args.max_group_size,
-                redundancy_threshold=args.redundancy_threshold,
-                min_partial_corr=args.min_partial_corr,
-                prefilter_top_m=args.prefilter_top_m,
-                global_dedup=args.global_dedup,
+                max_group_size=max_group_size,
+                redundancy_threshold=redundancy_threshold,
+                min_partial_corr=min_partial_corr,
+                prefilter_top_m=prefilter_top_m,
+                global_dedup=global_dedup,
             )
         groups.sort(key=lambda g: -abs(g["scores"][0]))  # seed 개별 중요도 순으로 그룹 정렬
 
@@ -432,18 +388,20 @@ def main() -> None:
             f"(2개 이상 묶인 그룹 {n_multi}개, 최대크기 {max(sizes)}, 평균크기 {np.mean(sizes):.2f})"
         )
 
+    # 3) 저장 — synergy_groups_{tag}.json
     out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"synergy_groups_{args.tag}.json"
+    out_path = out_dir / f"synergy_groups_{tag}.json"
     out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[groups] 저장: {out_path}")
 
+    # 4) append_log_entry — docs/phase1_lab/RESULTS_LOG.md에 실험 기록 자동 추가
     mean_size = float(np.mean(all_group_sizes)) if all_group_sizes else 0.0
     n_hi_total = len(all_group_sizes)
     n_groups_total = sum(1 for s in range(spec.n_scenarios) if f"seg_{s}_groups" in report
                           for _ in report[f"seg_{s}_groups"])
     append_log_entry(
-        tag=f"synergy_groups_{args.tag}",
+        tag=f"synergy_groups_{tag}",
         purpose="Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)",
         command=current_command_str(),
         result_files=[str(out_path)],
