@@ -4,25 +4,56 @@
 Phase1 학습 이전에 실행하는 "시너지 그룹" 사전 구성 스크립트 (기존 model_lib 코드 무변경).
 
 알고리즘 (시나리오별로 독립 수행):
-  1. 전체 HI를 target과의 단순 상관계수 |r| 내림차순으로 정렬 -> seed 순서.
+  0. raw HI끼리 |corr|>=--redundancy-threshold(기본 0.9)인 쌍을 전역적으로 사전 정리한다
+     (`_prune_redundant_raw`) — 연결요소마다 타깃과 가장 상관 큰 HI 하나만 "survivor"로
+     남겨 그룹 성장에 참여시키고, 나머지는 그 survivor가 최종적으로 속한 그룹에
+     "attached"로 사후 편입한다(시너지 성장 점수엔 기여 안 함). survivor끼리는 어느
+     그룹에 들어가든 항상 |corr|<threshold가 보장되므로 — 그룹 *간* 다중공선성까지
+     막는 유일한 장치(2026-10-02부로 상시 적용 — 하단 "2026-10-02" 단락 참고).
+  1. survivor를 target과의 단순 상관계수 |r| 내림차순으로 정렬 -> seed 순서.
   2. 아직 어느 그룹에도 안 속한 seed를 하나씩 꺼내 새 그룹 시작.
-  3. 그 그룹을 최대 --max-group-size(기본 4)까지 그리디로 채움:
-     a. 미배정 후보 중, 지금 그룹의 어느 멤버와도 |raw corr| < --redundancy-threshold(기본 0.9)인
-        것만 남김 (다중공선성 배제).
-     b. 그중 |raw corr(candidate, target)|가 큰 상위 --prefilter-top-m개만 추림 (저비용 필터).
-     c. 그 M개에 대해서만 편상관계수(그룹 멤버 전체로 target/후보를 회귀한 잔차의 상관)를 계산 —
-        가장 큰 후보를 채택. 채택 기준(|편상관계수|) < --min-partial-corr면 이 그룹은 그만 채움.
-  4. 모든 HI가 정확히 하나의 그룹에 배정될 때까지 반복 (약한 HI는 크기 1짜리 그룹으로 남음).
+  3. 그 그룹을 최대 --max-group-size(기본 4)까지 그리디로 채움(`_extend_group` 함수):
+     a. 미배정 survivor 중 |raw corr(candidate, target)|가 큰 상위 --prefilter-top-m개만
+        추림(저비용 필터) — 0단계가 이미 survivor 간 다중공선성을 보장하므로 여기서
+        따로 다시 거를 필요가 없다.
+     b. 그 M개에 대해서만 편상관계수(그룹 멤버 전체로 target/후보를 회귀한 잔차의 상관)를
+        계산 — 가장 큰 후보를 채택. 채택 기준(|편상관계수|) < --min-partial-corr면 이
+        그룹은 그만 채움.
+  4. 모든 survivor가 정확히 하나의 그룹에 배정될 때까지 반복(약한 survivor는 크기 1짜리
+     그룹으로 남음) — 마지막으로 attach_to의 HI들을 각자의 survivor가 속한 최종 그룹에
+     "attached"로 붙인다.
 
 2026-10-01: --out-dir를 제외한 모든 CLI 인자를 제거했다
 실행은 그냥:
     python 6_synergy/synergy.py
 
-main()이 호출하는 핵심 흐름(아래 번호는 main() 본문의 동일 번호 주석과 대응):
-  1) _load_all_scenarios        — (interaction.py 공용) train split 데이터 로드
-  2) build_groups/build_groups_shuffled — 시나리오별로 그룹 구성(v-ctrl이면 후자)
-  3) 저장                       — synergy_groups_{tag}.json
-  4) append_log_entry           — docs/phase1_lab/RESULTS_LOG.md에 실험 기록 자동 추가
+2026-10-02: main()을 단일 책임 원칙에 따라 서브함수로 분리했다(동작 변화 없는
+순수 구조 정리, kernel.py의 k1~k7/train.py의 t1~t7과 동일 원칙) —
+s1_load_params_and_config(out_dir/알고리즘 하이퍼파라미터 해석) ->
+s2_load_data(train split + v-ctrl 참조 파일 로드) ->
+(시나리오 루프) s3_build_groups_for_scenario(그리디 그룹 구성) ->
+s4_update_report_for_scenario(report dict 갱신 + 콘솔 요약) ->
+s5_save_report(synergy_groups_{tag}.json 저장) ->
+s6_log_results(RESULTS_LOG.md 기록).
+
+2026-10-02(알고리즘 변경, 순수 구조정리 아님): `global_dedup` 파라미터와
+parameters.py의 FIXED_GLOBAL_DEDUP(구 --global-dedup) 상수를 완전히 제거하고,
+`_prune_redundant_raw` 사전 가지치기(알고리즘 0단계)를 항상 적용하도록 고정했다.
+이전 기본값은 False(사전 가지치기 없음, 다중공선성 배제가 "지금 키우는 그룹
+멤버까지만" 보는 국소적 체크뿐이라 그룹 *간* 중복은 미검사)였는데 — docs상
+"v4 정식 레시피"는 True를 쓴다고 돼 있었지만 이 세션에서 실제로 돌린 모든 run은
+False로 실행됐었다(2026-09-21 당시 그 실측을 그대로 기본값으로 고정했던 것,
+parameters.py 주석 참고). 이번에 그 괴리를 "문서가 맞다"는 방향으로 해소하고
+True를 영구 고정값으로 승격했다. 이에 따라 `_extend_group`의 다중공선성 재검사
+(구 `eligible`의 raw_corr 체크)도 함께 삭제했다 — global_dedup이 항상 True가 되면
+survivor끼리는 이미 0단계에서 전역으로 |corr|<threshold가 보장되므로 그 체크는
+실질적으로 공집합/멤버 자신을 빼는 것 외엔 항상 참(no-op)이었다(증명은
+`_prune_redundant_raw`의 완전성 설명 참고). **주의**: 이건 순수 리팩토링이 아니라
+실제 그룹 구성 결과가 바뀌는 알고리즘 변경이다 — 이 변경 이전 이 문서/세션의 모든
+참조 수치(예: "전체 HI 119개 -> 그룹 119개", kernel.py의 "후보 90개 -> 최종 90개,
+평균 train R^2=0.3980")는 전부 global_dedup=False로 나온 값이라 재실행하면
+달라진다(약하게 상관된 HI들이 더 이상 독립 그룹원이 아니라 attached로 빠지면서
+그룹 구성 패턴 자체가 바뀜).
 """
 
 from __future__ import annotations
@@ -63,6 +94,7 @@ except ImportError:  # pragma: no cover
 
 
 def _parse_args() -> argparse.Namespace:
+    """CLI 파싱 — --out-dir 하나만 받는다(나머지 전부 parameters.py에서 읽음)."""
     # 2026-10-01: --out-dir 하나만 남기고 전부 제거 — 나머지는 이미 parameters.py가
     # 단일 소스인 값의 CLI 통로였을 뿐이다(hi_correlation.py/interaction.py 정리와
     # 동일 원칙). --out-dir만 예외인 이유는 모듈 docstring 참고(run_pipeline.py가
@@ -144,7 +176,49 @@ def _prune_redundant_raw(
     return survivors, attach_to
 
 
+def _extend_group(
+    members: list[int], scores: list[float], assigned: list[bool],
+    group_of: dict[int, int], gi: int, cfg: SimpleNamespace,
+) -> None:
+    """시드 하나로 시작된 그룹(members/scores)을 cfg.max_group_size까지 그리디하게 채운다 —
+    a) 저비용 사전 필터(|marginal corr| 상위 cfg.prefilter_top_m개만 추림) -> b) 정밀 검사
+    (그룹 전체로 conditioning한 편상관계수 최댓값 채택, cfg.min_partial_corr 문턱 미달이면
+    중단). 다중공선성 배제는 여기서 다시 검사하지 않는다 — `build_groups`가 그룹 성장을
+    시작하기 전에 `_prune_redundant_raw`로 이미 전역적으로 끝내놔서, 여기 남는 미배정
+    후보(survivor)끼리는 전부 |raw corr|<threshold가 보장된 상태다(2026-10-02: 예전엔
+    여기서도 raw_corr 재검사를 했었는데, 그게 no-op이었음을 확인하고 삭제 — 모듈
+    docstring 하단 참고). 더 채울 후보가 없어도 중단한다. members/scores/assigned/
+    group_of를 제자리에서 바꾸고 반환값은 없다(모듈 docstring 알고리즘 3번 항목과 대응)."""
+    n_hi = cfg.x.shape[1]
+    while len(members) < cfg.max_group_size:
+        group_x = cfg.x[:, members]
+
+        eligible = [c for c in range(n_hi) if not assigned[c]]
+        if not eligible:
+            break
+
+        # a) 저비용 사전 필터: 단순 |상관계수(candidate, target)| 상위 M개만 정밀 검사 대상으로
+        eligible.sort(key=lambda c: -abs(cfg.marg_signed[c]))
+        shortlist = eligible[:cfg.prefilter_top_m]
+
+        # b) 정밀 검사: 그룹 전체로 conditioning한 편상관계수
+        best_cand, best_score = None, cfg.min_partial_corr
+        for cand in shortlist:
+            pc = _partial_corr(cfg.y, cfg.x[:, cand], group_x)
+            if abs(pc) > abs(best_score):
+                best_score, best_cand = pc, cand
+
+        if best_cand is None:
+            break
+        members.append(int(best_cand))
+        scores.append(float(best_score))
+        assigned[best_cand] = True
+        group_of[best_cand] = gi
+
+
 def _partial_corr(y: np.ndarray, candidate: np.ndarray, group_x: np.ndarray) -> float:
+    """group_x(그룹 전체)로 conditioning한 뒤 candidate와 y의 편상관계수를 구한다(그룹이
+    비어있으면 그냥 단순 상관)."""
     if group_x.shape[1] == 0:
         c = np.corrcoef(candidate, y)[0, 1]
         return 0.0 if np.isnan(c) else float(c)
@@ -167,14 +241,16 @@ def build_groups(
     redundancy_threshold: float,
     min_partial_corr: float,
     prefilter_top_m: int,
-    global_dedup: bool = False,
 ) -> list[dict]:
-    """global_dedup=False(기존, v0/v1/v2 그대로): 다중공선성 배제를 "현재 그룹 멤버"까지만
-    검사한다 — 이미 완성된 다른 그룹의 멤버와 겹쳐도 못 잡는다(그룹 간 중복 미검사, 알려진
-    한계). global_dedup=True(v3.1): 그룹 성장을 시작하기 전에 `_prune_redundant_raw`로
-    raw HI끼리 1:1 다중공선성을 먼저 완전히 정리한다(사전 가지치기) — 그룹 성장에 참여하는
-    survivor들끼리는 이미 서로 |corr|<threshold가 보장되므로, 성장 단계 가드는 "현재 그룹
-    멤버만" 봐도 충분하다(v0/v1/v2와 동일한 저비용 체크로 되돌아감).
+    """시나리오 하나의 raw HI 전부를, 타깃 상관 큰 순서로 시드를 뽑아가며 그리디하게
+    "시너지 그룹"으로 묶는다(이 스크립트의 핵심 알고리즘 — 모듈 docstring 상단 참고).
+
+    그룹 성장을 시작하기 전에 `_prune_redundant_raw`로 raw HI끼리 1:1 다중공선성을 먼저
+    완전히 정리한다(사전 가지치기, 모듈 docstring 0단계) — 그룹 성장에 참여하는
+    survivor들끼리는 이미 서로 |corr|<threshold가 보장되므로, `_extend_group`은 성장
+    단계에서 다중공선성을 따로 검사할 필요가 없다(2026-10-02: 이 사전 가지치기는 과거엔
+    `global_dedup` 플래그로 껐다 켰다 할 수 있었는데, 지금은 상시 적용으로 고정됐다 —
+    하단 참고).
 
     **왜 사전 가지치기인가(v3.1, 구버전 시드-병합 방식을 대체)**: 이전 버전(v3)은 새 시드를
     뽑을 때 "이미 배정된 HI와 겹치면 그 그룹에 편입"하는 식이었는데, 이건 그룹이 형성되는
@@ -185,7 +261,8 @@ def build_groups(
     survivor들"로 확정해버리므로, 이 순서 의존성이 원리적으로 없다(완전성 증명은
     `_prune_redundant_raw` 참고). 탈락한 HI는 버리지 않고, 가장 상관 높았던 survivor가
     최종적으로 속한 그룹에 그룹 성장 종료 후 "attached"로 사후 편입한다(모델 입력 커버리지
-    유지, 단 시너지 성장 점수(Level1)에는 포함 안 시켜 지표를 오염시키지 않는다)."""
+    유지, 단 시너지 성장 점수(Level1)에는 포함 안 시켜 지표를 오염시키지 않는다).
+"""
     n_hi = x.shape[1]
 
     # 시드 순서: 단순 상관계수(부호 있음, 정렬은 절댓값 기준) — 필터에도 재사용
@@ -194,7 +271,7 @@ def build_groups(
         c = np.corrcoef(x[:, i], y)[0, 1]
         marg_signed[i] = 0.0 if np.isnan(c) else c
 
-    # 원시 상관행렬 — 다중공선성 배제 가드용 (한 번만 계산, O(N^2 * S))
+    # 원시 상관행렬 — _prune_redundant_raw 입력용 (한 번만 계산, O(N^2 * S))
     raw_corr = np.corrcoef(x, rowvar=False)
     raw_corr = np.nan_to_num(raw_corr, nan=0.0)
 
@@ -202,16 +279,21 @@ def build_groups(
     group_of: dict[int, int] = {}
     groups: list[dict] = []
 
-    attach_to: dict[int, int] = {}
-    if global_dedup:
-        survivors, attach_to = _prune_redundant_raw(marg_signed, raw_corr, redundancy_threshold)
-        for d in attach_to:
-            assigned[d] = True  # 성장 후보에서 제외 — 사후 편입 대상으로만 남김
-        survivor_set = set(survivors)
-        seed_order = [int(i) for i in np.argsort(-np.abs(marg_signed)) if int(i) in survivor_set]
-    else:
-        seed_order = list(np.argsort(-np.abs(marg_signed)))
+    # 사전 가지치기: raw HI끼리 |corr|>=threshold인 쌍을 미리 정리해 survivor만 그룹 성장에 참여
+    survivors, attach_to = _prune_redundant_raw(marg_signed, raw_corr, redundancy_threshold)
+    for d in attach_to:
+        assigned[d] = True  # 성장 후보에서 제외 — 사후 편입 대상으로만 남김
+    survivor_set = set(survivors)
+    seed_order = [int(i) for i in np.argsort(-np.abs(marg_signed)) if int(i) in survivor_set]
 
+    # _extend_group에 매 호출마다 똑같이 넘길 정적 설정값 — 한 번만 묶어서 구성
+    cfg = SimpleNamespace(
+        x=x, y=y, marg_signed=marg_signed,
+        max_group_size=max_group_size, prefilter_top_m=prefilter_top_m,
+        min_partial_corr=min_partial_corr,
+    )
+
+    # 그룹 성장 루프 — 시드 순서대로 꺼내 새 그룹 시작, _extend_group으로 그리디하게 채움
     for seed in seed_order:
         if assigned[seed]:
             continue
@@ -219,39 +301,10 @@ def build_groups(
         members = [int(seed)]
         scores = [float(marg_signed[seed])]
         assigned[seed] = True
-        group_of[seed] = len(groups)  # 이번에 append될 그룹의 인덱스(아래에서 실제 append)
+        gi = len(groups)  # 이번에 append될 그룹의 인덱스(아래에서 실제 append)
+        group_of[seed] = gi
 
-        while len(members) < max_group_size:
-            group_x = x[:, members]
-
-            # 다중공선성 배제: survivor끼리는 사전 가지치기로 이미 |corr|<threshold가
-            # 보장되므로(global_dedup=True) "현재 그룹 멤버만" 봐도 충분하다 —
-            # global_dedup=False(기존 v0/v1/v2)일 때도 원래부터 이 체크였으므로 동일 코드 경로.
-            eligible = [
-                c for c in range(n_hi)
-                if not assigned[c]
-                and all(abs(raw_corr[c, m]) < redundancy_threshold for m in members)
-            ]
-            if not eligible:
-                break
-
-            # b) 저비용 사전 필터: 단순 |상관계수(candidate, target)| 상위 M개만 정밀 검사 대상으로
-            eligible.sort(key=lambda c: -abs(marg_signed[c]))
-            shortlist = eligible[:prefilter_top_m]
-
-            # c) 정밀 검사: 그룹 전체로 conditioning한 편상관계수
-            best_cand, best_score = None, min_partial_corr
-            for cand in shortlist:
-                pc = _partial_corr(y, x[:, cand], group_x)
-                if abs(pc) > abs(best_score):
-                    best_score, best_cand = pc, cand
-
-            if best_cand is None:
-                break
-            members.append(int(best_cand))
-            scores.append(float(best_score))
-            assigned[best_cand] = True
-            group_of[best_cand] = len(groups)  # 이 그룹이 append될 인덱스(seed와 동일 규칙)
+        _extend_group(members, scores, assigned, group_of, gi, cfg)
 
         groups.append({"members": members, "scores": scores, "attached": []})
 
@@ -295,113 +348,128 @@ def build_groups_shuffled(
 # main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def s1_load_params_and_config() -> SimpleNamespace:
+    """1) 파라미터/경로 결정 — out_dir과 그룹 구성 알고리즘 하이퍼파라미터 전부를
+    parameters.py에서 해석한다(--out-dir 외엔 전부 여기서 읽음, 모듈 docstring 참고)."""
     args = _parse_args()
+    out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
 
-    # parameters.py에서 그대로 읽는 실행 파라미터 — --out-dir 외엔 전부 여기서 해석
-    # (main() 위 docstring 참고).
-    seg_axis = P.FIXED_SEG_AXIS
-    axis_config = json.dumps(P.ACTIVE_AXIS_CONFIG)
-    data_dir = P.FIXED_CANONICAL_DATA_DIR
-    seg_data_dir = P.FIXED_CANONICAL_SEG_DATA_DIR
-    datasets = P.FIXED_CANONICAL_DATASETS
-    split_seed = P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED
-    max_group_size = P.ACTIVE_MAX_GROUP_SIZE
-    redundancy_threshold = P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD
-    min_partial_corr = P.FIXED_MIN_PARTIAL_CORR
-    prefilter_top_m = P.FIXED_PREFILTER_TOP_M
-    global_dedup = P.FIXED_GLOBAL_DEDUP
-    shuffle_from = P.FIXED_SYNERGY_SHUFFLE_FROM
-    shuffle_seed = P.FIXED_SHUFFLE_SEED
-    tag = P.FIXED_SYNERGY_TAG or f"{P.ACTIVE_P1_TAG}_groups"
+    return SimpleNamespace(
+        out_dir=out_dir,
+        seg_axis=P.FIXED_SEG_AXIS,
+        axis_config=json.dumps(P.ACTIVE_AXIS_CONFIG),
+        data_dir=P.FIXED_CANONICAL_DATA_DIR,
+        seg_data_dir=P.FIXED_CANONICAL_SEG_DATA_DIR,
+        datasets=P.FIXED_CANONICAL_DATASETS,
+        split_seed=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED,
+        max_group_size=P.ACTIVE_MAX_GROUP_SIZE,
+        redundancy_threshold=P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD,
+        min_partial_corr=P.FIXED_MIN_PARTIAL_CORR,
+        prefilter_top_m=P.FIXED_PREFILTER_TOP_M,
+        shuffle_from=P.FIXED_SYNERGY_SHUFFLE_FROM,
+        shuffle_seed=P.FIXED_SHUFFLE_SEED,
+        tag=P.FIXED_SYNERGY_TAG or f"{P.ACTIVE_P1_TAG}_groups",
+    )
 
-    # 1) _load_all_scenarios — train split 데이터 로드(interaction.py 소유, 중복 구현 금지) —
-    # 여기 CLI는 없앴으므로 필요한 필드만 담은 SimpleNamespace를 대신 넘긴다.
+
+def s2_load_data(params: SimpleNamespace) -> SimpleNamespace:
+    """2) 데이터 로드 — train split(_load_all_scenarios, interaction.py 소유 — 중복 구현
+    금지) + v-ctrl 모드(shuffle_from 지정 시)면 참조 synergy_groups json도 함께 읽는다."""
+    # CLI를 없앴으므로 필요한 필드만 담은 SimpleNamespace를 _load_all_scenarios에 대신 넘긴다.
     _loader_args = SimpleNamespace(
-        data_dir=data_dir, seg_data_dir=seg_data_dir, datasets=datasets,
-        split_seed=split_seed, axis_config=axis_config, seg_axis=seg_axis,
+        data_dir=params.data_dir, seg_data_dir=params.seg_data_dir, datasets=params.datasets,
+        split_seed=params.split_seed, axis_config=params.axis_config, seg_axis=params.seg_axis,
     )
     x_all, y_all, scen_idx_all, spec, names_by_seg, _cell_ids = _load_all_scenarios(_loader_args)
 
     ref_report = None
-    if shuffle_from:
-        ref_report = json.loads(Path(shuffle_from).read_text(encoding="utf-8"))
-        print(f"[groups] v-ctrl 모드: {shuffle_from}의 그룹 크기 분포를 그대로 쓰고 "
-            f"멤버만 무작위 재배정(shuffle-seed={shuffle_seed})")
+    if params.shuffle_from:
+        ref_report = json.loads(Path(params.shuffle_from).read_text(encoding="utf-8"))
+        print(f"[groups] v-ctrl 모드: {params.shuffle_from}의 그룹 크기 분포를 그대로 쓰고 "
+              f"멤버만 무작위 재배정(shuffle-seed={params.shuffle_seed})")
 
-    report: dict = {"tag": tag, "max_group_size": max_group_size,
-                    "redundancy_threshold": redundancy_threshold,
-                    "min_partial_corr": min_partial_corr,
-                    "prefilter_top_m": prefilter_top_m,
-                    "global_dedup": global_dedup,
-                    "shuffle_from": shuffle_from, "shuffle_seed": shuffle_seed}
+    return SimpleNamespace(
+        x_all=x_all, y_all=y_all, scen_idx_all=scen_idx_all, spec=spec,
+        names_by_seg=names_by_seg, ref_report=ref_report,
+    )
 
-    # 2) build_groups/build_groups_shuffled — 시나리오별로 그룹 구성(v-ctrl이면 후자)
-    all_group_sizes: list[int] = []
-    for s, seg_name in enumerate(tqdm(spec.scenario_names, desc="시나리오별 그룹 구성", unit="scenario")):
-        sel = scen_idx_all == s
-        x_scen, y_scen = x_all[sel], y_all[sel]
-        if x_scen.shape[0] < 20:
-            tqdm_write(f"[groups] {seg_name}: 표본 부족({x_scen.shape[0]}) — 스킵")
-            continue
 
-        if ref_report is not None:
-            if f"seg_{s}_groups" not in ref_report:
-                tqdm_write(f"[groups] {seg_name}: 참조 파일에 없음 — 스킵")
-                continue
-            ref_sizes = [len(g) for g in ref_report[f"seg_{s}_groups"]]
-            groups = build_groups_shuffled(
-                x_scen, y_scen, ref_sizes, seed=shuffle_seed + s,
-            )
-        else:
-            groups = build_groups(
-                x_scen, y_scen,
-                max_group_size=max_group_size,
-                redundancy_threshold=redundancy_threshold,
-                min_partial_corr=min_partial_corr,
-                prefilter_top_m=prefilter_top_m,
-                global_dedup=global_dedup,
-            )
-        groups.sort(key=lambda g: -abs(g["scores"][0]))  # seed 개별 중요도 순으로 그룹 정렬
+def s3_build_groups_for_scenario(
+    params: SimpleNamespace, data: SimpleNamespace, s: int, seg_name: str,
+) -> list[dict] | None:
+    """3) 시나리오 하나에 대해 그룹을 구성한다 — v-ctrl(ref_report 있음)이면
+    build_groups_shuffled, 아니면 build_groups(이 스크립트의 핵심 그리디 알고리즘)를 쓴다.
+    표본이 부족하거나 참조 파일에 이 시나리오가 없으면 None을 돌려줘 이 시나리오를 스킵시킨다."""
+    sel = data.scen_idx_all == s
+    x_scen, y_scen = data.x_all[sel], data.y_all[sel]
+    if x_scen.shape[0] < 20:
+        tqdm_write(f"[groups] {seg_name}: 표본 부족({x_scen.shape[0]}) — 스킵")
+        return None
 
-        report[f"seg_{s}_seg_name"] = seg_name
-        report[f"seg_{s}_groups"] = [g["members"] for g in groups]
-        report[f"seg_{s}_group_names"] = [[names_by_seg[s][i] for i in g["members"]] for g in groups]
-        report[f"seg_{s}_group_scores"] = [g["scores"] for g in groups]
-        # v3.1 전용(global_dedup): 사전 가지치기로 탈락해 이 그룹에 사후 편입된 HI —
-        # 시너지 성장(Level1)과 커널 피처 구성(kernel.py) 둘 다에
-        # 안 쓰인다. 다중공선성 장부(이 HI가 어느 그룹 소속인지)와 x_hi 자체의 독립 게이트
-        # 커버리지 용도로만 남겨둔다 — members와 합치면 그룹 크기가 2~29개로 들쭉날쭉해져
-        # Level2 gap 비교의 교란변수가 된다는 게 실측으로 확인돼(docs/260827_RESULTS.md
-        # "v3 커널 피처 재생성" 절) 합치지 않는 쪽으로 확정됐다. global_dedup=False면
-        # 항상 빈 리스트.
-        report[f"seg_{s}_group_attached"] = [g.get("attached", []) for g in groups]
-        report[f"seg_{s}_group_attached_names"] = [
-            [names_by_seg[s][i] for i in g.get("attached", [])] for g in groups
-        ]
-
-        sizes = [len(g["members"]) for g in groups]
-        all_group_sizes += sizes
-        n_multi = sum(1 for sz in sizes if sz > 1)
-        tqdm_write(
-            f"[groups] {seg_name}: HI {x_scen.shape[1]}개 -> 그룹 {len(groups)}개 "
-            f"(2개 이상 묶인 그룹 {n_multi}개, 최대크기 {max(sizes)}, 평균크기 {np.mean(sizes):.2f})"
+    if data.ref_report is not None:
+        if f"seg_{s}_groups" not in data.ref_report:
+            tqdm_write(f"[groups] {seg_name}: 참조 파일에 없음 — 스킵")
+            return None
+        ref_sizes = [len(g) for g in data.ref_report[f"seg_{s}_groups"]]
+        groups = build_groups_shuffled(x_scen, y_scen, ref_sizes, seed=params.shuffle_seed + s)
+    else:
+        groups = build_groups(
+            x_scen, y_scen,
+            max_group_size=params.max_group_size,
+            redundancy_threshold=params.redundancy_threshold,
+            min_partial_corr=params.min_partial_corr,
+            prefilter_top_m=params.prefilter_top_m,
         )
+    groups.sort(key=lambda g: -abs(g["scores"][0]))  # seed 개별 중요도 순으로 그룹 정렬
+    return groups
 
-    # 3) 저장 — synergy_groups_{tag}.json
-    out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"synergy_groups_{tag}.json"
+
+def s4_update_report_for_scenario(
+    report: dict, data: SimpleNamespace, s: int, seg_name: str, groups: list[dict],
+) -> list[int]:
+    """4) report dict 갱신 — 이 시나리오의 그룹/이름/점수/attached를 report에 기록하고
+    콘솔 요약을 찍은 뒤, 전체 평균 계산에 쓸 이 시나리오의 그룹 크기 리스트를 반환한다."""
+    names_by_seg = data.names_by_seg
+    report[f"seg_{s}_seg_name"] = seg_name
+    report[f"seg_{s}_groups"] = [g["members"] for g in groups]
+    report[f"seg_{s}_group_names"] = [[names_by_seg[s][i] for i in g["members"]] for g in groups]
+    report[f"seg_{s}_group_scores"] = [g["scores"] for g in groups]
+
+    # 사전 가지치기(_prune_redundant_raw)로 탈락해 이 그룹에 사후 편입된 HI —
+    # 시너지 성장(Level1)과 커널 피처 구성(kernel.py) 둘 다에 안 쓰인다.
+    report[f"seg_{s}_group_attached"] = [g.get("attached", []) for g in groups]
+    report[f"seg_{s}_group_attached_names"] = [
+        [names_by_seg[s][i] for i in g.get("attached", [])] for g in groups
+    ]
+
+    sizes = [len(g["members"]) for g in groups]
+    n_multi = sum(1 for sz in sizes if sz > 1)
+    tqdm_write(
+        f"[groups] {seg_name}: HI {len(names_by_seg[s])}개 -> 그룹 {len(groups)}개 "
+        f"(2개 이상 묶인 그룹 {n_multi}개, 최대크기 {max(sizes)}, 평균크기 {np.mean(sizes):.2f})"
+    )
+    return sizes
+
+
+def s5_save_report(params: SimpleNamespace, report: dict) -> Path:
+    """5) 저장 — synergy_groups_{tag}.json."""
+    params.out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = params.out_dir / f"synergy_groups_{params.tag}.json"
     out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[groups] 저장: {out_path}")
+    return out_path
 
-    # 4) append_log_entry — docs/phase1_lab/RESULTS_LOG.md에 실험 기록 자동 추가
+
+def s6_log_results(
+    params: SimpleNamespace, report: dict, spec, all_group_sizes: list[int], out_path: Path,
+) -> None:
+    """6) RESULTS_LOG.md에 실험 기록 자동 추가."""
     mean_size = float(np.mean(all_group_sizes)) if all_group_sizes else 0.0
     n_hi_total = len(all_group_sizes)
     n_groups_total = sum(1 for s in range(spec.n_scenarios) if f"seg_{s}_groups" in report
                           for _ in report[f"seg_{s}_groups"])
     append_log_entry(
-        tag=f"synergy_groups_{tag}",
+        tag=f"synergy_groups_{params.tag}",
         purpose="Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)",
         command=current_command_str(),
         result_files=[str(out_path)],
@@ -412,6 +480,29 @@ def main() -> None:
             "함께 보면 이 그룹 구조가 타당한지 교차검증 가능."
         ),
     )
+
+
+def main() -> None:
+    """시나리오별로 HI 시너지 그룹을 구성해 synergy_groups_{tag}.json으로 저장한다."""
+    params = s1_load_params_and_config()  # 1) 파라미터/경로 결정
+    data = s2_load_data(params)  # 2) train split 로드 (+ v-ctrl 참조 파일)
+
+    report: dict = {"tag": params.tag, "max_group_size": params.max_group_size,
+                    "redundancy_threshold": params.redundancy_threshold,
+                    "min_partial_corr": params.min_partial_corr,
+                    "prefilter_top_m": params.prefilter_top_m,
+                    "shuffle_from": params.shuffle_from, "shuffle_seed": params.shuffle_seed}
+
+    all_group_sizes: list[int] = []
+    for s, seg_name in enumerate(tqdm(data.spec.scenario_names, desc="시나리오별 그룹 구성", unit="scenario")):
+        groups = s3_build_groups_for_scenario(params, data, s, seg_name)  # 3) 시나리오 하나 그룹 구성
+        if groups is None:
+            continue
+        sizes = s4_update_report_for_scenario(report, data, s, seg_name, groups)  # 4) report 갱신 + 요약 출력
+        all_group_sizes += sizes
+
+    out_path = s5_save_report(params, report)  # 5) 저장
+    s6_log_results(params, report, data.spec, all_group_sizes, out_path)  # 6) RESULTS_LOG 기록
 
 
 if __name__ == "__main__":

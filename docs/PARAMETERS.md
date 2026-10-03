@@ -51,7 +51,7 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 | `ACTIVE_INTERACTION_JSON` | None(자동) | `--interaction-json` | 8~9 |
 | `ACTIVE_COMBINED_REDUNDANCY_JSON` | None(자동) | `--combined-redundancy-json` | 8~9 |
 | `ACTIVE_MAX_GROUP_SIZE` | 4 | `--max-group-size` | 6 |
-| `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD` | 0.9 | `--synergy-redundancy-threshold` | 6~7 |
+| `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD` | 0.9 | `--synergy-redundancy-threshold` | 6 |
 | `ACTIVE_MAX_EPOCHS` | None | `--max-epochs` | 8 |
 | `ACTIVE_PATIENCE` | None | `--patience` | 8 |
 | `ACTIVE_BATCH_SIZE` | None | `--batch-size` | 8 |
@@ -67,7 +67,7 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 `ACTIVE_AXIS_CONFIG`(정식 q_frac_ref 축 설정, 통째로 교체만 가능 — 부분 오버라이드 없음):
 `n1=0.35, n2=0.20, n_samples=2, ref_lag=1, noise_amp=0.03, noise_mode="ou", noise_period_cycles=200, min_pts=5, calibration_period=100, offset_amp=0.005`
 
-### `FIXED_*` — CLI 노출 없음, 값 자체를 바꾸려면 파일 직접 수정 (18개)
+### `FIXED_*` — CLI 노출 없음, 값 자체를 바꾸려면 파일 직접 수정 (17개)
 
 | 상수 | 값 | 의미 |
 |---|---|---|
@@ -80,7 +80,6 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 | `FIXED_INTERACTION_MIN_EFFECT_SIZE` | 0.1 | Step5 effect-size 임계값 |
 | `FIXED_MIN_PARTIAL_CORR` | 0.02 | Step6 그룹 성장 중단 기준 |
 | `FIXED_PREFILTER_TOP_M` | 15 | Step6 편상관 정밀계산 전 사전필터 폭 |
-| `FIXED_GLOBAL_DEDUP` | False | Step6 `--global-dedup`(실측 기본 동작 고정) |
 | `FIXED_SHUFFLE_SEED` | `FIXED_DEFAULT_SEED` | Step5~6 `--shuffle-from` 대조군 전용 시드 |
 | `FIXED_KERNEL_ALPHA` / `_GAMMA` / `_N_COMPONENTS` | 1.0 / None / 100 | Step7 Ridge/Nystroem 하이퍼파라미터 |
 | `FIXED_KERNEL_MAX_FEATURES` | None(무제한) | Step7 시나리오별 커널 피처 쿼터 |

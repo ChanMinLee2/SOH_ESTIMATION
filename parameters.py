@@ -162,7 +162,7 @@ FIXED_INTERACTION_MIN_SEGS_PER_CELL = 10 # 셀 단위 std_r/시나리오별 평�
                                          # "이 셀, 이 시나리오" 세그먼트 수가 이 값
                                          # 미만이면 그 셀 전체를 제외(추정이 불안정해짐
                                          # 방지).
-FIXED_INTERACTION_MIN_EFFECT_SIZE = 0.1 # 구 --interaction-min-effect-size — Cohen(1988)
+FIXED_INTERACTION_MIN_EFFECT_SIZE = 0.2 # 구 --interaction-min-effect-size — Cohen(1988)
                                          # 상관계수 효과크기 관행 중 "작음(small)" 문턱.
                                          # 2026-09-30엔 전체 풀링 std_r_across_scenarios에
                                          # 비교해서 근거가 약했다(풀링이 셀 간 베이스라인
@@ -188,11 +188,13 @@ FIXED_INTERACTION_SHUFFLE_FROM = None   # 구 --shuffle-from (v4-ctrl 전용 —
 # ── Step 7(HI 시너지 그룹 구성) ──────────────────────────────────────────
 FIXED_MIN_PARTIAL_CORR = 0.02           # 구 --min-partial-corr
 FIXED_PREFILTER_TOP_M = 15              # 구 --prefilter-top-m
-FIXED_GLOBAL_DEDUP = False              # 구 --global-dedup — ⚠️ docs 상 "v4 정식 레시피"는
-                                         # True를 썼다고 돼 있으나, 이 세션에 실제로 돌린
-                                         # noscen/scen/HI63/64/66 run은 전부 이 플래그를
-                                         # 안 줘서 False로 실행됐다 — 실측 동작을 그대로
-                                         # 기본값으로 고정(2026-09-21).
+# FIXED_GLOBAL_DEDUP(구 --global-dedup)은 2026-10-02에 제거했다 — 예전엔 False가
+# 기본값이라 raw HI 사전 가지치기(_prune_redundant_raw)가 꺼져 있었는데(docs상
+# "v4 정식 레시피"는 True를 쓴다고 돼 있었지만 이 세션에 실제로 돌린 run은 전부
+# False로 실행됐었음, 2026-09-21 그 실측을 기본값으로 고정했던 이력), 이번에
+# 그 괴리를 "문서가 맞다"는 방향으로 해소하고 사전 가지치기를 상시 적용으로
+# synergy.py에 고정했다(6_synergy/synergy.py 모듈 docstring 참고) — 더 이상
+# 끄고 켤 수 있는 옵션이 아니므로 파라미터 자체를 삭제.
 FIXED_SHUFFLE_SEED = FIXED_DEFAULT_SEED # 구 --shuffle-seed (v-ctrl 무작위 대조군 전용 —
                                          # synergy.py/interaction.py 공용,
                                          # 2026-09-24 하드코딩 기본값에서 이전, 2026-09-25
@@ -232,7 +234,7 @@ FIXED_TRAIN_CYCLE_FRAC = None           # 구 --train-cycle-frac (None=1.0, 전�
 FIXED_BETA_MIN = None                   # 구 --beta-min (None=train.py 기본 0.1)
 FIXED_L0_WARMUP_EPOCHS_OVERRIDE = None  # 구 --l0-warmup-epochs-override (None=yaml 값)
 FIXED_L0_NORM_CONSTANT = None           # 구 --l0-norm-constant (None=n_scenarios로 나눔)
-FIXED_VAL_RMSE_EPSILON = 0.0005         # 구 --val-rmse-epsilon (체크포인트 선택 기준, 2026-09-18)
+FIXED_VAL_RMSE_EPSILON = 0.00005         # 구 --val-rmse-epsilon (체크포인트 선택 기준, 2026-09-18)
 FIXED_DEVICE = None                     # 구 --device (None=auto) — Step 8/9 공용
 FIXED_CHARGE_PROBE_M = None             # 2026-10-02 신설, 구 train.py --charge-m —
                                          # run_pipeline.py가 넘긴 적 없는 수동 ablation

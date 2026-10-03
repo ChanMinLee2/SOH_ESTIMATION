@@ -9,30 +9,11 @@ raw HI는 대체하지 않고 그대로 둔 채 별도 블록으로 "추가"한�
 scr_model.py의 독립 게이트 scen_kernel_gates에 연결 — 설계 배경/이력은
 docs/260820_RESULTS.md 참고).
 
-이 스크립트가 하는 다중공선성 관리는 이제 3단계다(2026-09-18에 3차 추가):
-  1. (synergy.py가 이미 함) 그룹 *내부* raw HI 중복 배제.
-  2. 이 스크립트: 커널 HI *끼리*(시나리오 다른 그룹끼리도 원본 HI가 겹치면 커널값이
-     비슷할 수 있어 전체 train pooled로 재검사) 다중공선성 배제(--redundancy-threshold).
-  3. (신규) raw HI(64) + 이 시나리오가 만든 커널 HI를 합쳐서, **시나리오별로**(2차와 달리
-     pooled 아님) |r|>=0.95인 각 쌍의 "패자"를 정해 제거한다 — degree(다른 HI와도
-     0.95를 넘는 관계 개수)가 더 많은 쪽 우선 제거, 동일하면 타깃(SOH) 상관계수가 더
-     낮은 쪽 제거 — `kernel_group_features_{tag}_combined_redundancy.json`으로 저장,
-     train.py --combined-redundancy-json이 실제 배제를 적용한다.
-  raw HI와 그걸로 만든 커널 HI 사이의 다중공선성은 이제 3차에서 검사한다(과거엔 검사하지
-  않던 알려진 한계였음, docs/260820_RESULTS.md 참고).
-
-  또한 2026-09-18부터 x_kernel 소비 방식이 바뀌었다(train.py의
-  _apply_kernel_features, 요구사항1) — 커널 HI 컬럼은 이제 "그 컬럼을 만든 시나리오"의
-  행에만 값이 채워지고 다른 시나리오 행에서는 항상 0이다(전에는 모든 행에 모든 커널
-  모델을 적용해 다른 시나리오용 모델을 분포 밖(OOD) 입력에 적용한 의미 없는 값이 섞여
-  있었다). 이 pkl의 mean/std(정규화 통계)도 그에 맞춰 own-scenario 행만으로 계산한다
-  (2차 다중공선성 배제 판단 자체는 여전히 pooled kernel_vals를 씀 — 그 부분은 변경 없음).
-
 출력 1(pickle, JSON이 아닌 이유: sklearn 파이프라인 객체를 그대로 저장해 재적용해야 함):
   {
     "tag": str, "n_features": int,
     "alpha": float, "gamma": float|None, "n_components": int,
-    "redundancy_threshold": float, "max_features": int|None,
+    "max_features": int|None,
     "features": [
       {"name": str, "scenario": str, "members": [raw HI idx...],
        "member_names": [...], "train_r2": float, "model": Pipeline,
@@ -54,19 +35,21 @@ docs/260820_RESULTS.md 참고).
 실행은 그냥:
     python 7_kernel/kernel.py
 
-2026-10-02: main()을 단일 책임 원칙에 따라 8개 서브함수로 분리했다(동작 변화
-없는 순수 구조 정리, train.py의 t1~t7과 동일 원칙) —
+2026-10-02: main()을 단일 책임 원칙에 따라 서브함수로 분리했다(동작 변화 없는
+순수 구조 정리, train.py의 t1~t7과 동일 원칙) —
 k1_resolve_params_and_paths(out_dir/tag/synergy-groups-json 등 경로 해석) ->
 k2_load_data(train split + HI 카테고리 비용 + synergy.py 산출물 로드) ->
 k3_fit_group_kernels(시나리오별 그룹 -> Nystroem+Ridge 커널 HI 피팅) ->
-k4_dedupe_kernels(2차 배제 — 커널끼리 pooled 상관) ->
-k5_apply_feature_cap(max-features 캡, 시나리오별 라운드로빈) ->
-k6_compute_normalization(최종 채택된 커널 HI의 own-scenario mean/std) ->
-k7_build_combined_redundancy(3차 배제 — raw+kernel 결합, 시나리오별) ->
-k8_save_results(pkl/json 저장 + 콘솔 요약 + RESULTS_LOG 기록). 각 단계는
+k4_apply_feature_cap(max-features 캡, 시나리오별 라운드로빈) ->
+k5_compute_normalization(최종 채택된 커널 HI의 own-scenario mean/std) ->
+k6_build_combined_redundancy(raw+kernel 결합 다중공선성 배제, 시나리오별) ->
+k7_save_results(pkl/json 저장 + 콘솔 요약 + RESULTS_LOG 기록). 각 단계는
 SimpleNamespace로 다음 단계에 필요한 값만 넘기고, `candidates`/`rejected`/
 `final` 같은 리스트는 여러 단계가 같은 리스트 객체를 참조로 공유하며 그 자리에서
 append/mutate한다(원래 main() 하나였을 때와 동일한 공유 방식, 복사 없음).
+2026-10-02: 분리 직후 바로 뒤이어 "커널끼리 pooled 재검사" 단계(당시 k4)를
+삭제해서 지금은 7개뿐이다(바로 위 2026-10-02(삭제) 단락 참고) — 번호가 비는 걸
+막기 위해 삭제 이후 함수들을 전부 한 칸씩 당겨 재번호매김했다.
 """
 
 from __future__ import annotations
@@ -117,7 +100,7 @@ def _parse_args() -> argparse.Namespace:
     # 정리와 동일 원칙). --out-dir만 예외인 이유는 모듈 docstring 참고.
     p = argparse.ArgumentParser(
         description="시너지 그룹(크기 2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, "
-                     "추가로 넣음) + 2차 다중공선성 배제 + 정규화 통계 저장"
+                     "추가로 넣음) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제"
     )
     p.add_argument("--out-dir", default=None, dest="out_dir",
                     help="산출물 저장 위치(기본: results/) — run_pipeline.py가 Step 8 학습 "
@@ -197,7 +180,7 @@ def _raw_conditioned_partial_corr(y: np.ndarray, kernel_pred: np.ndarray, x_grou
 def _round_robin_select(
     kept: list[int], candidates: list[dict], cap: int,
 ) -> list[int]:
-    """시나리오별 쿼터 라운드로빈으로 kept(다중공선성 배제를 통과한 후보 인덱스)에서
+    """시나리오별 쿼터 라운드로빈으로 kept(후보 인덱스 리스트)에서
     최대 cap개를 고른다. 전역 train_r2 랭킹으로 한 번에 자르면 특정 시나리오의 그룹이
     전부 R^2가 낮아 최종본에 하나도 안 남을 수 있다(synergy.py로 어렵게 찾은
     그 시나리오 그룹 정보가 통째로 버려짐) — 시나리오마다 "남은 후보 중 최선" 하나씩
@@ -231,7 +214,6 @@ def k1_resolve_params_and_paths() -> SimpleNamespace:
     alpha = P.FIXED_KERNEL_ALPHA
     gamma = P.FIXED_KERNEL_GAMMA
     n_components = P.FIXED_KERNEL_N_COMPONENTS
-    redundancy_threshold = P.ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD
     max_features = P.FIXED_KERNEL_MAX_FEATURES
     min_raw_partial_corr = P.FIXED_MIN_RAW_PARTIAL_CORR
     combined_redundancy_threshold = P.FIXED_COMBINED_REDUNDANCY_THRESHOLD
@@ -244,7 +226,7 @@ def k1_resolve_params_and_paths() -> SimpleNamespace:
 
     return SimpleNamespace(
         out_dir=out_dir, split_seed=split_seed, alpha=alpha, gamma=gamma,
-        n_components=n_components, redundancy_threshold=redundancy_threshold,
+        n_components=n_components,
         max_features=max_features, min_raw_partial_corr=min_raw_partial_corr,
         combined_redundancy_threshold=combined_redundancy_threshold,
         tag=tag, synergy_groups_json=synergy_groups_json,
@@ -294,7 +276,7 @@ def k3_fit_group_kernels(params: SimpleNamespace, data: SimpleNamespace) -> Simp
         n_fit = 0
         n_skipped_raw_dup = 0
         for gi, members in enumerate(groups):
-            # v3.1(global_dedup) 산출물의 "attached"(사전 가지치기로 탈락해 이 그룹에
+            # synergy.py(_prune_redundant_raw)의 "attached"(사전 가지치기로 탈락해 이 그룹에
             # 사후 편입된 HI)는 여기서 일부러 안 쓴다 — attached는 대표와 항상 |raw
             # corr|>=0.9인 거의 동일 신호라 커널 입력에 추가해도 새 정보가 거의 없는 반면,
             # 그룹마다 커널 입력 폭이 2~29개로 들쭉날쭉해져 (a) RBF 커널이 서로 거의
@@ -347,82 +329,46 @@ def k3_fit_group_kernels(params: SimpleNamespace, data: SimpleNamespace) -> Simp
     return SimpleNamespace(candidates=candidates, rejected=rejected, n_skipped_size1=n_skipped_size1)
 
 
-def k4_dedupe_kernels(params: SimpleNamespace, data: SimpleNamespace, fit: SimpleNamespace) -> SimpleNamespace:
-    """4) 2차 다중공선성 배제 — 전체 train(모든 시나리오 pooled)에서 커널 값끼리 상관을 계산해
-    임계값 이상이면 train_r2가 낮은 쪽을 fit.rejected로 보낸다(그룹 내부 중복은 synergy.py가
-    이미 걸렀지만, 시나리오가 다른 그룹끼리는 원본 HI가 겹치면 커널 변환 후에도 비슷한 값이
-    나올 수 있어 여기서 다시 검사)."""
-    kernel_vals = np.zeros((data.x_all.shape[0], len(fit.candidates)), dtype=np.float64)
-    for j, c in enumerate(fit.candidates):
-        kernel_vals[:, j] = c["model"].predict(data.x_all[:, c["members"]])
-
-    corr = np.corrcoef(kernel_vals, rowvar=False)
-    corr = np.nan_to_num(corr, nan=0.0)
-
-    order = sorted(range(len(fit.candidates)), key=lambda i: -fit.candidates[i]["train_r2"])
-    kept: list[int] = []
-    for i in order:
-        conflict = [k for k in kept if abs(corr[i, k]) >= params.redundancy_threshold]
-        if not conflict:
-            kept.append(i)
-        else:
-            worst = max(conflict, key=lambda k: abs(corr[i, k]))
-            c = fit.candidates[i]
-            fit.rejected.append({
-                "name": c["name"], "scenario": c["scenario"], "member_names": c["member_names"],
-                "train_r2": c["train_r2"], "reason": "kernel_kernel_dedup",
-                "detail": f"커널끼리 |corr|={abs(corr[i, worst]):.4f}>={params.redundancy_threshold} "
-                          f"vs 이미 채택된 {fit.candidates[worst]['name']}({fit.candidates[worst]['member_names']})",
-            })
-    n_dropped_corr = len(fit.candidates) - len(kept)
-
-    return SimpleNamespace(kernel_vals=kernel_vals, kept=kept, n_dropped_corr=n_dropped_corr)
-
-
-def k5_apply_feature_cap(params: SimpleNamespace, fit: SimpleNamespace, dedup: SimpleNamespace) -> SimpleNamespace:
-    """5) max-features 캡 적용 — 지정됐으면 시나리오별 라운드로빈으로 상한까지만 남기고
-    나머지는 fit.rejected에 쿼터초과로 기록한다(안 주면 다중공선성 배제를 통과한 건 전부 유지)."""
-    cap = params.max_features if params.max_features is not None else len(dedup.kept)
-    final_idx = _round_robin_select(dedup.kept, fit.candidates, cap)
-    n_dropped_cap = max(0, len(dedup.kept) - len(final_idx))
+def k4_apply_feature_cap(params: SimpleNamespace, fit: SimpleNamespace) -> SimpleNamespace:
+    """4) max-features 캡 적용 — 지정됐으면 시나리오별 라운드로빈으로 상한까지만 남기고
+    나머지는 fit.rejected에 쿼터초과로 기록한다(안 주면 candidates 전부 유지)."""
+    all_idx = list(range(len(fit.candidates)))
+    cap = params.max_features if params.max_features is not None else len(all_idx)
+    final_idx = _round_robin_select(all_idx, fit.candidates, cap)
+    n_dropped_cap = max(0, len(all_idx) - len(final_idx))
     final = [fit.candidates[i] for i in final_idx]
-    for i in dedup.kept:
+    for i in all_idx:
         if i not in final_idx:
             c = fit.candidates[i]
             fit.rejected.append({
                 "name": c["name"], "scenario": c["scenario"], "member_names": c["member_names"],
                 "train_r2": c["train_r2"], "reason": "max_features_quota",
-                "detail": f"--max-features {params.max_features} 쿼터 초과(다중공선성 배제는 통과)",
+                "detail": f"--max-features {params.max_features} 쿼터 초과",
             })
 
-    return SimpleNamespace(final=final, final_idx=final_idx, n_dropped_cap=n_dropped_cap)
+    return SimpleNamespace(final=final, n_dropped_cap=n_dropped_cap)
 
 
-def k6_compute_normalization(data: SimpleNamespace, dedup: SimpleNamespace, cap: SimpleNamespace) -> dict:
-    """6) 정규화 통계 계산 — 커널 예측값(SOH 스케일)을 원래 HI의 z-score 스케일에 맞추기 위해,
-    최종 채택된 커널 HI마다 own-scenario 분포 기준 mean/std를 구해 cap.final에 제자리로 채운다."""
+def k5_compute_normalization(data: SimpleNamespace, cap: SimpleNamespace) -> dict:
+    """5) 정규화 통계 계산 — 커널 예측값(SOH 스케일)을 원래 HI의 z-score 스케일에 맞추기 위해,
+    최종 채택된 커널 HI마다 own-scenario 예측값으로 mean/std를 구해 cap.final에 제자리로 채운다."""
     # 커널 예측값은 SOH를 직접 예측하도록 fit돼 스케일이 SOH 자체(대략 0.7~1.05)를 따른다.
     # 원래 x_hi는 z-score(평균0/표준편차1)라 스케일이 전혀 다름 — 여기서 train 기준
     # mean/std를 구해 저장해두고, 적용 시점(train.py)에서 (v - mean) / std로 표준화한다
     # (val/test엔 이 train 통계를 그대로 적용, fit은 안 함 — 누수 없음).
     # 2026-09-18(v4 로직 수정, 요구사항1 "각 시나리오에서 만든 커널만 그 시나리오에서
-    # 사용"과 일관성): mean/std는 이 커널이 *실제로 쓰이는* own-scenario 행만으로 계산한다.
-    # kernel_vals는 전체 x_all(모든 시나리오 pooled)에 predict()한 값이라 -- k4의 2차
-    # 다중공선성 배제(커널끼리, pooled 비교) 판단에는 그대로 쓰지만, 정규화는 own-scenario
-    # 분포를 반영해야 한다. 안 그러면 "전혀 다른 시나리오들이 뒤섞인 분포" 기준으로
-    # z-score해서 실제 사용될 own-scenario 값이 이상하게 치우친 스케일로 들어간다.
-    final_idx_arr = np.array(cap.final_idx)
-    final_vals = dedup.kernel_vals[:, final_idx_arr]
-    means = np.zeros(len(cap.final))
-    stds = np.ones(len(cap.final))
-    for k, f in enumerate(cap.final):
-        own_vals = final_vals[data.scen_idx_all == f["scenario_idx"], k]
-        means[k] = float(own_vals.mean())
-        sd = float(own_vals.std())
-        stds[k] = sd if sd > 1e-8 else 1.0  # 상수에 가까운 피처 0-division 방지
-    for f, m, sd in zip(cap.final, means, stds):
-        f["mean"] = float(m)
-        f["std"] = float(sd)
+    # 사용"과 일관성): mean/std는 이 커널이 *실제로 쓰이는* own-scenario 행만으로 계산한다
+    # — 2026-10-02(구 2차 pooled dedup 삭제 이후)부터는 own-scenario 행에 직접
+    # predict()해서 구한다(예전엔 2차가 만들어 둔 pooled kernel_vals를 슬라이스해 재사용
+    # 했었지만, 그 2차 단계 자체가 사라졌으므로 더 이상 재사용할 pooled 행렬이 없다 —
+    # own-scenario 데이터는 애초에 전체 데이터의 일부라 다시 predict해도 비용이 크지
+    # 않다. 결과값은 동일: 이전에도 own-scenario 행만 슬라이스해서 썼으므로).
+    for f in cap.final:
+        sel = data.scen_idx_all == f["scenario_idx"]
+        own_pred = f["model"].predict(data.x_all[sel][:, f["members"]])
+        sd = float(own_pred.std())
+        f["mean"] = float(own_pred.mean())
+        f["std"] = sd if sd > 1e-8 else 1.0  # 상수에 가까운 피처 0-division 방지
 
     n_final_by_scenario = {
         data.spec.scenario_names[s]: sum(1 for f in cap.final if f["scenario_idx"] == s)
@@ -431,11 +377,12 @@ def k6_compute_normalization(data: SimpleNamespace, dedup: SimpleNamespace, cap:
     return n_final_by_scenario
 
 
-def k7_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace, cap: SimpleNamespace) -> dict:
-    """7) 3차 결합(raw+kernel) 다중공선성 배제 — 시나리오별로(2차와 달리 pooled 아님, 그
-    시나리오 데이터에서만) raw HI(64)+이 시나리오가 만든 커널 HI를 합쳐 |r|>=threshold 쌍의
-    '패자'를 기록한다(실제 마스킹 적용은 train.py --combined-redundancy-json이 담당,
-    scr_model.py는 무변경 — 여긴 기록만 한다)."""
+def k6_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace, cap: SimpleNamespace) -> dict:
+    """6) 결합(raw+kernel) 다중공선성 배제 — 시나리오별로(pooled 아님, 그 시나리오 데이터에서만)
+    raw HI(64)+이 시나리오가 만든 커널 HI를 합쳐 |r|>=threshold 쌍의 '패자'를 기록한다(실제
+    마스킹 적용은 train.py --combined-redundancy-json이 담당, scr_model.py는 무변경 — 여긴
+    기록만 한다). 같은 시나리오 안의 커널끼리 중복도 own_feats에 다 포함돼 여기서 함께 잡힌다
+    (2026-10-02: 이 역할을 따로 하던 구 2차 pooled dedup 단계는 삭제됨 — 모듈 docstring 참고)."""
     # 2026-09-18, 요구사항2. |r|>=0.95인 각 쌍에 대해 "패자"를 정해 제거한다(사용자 피드백,
     # 2026-09-18 정정 — 처음엔 "쌍이 있으면 둘 다 제거"였는데, 그러면 서로 얽힌 쌍이 많을수록
     # 무차별로 다 날아가 버려서 아래 규칙으로 변경):
@@ -506,11 +453,11 @@ def k7_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace,
     return combined_redundancy
 
 
-def k8_save_results(
-    params: SimpleNamespace, fit: SimpleNamespace, dedup: SimpleNamespace,
+def k7_save_results(
+    params: SimpleNamespace, fit: SimpleNamespace,
     cap: SimpleNamespace, n_final_by_scenario: dict, combined_redundancy: dict,
 ) -> None:
-    """8) 저장 — combined_redundancy json + kernel pkl 저장, 콘솔 요약 출력, RESULTS_LOG 기록."""
+    """7) 저장 — combined_redundancy json + kernel pkl 저장, 콘솔 요약 출력, RESULTS_LOG 기록."""
     params.out_dir.mkdir(parents=True, exist_ok=True)
     combined_redundancy_out_path = (
         params.out_dir / f"kernel_group_features_{params.tag}_combined_redundancy.json"
@@ -533,7 +480,6 @@ def k8_save_results(
         "alpha": params.alpha,
         "gamma": params.gamma,
         "n_components": params.n_components,
-        "redundancy_threshold": params.redundancy_threshold,
         "max_features": params.max_features,
         "min_raw_partial_corr": params.min_raw_partial_corr,
         "features": [
@@ -543,15 +489,14 @@ def k8_save_results(
     with open(out_path, "wb") as fh:
         pickle.dump(artifact, fh)
 
-    # 2026-09-21: 탈락 목록(raw_conditioned_filter/kernel_kernel_dedup/max_features_quota
-    # 사유별) 파일 저장은 제거 — 원래 읽던 plot_kernel_rejected.py가 이미 삭제돼 아무도
-    # 이 파일을 다시 읽지 않았다(파이프라인 실행 전 정리 커밋에서 함께 삭제됨). 개수
-    # 요약만 콘솔에 남기고 `rejected` 리스트 자체(사유 상세)는 저장하지 않는다.
+    # 2026-09-21: 탈락 목록(raw_conditioned_filter/max_features_quota 사유별) 파일 저장은
+    # 제거 — 원래 읽던 plot_kernel_rejected.py가 이미 삭제돼 아무도 이 파일을 다시 읽지
+    # 않았다(파이프라인 실행 전 정리 커밋에서 함께 삭제됨). 개수 요약만 콘솔에 남기고
+    # `rejected` 리스트 자체(사유 상세)는 저장하지 않는다.
 
     avg_r2 = float(np.mean([f["train_r2"] for f in cap.final]))
     print(f"\n[kernel] 후보 {len(fit.candidates)}개(크기1 그룹 {fit.n_skipped_size1}개 스킵) "
-          f"-> 2차 다중공선성 배제로 {dedup.n_dropped_corr}개 제거 "
-          f"-> {'상한(' + str(params.max_features) + ')으로 ' + str(cap.n_dropped_cap) + '개 추가 제거 -> ' if params.max_features else ''}"
+          f"-> {'상한(' + str(params.max_features) + ')으로 ' + str(cap.n_dropped_cap) + '개 제거 -> ' if params.max_features else ''}"
           f"최종 {len(cap.final)}개, 평균 train R^2={avg_r2:.4f}")
     print("[kernel] 시나리오별 최종 커널 HI 개수: " +
           ", ".join(f"{k}={v}" for k, v in n_final_by_scenario.items()))
@@ -561,8 +506,7 @@ def k8_save_results(
     append_log_entry(
         tag=f"kernel_group_features_{params.tag}",
         purpose="시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) "
-                "+ 2차 다중공선성 배제 + 정규화 통계 저장 + 3차 결합(raw+kernel) 다중공선성 "
-                "배제(시나리오별, 2026-09-18 신규)",
+                "+ 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)",
         command=current_command_str(),
         result_files=[str(out_path), str(combined_redundancy_out_path)],
         key_metrics=(f"후보 {len(fit.candidates)}개 -> 최종 {len(cap.final)}개, "
@@ -580,29 +524,13 @@ def k8_save_results(
 
 
 def main() -> None:
-    # 1) 파라미터/경로 결정
-    params = k1_resolve_params_and_paths()  
-    
-    # 2) train split + raw HI 비용 + synergy 그룹 로드
-    data = k2_load_data(params)  
-    
-    # 3) 그룹 -> 커널 HI 피팅
-    fit = k3_fit_group_kernels(params, data)  
-    
-    # 4) 2차 배제 — 커널끼리 pooled 상관
-    dedup = k4_dedupe_kernels(params, data, fit)
-    
-    # 5) max-features 캡(시나리오별 라운드로빈) 
-    cap = k5_apply_feature_cap(params, fit, dedup) 
-    
-    # 6) own-scenario 정규화 통계
-    n_final_by_scenario = k6_compute_normalization(data, dedup, cap)  
-    
-    # 7) 3차 배제 — raw+kernel 결합, 시나리오별
-    combined_redundancy = k7_build_combined_redundancy(params, data, cap) 
-    
-    # 8) 저장 + 로그
-    k8_save_results(params, fit, dedup, cap, n_final_by_scenario, combined_redundancy)  
+    params = k1_resolve_params_and_paths()  # 1) 파라미터/경로 결정
+    data = k2_load_data(params)  # 2) train split + raw HI 비용 + synergy 그룹 로드
+    fit = k3_fit_group_kernels(params, data)  # 3) 그룹 -> 커널 HI 피팅
+    cap = k4_apply_feature_cap(params, fit)  # 4) max-features 캡(시나리오별 라운드로빈)
+    n_final_by_scenario = k5_compute_normalization(data, cap)  # 5) own-scenario 정규화 통계
+    combined_redundancy = k6_build_combined_redundancy(params, data, cap)  # 6) 결합(raw+kernel) 다중공선성 배제, 시나리오별
+    k7_save_results(params, fit, cap, n_final_by_scenario, combined_redundancy)  # 7) 저장 + 로그
 
 
 if __name__ == "__main__":

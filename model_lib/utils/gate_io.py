@@ -1,10 +1,15 @@
 """
-model_lib/utils/gate_io.py — SCRModel 게이트 확률 JSON 저장/로드 + 시각화.
+model_lib/utils/gate_io.py — SCRModel 게이트 확률 JSON 저장/로드.
 
 2026-09-24: model_lib/legacy/train_scr.py(Stage0, 삭제됨)에서 v4가 실제로 계속 쓰는
-5개 함수만 옮겨온 것 — 8_train/train.py(저장)와 model_lib/tools/visualize_results.py
+함수들만 옮겨온 것 — 8_train/train.py(저장)와 model_lib/tools/visualize_results.py
 (synergy 그룹 ID 로드)가 여기서 import한다. train_scr.py의 나머지(--phase 1/2 CLI,
 Stage0 학습 루프 등)는 git 히스토리에만 남아있다.
+
+2026-10-02: 시각화 함수 `_plot_gate_probs`는 8_train/plot.py로 옮겼다 — 이 파일은
+이제 JSON 저장/로드 전용(다른 Step들이 plot.py를 스텝 폴더 로컬로 두는 관례와
+맞추기 위함, 6_synergy/plot.py·7_kernel/plot.py 참고). train.py는
+`from plot import _plot_gate_probs, _plot_loss_curves`로 가져다 쓴다.
 """
 
 from __future__ import annotations
@@ -101,88 +106,3 @@ def _save_scen_masks_to_json(
     json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
     n_hi_out = len(next(iter(hi_cols_by_seg.values())))
     print(f"[train] Saved scen HI ranking → {json_path}  (시나리오별 {n_hi_out}개 랭킹)")
-
-
-def _plot_gate_probs(
-    model: SCRModel,
-    output_path: Path,
-    hi_cols_ref: list[str],
-    charge_m: int,
-    discharge_m: int,
-    scen_k: int,
-) -> None:
-    """
-    8개 서브플롯: charge probe / discharge probe / 6 scen gates
-    x축: HI 인덱스, y축: gate_prob. threshold(m/k) 기준선 표시.
-    """
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import numpy as np
-    except ImportError:
-        print("[train] matplotlib 미설치 — gate_probs.png 생략")
-        return
-
-    gates_info = [
-        ("Charge Probe",    model.charge_probe_gate,    charge_m,    "steelblue"),
-        ("Discharge Probe", model.discharge_probe_gate, discharge_m, "darkorange"),
-    ]
-    seg_names = model.spec.scenario_names
-    for s in range(model.n_scenarios):
-        gates_info.append((f"Scen: {seg_names[s]}", model.scen_gates[s], scen_k, "seagreen"))
-
-    n_plots = len(gates_info)   # 8
-    fig, axes = plt.subplots(2, 4, figsize=(22, 8))
-    axes = axes.flatten()
-
-    is_grouped = any(hasattr(gate, "group_index") for _, gate, _, _ in gates_info)
-
-    for ax, (title, gate, threshold, color) in zip(axes, gates_info):
-        prob = gate.gate_prob().detach().cpu().numpy()
-        idx  = np.arange(len(prob))
-        sorted_idx = np.argsort(prob)[::-1]
-        sorted_prob = prob[sorted_idx]
-
-        if hasattr(gate, "group_index"):
-            # 그룹 계층 게이트 — 막대를 그룹별 색으로 칠해서 같은 그룹 멤버가 랭킹에서
-            # 뭉쳐 있는지(=그룹이 실제로 같이 움직인다) 한눈에 보이게 하고, 그룹 자체의
-            # 게이트 확률(멤버 오프셋 제외)을 점선으로 겹쳐 그린다.
-            group_idx = gate.group_index.detach().cpu().numpy()
-            sorted_groups = group_idx[sorted_idx]
-            cmap = plt.cm.tab20(np.linspace(0, 1, max(gate.n_groups, 1)))
-            bar_colors = cmap[sorted_groups % 20]
-            ax.bar(range(len(sorted_prob)), sorted_prob, color=bar_colors, alpha=0.85)
-            group_prob = gate.group_gate_prob().detach().cpu().numpy()
-            ax.plot(range(len(sorted_prob)), group_prob[sorted_groups],
-                    color="black", linestyle=":", linewidth=1.0, alpha=0.7,
-                    label=f"group_gate_prob ({gate.n_groups} groups)")
-        else:
-            ax.bar(range(len(sorted_prob)), sorted_prob, color=color, alpha=0.7)
-
-        if threshold <= len(sorted_prob):
-            cutoff = float(sorted_prob[threshold - 1]) if threshold > 0 else 1.0
-            ax.axvline(x=threshold - 0.5, color="red", linestyle="--", linewidth=1.2,
-                       label=f"top-{threshold} cutoff")
-            ax.axhline(y=cutoff, color="red", linestyle=":", linewidth=0.8, alpha=0.6)
-        ax.set_title(title, fontsize=10, fontweight="bold")
-        ax.set_xlabel("HI rank", fontsize=8)
-        ax.set_ylabel("gate_prob", fontsize=8)
-        ax.set_ylim(0, 1.05)
-        ax.legend(fontsize=7)
-        # 상위 5개 이름 표시
-        for rank in range(min(5, len(sorted_idx))):
-            hi_name = hi_cols_ref[sorted_idx[rank]]
-            short   = hi_name.split("_dis_hi")[0].split("_chg_lo")[0]
-            ax.text(rank, sorted_prob[rank] + 0.01, short,
-                    rotation=90, fontsize=5, ha="center", va="bottom")
-
-    _suptitle = "Phase 1 — Gate Probability by HI (sorted desc)"
-    if is_grouped:
-        _suptitle += "  [scen gates: grouped — bar color=synergy group, dotted=group_gate_prob]"
-    fig.suptitle(_suptitle, fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[train] Saved gate_prob plot → {output_path}")

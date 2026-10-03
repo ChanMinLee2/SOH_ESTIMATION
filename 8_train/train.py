@@ -59,11 +59,14 @@ from training.scr_loss import SCRLoss  # noqa: E402
 from training.scr_trainer import L0LambdaScheduler  # noqa: E402
 from common.scenario import get_segmenter  # noqa: E402
 
-# 게이트 확률 JSON 저장/시각화는 model_lib/utils/gate_io.py 단일 소스(2026-09-24 —
+# 게이트 확률 JSON 저장/로드는 model_lib/utils/gate_io.py 단일 소스(2026-09-24 —
 # model_lib/legacy/train_scr.py(Stage0)에서 v4가 실제 쓰는 부분만 옮기고 파일은 삭제).
 from utils.gate_io import (  # noqa: E402
-    _save_probe_masks_to_json, _save_scen_masks_to_json, _plot_gate_probs,
+    _save_probe_masks_to_json, _save_scen_masks_to_json,
 )
+# 시각화는 전부 8_train/plot.py(이 폴더 로컬, 2026-10-02에 _plot_gate_probs를
+# gate_io.py에서 이쪽으로 이동 — 6_synergy/plot.py·7_kernel/plot.py와 동일 관례).
+from plot import _plot_loss_curves, _plot_gate_probs  # noqa: E402
 import parameters as P  # noqa: E402 — 축 설정 단일 소스(P.ACTIVE_AXIS_CONFIG)
 
 # run_pipeline.py의 P1V2_RUNS_DIR과 동일 경로(2026-09-23 재배치) — 단독 실행 시(--output-dir
@@ -228,14 +231,7 @@ def _build_redundancy_mask(combined_redundancy: dict, spec) -> torch.Tensor:
     쪽을 SCRModel(redundancy_mask=...)용 bool 텐서 (n_scenarios, N_HI)로 만든다(2026-09-18,
     요구사항2를 raw HI에도 게이트 구조로 강제 — scr_model.py의 _apply_scen_gate가 이 마스크를
     scen_gates 출력에 곱해 False 위치는 log_alpha와 무관하게 항상 0으로 만든다). True=허용,
-    False=그 시나리오에서 배제된 raw HI.
-
-    2026-09-21: 이전엔 입력 레벨에서도 nan_mask를 0으로 이중 강제하는 함수
-    (_apply_combined_redundancy_raw)를 같이 썼는데, forward()가 그 nan_mask로 마스킹한
-    x를 probe_x(분류기 입력)에도 그대로 재사용해서 분류기 정확도가 붕괴하는 버그였다
-    (실측: 이 로직 추가 전 98.65% → 추가 후 36~67%). 이 게이트 레벨 마스크 하나만으로
-    scen_x 쪽 정확성은 로그 알파와 무관하게 이미 완전히 보장되므로, 입력 레벨 이중
-    마스킹은 제거하고 이 함수만 남겼다."""
+    False=그 시나리오에서 배제된 raw HI."""
     by_scenario = combined_redundancy.get("by_scenario", combined_redundancy)
     seg_name_to_idx = {n: i for i, n in enumerate(spec.scenario_names)}
     mask = torch.ones(spec.n_scenarios, N_HI, dtype=torch.bool)
@@ -545,7 +541,8 @@ def t5_define_output_paths(params: SimpleNamespace, data: SimpleNamespace, hyper
 
     log_path = output_dir / "logs" / "train_log_v2.csv"
     with open(log_path, "w", encoding="utf-8") as f:
-        f.write("epoch,lambda_l0,beta,tr_rmse,tr_r2,val_rmse,val_r2,gate_saturation,is_selected\n")
+        f.write("epoch,lambda_l0,lambda_scen,beta,tr_rmse,tr_r2,tr_mse,tr_ce,tr_l0,"
+                 "val_rmse,val_r2,gate_saturation,is_selected\n")
 
     # 2026-09-18: config.yaml/p1v2_summary.json을 여기(학습 루프 시작 전)에서도 한 번 써둔다
     # — 원래는 학습이 끝난 뒤(맨 아래)에만 썼는데, 여기서 미리 써두면
@@ -628,6 +625,8 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
         # ---- train epoch ----
         model.train()
         tr_preds, tr_targets = [], []
+        tr_mse_sum = tr_ce_sum = tr_l0_sum = 0.0
+        n_batches = 0
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             optimizer.zero_grad()
@@ -638,8 +637,16 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
             optimizer.step()
             tr_preds.append(out["cap_pred"].detach().cpu())
             tr_targets.append(batch["target"].cpu())
+            # epoch별 손실 항 비중 플롯(loss_curves.png)용 — 배치 평균으로 집계
+            tr_mse_sum += losses["mse"].item()
+            tr_ce_sum += losses["ce"].item()
+            tr_l0_sum += losses["l0"].item()
+            n_batches += 1
         tr_p, tr_t = torch.cat(tr_preds).numpy(), torch.cat(tr_targets).numpy()
         tr_rmse_v, tr_r2_v = float(_rmse(tr_t, tr_p)), float(_r2(tr_t, tr_p))
+        tr_mse_v = tr_mse_sum / n_batches
+        tr_ce_v = tr_ce_sum / n_batches
+        tr_l0_v = tr_l0_sum / n_batches
 
         if epoch >= warmup_ep:
             scheduler.step()
@@ -682,7 +689,8 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
                 no_improve += 1
 
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"{epoch+1},{eff_l0:.6f},{beta_now:.4f},{tr_rmse_v:.6f},{tr_r2_v:.6f},"
+            f.write(f"{epoch+1},{eff_l0:.6f},{loss_fn.lambda_scen:.6f},{beta_now:.4f},"
+                    f"{tr_rmse_v:.6f},{tr_r2_v:.6f},{tr_mse_v:.6f},{tr_ce_v:.6f},{tr_l0_v:.6f},"
                     f"{val_rmse_v:.6f},{val_r2_v:.6f},{sat:.6f},{int(is_selected)}\n")
 
         if (epoch + 1) % 10 == 0 or is_selected:
@@ -748,6 +756,7 @@ def t7_save_results(params: SimpleNamespace, data: SimpleNamespace, hyperparams:
         model, output_dir / "gates" / "gate_probs.png", hi_cols_ref,
         params.charge_m, params.discharge_m, params.scen_k,
     )
+    _plot_loss_curves(paths.log_path, output_dir / "logs" / "loss_curves.png")
 
     # config.yaml은 학습 루프 시작 전에 이미 써둠(t5_define_output_paths 참고) — cfg가 그
     # 이후 안 바뀌므로 여기서 다시 쓸 필요 없음.

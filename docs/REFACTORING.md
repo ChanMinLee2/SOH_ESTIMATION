@@ -2435,3 +2435,178 @@ dis_mid:15, dis_lo:15}`, 결합 다중공선성 배제 raw 78개/kernel 0개)가
 입증. 검증용 스크래치 run 폴더(`p1v2_runs/1002_1206_p1v2_refact_seed42`)와
 `RESULTS_LOG.md`에 자동 추가됐던 해당 2개 항목(synergy_groups_refact_groups/
 kernel_group_features_refact_kernel)은 검증 후 삭제/제거해 되돌림.
+
+### 2026-10-02 `kernel.py`(Step 7) 2차(커널끼리 pooled) 다중공선성 배제 단계 삭제 — 알고리즘 변경
+
+사용자가 코드 리뷰 중 제기한 질문("시나리오별로 커널을 구분해서 쓰는데 왜 다른
+시나리오와의 다중공선성을 아직도 검사하나?")에서 시작된 변경. 결론부터: **이
+단계는 삭제해도 손실이 없고, 지금 레시피에서는 애초에 아무 일도 안 하고 있었다.**
+
+**왜 무의미했는가**: 2026-09-18에 x_kernel 소비 방식이 바뀌어서(train.py의
+`_apply_kernel_features`) 커널 HI 컬럼은 "그 컬럼을 만든 시나리오"의 행에만
+값이 채워지고 다른 시나리오 행에서는 항상 0이다. 그런데 구 `k4_dedupe_kernels`
+(당시 함수명)는 이 masking 이전 방식, 즉 "후보 모델 전부를 전체 train 행(다른
+시나리오 포함)에 predict()"하는 OOD 적용으로 pooled correlation을 계산해서
+다중공선성을 판단하고 있었다 — 모듈 docstring 바로 위 단락에서 "의미 없는 값"
+이라고 명시적으로 걷어낸 바로 그 방식을, 중복 배제 "판단"에만 몰래 되살려 쓰고
+있었던 셈. 실측으로도 확인: `n_dropped_corr`가 거의 항상 0이었다 — disjoint-
+support인 두 벡터(서로 다른 시나리오 행에서 한쪽이 항상 0)의 pooled correlation은
+구조적으로 `-mean(A)*mean(B)`에 수렴해(두 값이 동시에 0이 아닌 행이 없으므로
+`E[AB]=0`) threshold(0.9)를 넘기 매우 어렵다.
+
+같은 시나리오 안에서의 커널끼리 중복(raw HI는 안 겹쳐도 둘 다 같은 타깃 y를
+예측하도록 fit됐으므로 결과적으로 비슷해질 수 있음, 이건 real한 간섭 가능 케이스)
+은 이 2차가 아니라 이미 `k6_build_combined_redundancy`(3차, raw+kernel 결합,
+own-scenario 실측값 사용)가 own_feats에 그 시나리오 커널 HI 전부를 포함시켜 함께
+검사하고 있었다 — 즉 완전히 중복된 체크였다. "캡 직전에 미리 걸러 max-features
+자리를 아낀다"는 반론도 `FIXED_KERNEL_MAX_FEATURES` 기본값이 `None`(무제한)이라
+지금 레시피에선 성립 안 함(캡 자체가 no-op).
+
+**변경 내용**: `k4_dedupe_kernels` 함수를 통째로 삭제하고, 뒤따르던
+`k5_apply_feature_cap`(이제 `k4_`)이 `dedup.kept` 대신 `fit.candidates` 인덱스를
+직접 받도록, `k6_compute_normalization`(이제 `k5_`)이 더 이상 존재하지 않는 pooled
+`kernel_vals` 행렬을 슬라이스하는 대신 own-scenario 행에 직접 predict()하도록
+고쳤다. 이후 `k7_build_combined_redundancy`/`k8_save_results`를 `k6_`/`k7_`로
+재번호매김(번호가 비는 걸 방지). `params`에서 더 이상 안 쓰는
+`redundancy_threshold`(`ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`)도 함께 제거 —
+pkl `artifact` 딕셔너리의 메타데이터에서도 뺐다(더 이상 적용되지 않는 값을 산출물에
+남겨두면 나중에 오해를 부를 수 있어서). synergy.py 자체의 raw-HI 그룹 구성에
+쓰는 동일 이름의 상수(`ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`)는 완전히 별개 용도라
+그대로 둠. `docs/PIPELINE.md` §9(Step 7)도 3단계 -> 2단계로 수정.
+
+**검증**: `py_compile` 통과. 실제 실행(`run_pipeline.py 6 --to-step 7`)으로
+Step 6+7을 처음부터 다시 돌려 결과가 삭제 전과 **완전히 동일**함을 확인 — 최종
+90개 후보, 평균 train R²=0.3980, 시나리오별 개수
+`{chg_lo:16, chg_mid:15, chg_hi:15, dis_hi:14, dis_mid:15, dis_lo:15}`, 결합
+다중공선성 배제 raw 78개/kernel 0개 — 삭제 전(2026-10-02 앞선 항목의 검증 실행)과
+모든 숫자가 일치. 덤으로 Step 7 실행시간이 9분 36초 -> 4분 58초로 거의 절반이
+됐다(90개 후보 x 전체 train 행에 대한 불필요한 OOD predict() 연산이 없어진 결과).
+검증용 스크래치 run 폴더(`p1v2_runs/1002_1401_p1v2_refact_seed42`)와
+`RESULTS_LOG.md`의 해당 2개 항목은 검증 후 삭제해 되돌림.
+
+### 2026-10-02 `synergy.py` 각 함수 선언부에 한 줄 설명 추가
+
+`kernel.py` 리뷰 도중 `synergy.py`도 같이 보게 돼서, 함수 선언만 보고 역할을 알
+수 있게 모든 함수에 한 줄 요약을 추가했다(동작 변화 없음). `_residualize`/
+`_prune_redundant_raw`/`build_groups_shuffled`는 이미 첫 문장이 한 줄 요약
+역할을 하고 있어 그대로 뒀다. 새로 추가한 곳: `_parse_args`(docstring 없었음),
+`_partial_corr`(docstring 없었음), `build_groups`(기존 docstring이 `global_dedup`
+플래그별 차이 설명으로 바로 들어가 "이 함수가 전체적으로 뭘 하는지"가 없어서 한
+줄 추가), `main`(docstring 자체가 없었음 — 모듈 docstring의 번호 목록과 대응된다는
+점만 명시). **검증**: `py_compile` 통과.
+
+### 2026-10-02 `synergy.py` main() 단일 책임 원칙 분리 + `_extend_group` 추출
+
+`kernel.py`/`train.py` 때와 같은 요청 — `synergy.py`의 `main()`도 파라미터 해석
+블록과 report dict 구성 블록이 전부 인라인으로 들어가 있던 걸 6개 서브함수로
+분리했다(동작 변화 없는 순수 구조 정리): `s1_load_params_and_config`(out_dir +
+알고리즘 하이퍼파라미터 해석) -> `s2_load_data`(train split + v-ctrl 참조 파일
+로드) -> (시나리오 루프 안에서) `s3_build_groups_for_scenario`(시나리오 하나
+그룹 구성, 표본부족/참조파일누락이면 None) -> `s4_update_report_for_scenario`
+(report dict 갱신 + 콘솔 요약, 시나리오별 그룹 크기 리스트 반환) ->
+`s5_save_report`(json 저장) -> `s6_log_results`(RESULTS_LOG 기록). `main()`은
+이제 6개 호출을 순서대로 엮는 얇은 함수.
+
+이어서 사용자가 `build_groups`의 그룹-하나-키우는 while 루프(다중공선성 배제 ->
+저비용 필터 -> 편상관계수 정밀검사 3단계)도 더 분리하는 게 낫지 않겠냐고 제안 —
+`_extend_group(members, scores, assigned, group_of, gi, cfg)`로 추출했다. 루프가
+참조하던 정적 값들(x/y/raw_corr/marg_signed/max_group_size/redundancy_threshold/
+min_partial_corr/prefilter_top_m)은 시드 루프 시작 전에 한 번만 구성하는 `cfg`
+SimpleNamespace로 묶었고(매 시드마다 다시 만들지 않음), members/scores/assigned/
+group_of는 종전처럼 참조로 공유해 제자리에서 mutate한다(복사 없음). `build_groups`
+본문은 이제 "시드 뽑기 -> `_extend_group` 호출 -> 그룹 append" 흐름만 남아 훨씬
+짧아졌다.
+
+과정에서 사용자가 던진 질문 두 개에 대한 답을 docstring에도 반영: (1) 이 while
+루프의 다중공선성 체크가 `_prune_redundant_raw`와 중복 아니냐 — 아니다,
+`_prune_redundant_raw`는 `global_dedup=True`일 때만 호출되는데
+`FIXED_GLOBAL_DEDUP` 기본값이 `False`라 지금 레시피에선 아예 안 돈다. 즉
+`global_dedup=False`에서는 `_extend_group`의 `eligible` 체크가 **유일한**
+다중공선성 배제 장치이고, `global_dedup=True`일 때는 이미 전역으로 보장된 걸
+한 번 더(무해하게) 확인하는 것뿐 — 두 모드를 분기 없이 같은 코드 경로로 돌리기
+위한 설계. (2) `conditioning`이 뭐냐 — `_residualize(y, conditioning)`에서
+"conditioning 변수로 y를 선형회귀하고 그 효과를 뺀 잔차"라는 통계학의 "조건화"
+개념 그대로, `_partial_corr`가 이미 뽑힌 그룹 멤버를 conditioning 삼아 "그 멤버들이
+설명 못 하는 부분까지 타깃과 관련 있는 새 후보"를 찾는 데 쓰인다.
+
+**검증**: `py_compile` 통과. 두 변경 각각을 `run_pipeline.py 6 --to-step 7` 실제
+실행으로 따로 검증 — 둘 다 시나리오별 그룹 개수(18/20/19/22/19/21)와 커널 HI
+결과(최종 90개, 평균 train R^2=0.3980, 시나리오별 개수
+`{chg_lo:16, chg_mid:15, chg_hi:15, dis_hi:14, dis_mid:15, dis_lo:15}`, 결합
+다중공선성 배제 raw 78개/kernel 0개)가 기존 동작 및 서로 간에 전부 일치함을
+확인. 검증용 스크래치 run 폴더 2개와 `RESULTS_LOG.md`의 해당 4개 항목은 검증
+후 삭제해 되돌림.
+
+### 2026-10-02 `synergy.py` global_dedup 영구 True 전환 — 알고리즘 변경(결과 수치 변동 있음)
+
+위 두 리팩토링 라운드 도중 사용자가 던진 질문("`_extend_group`의 eligible
+다중공선성 체크가 `_prune_redundant_raw`랑 중복 아니냐")에 이어, "그러면
+global_dedup은 앞으로도 True로 보면 되지 않냐, 항상 True로 고정할 거면 그
+eligible 체크는 지워도 되지 않냐"는 제안이 나왔다. 전부 맞는 지적이었고,
+AskUserQuestion으로 범위를 확인한 뒤("True로 완전 고정 — False 경로/옵션/
+중복체크 전부 제거") 다음을 실행했다.
+
+**변경 내용**:
+- `parameters.py`: `FIXED_GLOBAL_DEDUP`(구 `--global-dedup`, 기본값 False) 상수
+  완전 삭제. docs상 "v4 정식 레시피는 True를 썼다"는 주장과 "이 세션 실제 run은
+  전부 False로 돌았다"는 2026-09-21 당시의 실측-고정 사이에 있던 괴리를, 이번엔
+  "문서가 맞다"는 방향으로 해소.
+- `synergy.py`: `build_groups`에서 `global_dedup` 파라미터와 `if/else` 분기를
+  제거하고 `_prune_redundant_raw` 사전 가지치기를 상시 적용으로 고정. 모듈
+  docstring의 알고리즘 설명도 "0단계(사전 가지치기, 상시) -> 1~4단계(기존)"로
+  재편. `_extend_group`의 `eligible` 필터에서 이제 영구 no-op이 된 raw_corr
+  재검사(a단계)를 삭제 — 남은 유일한 필터는 저비용 marginal-corr 사전필터(이제
+  a단계) + 편상관계수 정밀검사(이제 b단계) 둘뿐. `s1_load_params_and_config`/
+  `s3_build_groups_for_scenario`/`main()`의 report dict에서 `global_dedup`
+  필드도 전부 제거.
+- `docs/PARAMETERS.md`: 이제 존재하지 않는 `FIXED_GLOBAL_DEDUP` 행 삭제,
+  FIXED_* 개수(18->17), `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`의 "적용 스텝"을
+  "6~7"에서 "6"으로 정정(kernel.py Step 7은 이미 지난 라운드에서 이 상수를 안
+  쓰게 됐었음 — 그때 놓쳤던 걸 이번에 같이 정리).
+- `kernel.py`: "v3.1(global_dedup) 산출물의 attached" 주석을
+  "synergy.py(_prune_redundant_raw)의 attached"로 수정(더 이상 조건부 기능이
+  아니므로).
+
+**⚠️ 순수 리팩토링이 아니라 실제 결과가 바뀌는 변경**: `run_pipeline.py
+6 --to-step 7`로 실측 비교했다 —
+
+| | 이전(global_dedup=False) | 이후(global_dedup=True, 지금부터 항상) |
+|---|---|---|
+| 시나리오별 그룹 개수 | 18/20/19/22/19/21 | 10/14/18/9/15/12 |
+| 커널 HI 최종 개수 | 90 | 58 |
+| 평균 train R^2 | 0.3980 | 0.3548 |
+
+약하게 상관된 HI들이 더 이상 독립 그룹원으로 살아남지 못하고 `attached`로
+빠지면서(그룹 *간* 중복까지 전역적으로 막다 보니 더 많은 HI가 사전에 걸러짐)
+그룹 수·커널 피처 수·평균 R^2가 전부 유의미하게 줄었다 — 실행 자체는 두 모드
+다 exit=0으로 정상 완주했고(py_compile 통과 포함), 이번 변경이 코드 버그가
+아니라 의도한 알고리즘 변경의 자연스러운 결과임을 확인. **이 변경 이전 이
+세션/문서의 모든 참조 수치(그룹 119개, 커널 90개, R^2=0.3980 등)는 전부
+global_dedup=False 기준이라 더 이상 재현되지 않는다** — 이후 Step 8/9
+학습·평가 결과도 이 변경을 반영해 다시 돌려야 유효하다. 검증용 스크래치 run
+폴더와 `RESULTS_LOG.md`의 해당 2개 항목은 검증 후 삭제해 되돌림.
+
+### 2026-10-02 `_plot_gate_probs`를 `model_lib/utils/gate_io.py`에서 `8_train/plot.py`로 이동
+
+사용자 요청 — gate_io.py는 "JSON 저장/로드" 전용 모듈로 두고, 시각화 함수는
+`6_synergy/plot.py`/`7_kernel/plot.py`와 동일하게 각 스텝 폴더 로컬 `plot.py`에
+모으는 관례를 Step 8에도 맞췄다(동작 변화 없는 순수 이동). `_plot_gate_probs`
+함수 본문은 그대로 `8_train/plot.py`로 옮기고(이미 `_plot_loss_curves`가 있던
+파일), `gate_io.py`에서는 삭제 + 모듈 docstring을 "저장/로드 + 시각화"에서
+"저장/로드"로 정정. `train.py`의 import도
+`from utils.gate_io import (_save_probe_masks_to_json, _save_scen_masks_to_json, _plot_gate_probs)`
+에서 `_plot_gate_probs`를 빼고 `from plot import _plot_loss_curves, _plot_gate_probs`
+로 합쳤다.
+
+이동 전 다른 사용처가 있는지 먼저 확인 — `9_eval/plot_hi_selection_matrix.py`에
+"`train_scr.py._plot_gate_probs`"라는 docstring 언급이 있었지만 실제 import는
+없었음(레거시 이력 설명일 뿐). `8_train/train.py` 외 실사용 호출처 없음을 확인한
+뒤 이동 진행 — `plot.py`가 타입힌트용으로 `SCRModel`을 새로 import하게 됐는데,
+`train.py`가 이미 최상단에서 `models.scr_model`을 로드하므로 순환참조/추가 비용
+없음.
+
+**검증**: `py_compile` 통과(`train.py`/`plot.py`/`gate_io.py`). 실제
+`import plot; import train`를 `8_train/` 아래서 실행해 양쪽 모듈이 에러 없이
+로드되고 `plot._plot_gate_probs`/`plot._plot_loss_curves` 둘 다 존재함을 확인
+(학습 전체를 돌려보는 건 비용이 커서, 모듈 로드 레벨 검증으로 충분하다고 판단 —
+함수 본문 자체는 1바이트도 안 바꾸고 파일만 옮겼으므로).
