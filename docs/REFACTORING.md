@@ -2610,3 +2610,119 @@ global_dedup=False 기준이라 더 이상 재현되지 않는다** — 이후 S
 로드되고 `plot._plot_gate_probs`/`plot._plot_loss_curves` 둘 다 존재함을 확인
 (학습 전체를 돌려보는 건 비용이 커서, 모듈 로드 레벨 검증으로 충분하다고 판단 —
 함수 본문 자체는 1바이트도 안 바꾸고 파일만 옮겼으므로).
+
+### 2026-10-04 `model_lib/{datasets,evaluation,models,training,utils}` 전면 리팩토링
+
+지금까지 Step 4~9 스크립트(1_convert~9_eval, 각각 독립 실행되는 파이프라인 단계)에
+적용해온 것과 같은 작업 — 단일 책임 원칙에 따른 함수 분리 + 한 줄 주석 + 데드코드
+정리 — 을 `model_lib/` 공용 라이브러리 5개 폴더에도 적용했다. 사전에 Explore
+에이전트로 12개 실질 파일을 전수 조사해 후보를 추렸고(`argparse` CLI 있는 파일
+없음 — 전부 순수 라이브러리 모듈), 조사에서 나온 "건드릴 필요 없음" 파일
+(`cap_heads.py`/`scr_trainer.py`/`gate_io.py`/`compat.py`/`metrics.py`/
+`tqdm_utils.py`/`io_utils.py`)은 그대로 뒀다.
+
+**1) `model_lib/datasets/segment_dataset.py`**
+- `build_datasets()`(~174줄, 6개 이상 책임)를 `_load_raw_dataframe`(로딩+방향필터) ->
+  `_split_cross_dataset`/`_split_same_pool`(분할 전략) -> `_apply_train_cycle_frac`
+  (train 서브샘플링) -> 얇은 orchestrator로 분리.
+- `SegmentDataset.__init__()`(~80줄)에서 `_compute_dataset_id`/
+  `_compute_cap_init_raw` 두 헬퍼 추출.
+- 예전부터 "조사만 해두고 중단했던" 데드코드 정리(세션 초반 Category A) 완료 —
+  `SegmentNormalizer.inverse_cap_init()`(무호출)·모듈 레벨 `HI_COLS` 상수(무호출)
+  둘 다 삭제, 재확인 후 진행.
+- `_get_native_hi_cols()`가 `model_lib/utils/hi_schema.py`의 STAT/DIFF 제외
+  로직을 별도로 복제하고 있던 걸(그 파일 자신의 docstring이 "수동 동기화 필요"라고
+  인정하던 부분) `hi_schema.get_native_hi_cols()`로 통합 — 삭제 전 두 함수 출력이
+  byte-for-byte 동일함을 실측 확인.
+
+**2) `model_lib/utils/hi_schema.py`**
+- `get_hi_cols_for_seg`/`get_hi_cost_vector`가 각자 갖고 있던 동일한 `_STAT_EXCLUDE`/
+  `_DIFF_EXCLUDE` 제외 로직을 `_iter_included_hi_keys()`(category, key) 제너레이터
+  하나로 통합하고, 새 `get_native_hi_cols()`(위 항목에서 소비)도 같은 제너레이터를
+  공유하도록 추가.
+
+**3) `model_lib/models/scr_model.py`**
+- `SCRModel.__init__()`(~225줄, 5개 이상 책임)를 `_build_probe_gates`(Stage A) ->
+  `_build_scen_gates`(Stage B) -> `_build_kernel_gates`(Stage B') -> (cap_head는
+  그대로) -> `_build_probe_mlp` 4개 메서드로 분리.
+- `from models.hard_concrete import ...`가 `__init__` 안의 지연 import였는데
+  (순환참조 이유 없음을 hard_concrete.py 자체 import가 torch뿐임을 확인해 검증)
+  모듈 최상단으로 승격 — 새 빌더 메서드들이 이 클래스를 매번 다시 import할 필요
+  없게.
+- `self.raw_cnn`/`with_raw_cnn`/`_raw_cnn_frozen`(2026-09-25부터 영구 False/None
+  고정 데드 스텁 — 의존 모듈 `models/raw_cnn.py` 자체가 repo에 없어 한 번도 실행된
+  적 없는 코드)을 완전히 삭제, `forward()`의 대응 `if self.raw_cnn is not None`
+  분기도 제거. `model_lib/tools/visualize_results.py`는 `getattr(model, "raw_cnn",
+  None)`로 이미 방어적으로 읽고 있어(속성이 없으면 None 반환, 기존과 동일 동작)
+  수정 불필요 — 실측으로 확인 후 그대로 둠.
+
+**4) `model_lib/models/hard_concrete.py`**
+- `HardConcreteGate.active_count()` 삭제 — 리포 전체 재검색 결과 호출하는 곳 없는
+  완전한 데드 메서드.
+
+**5) `model_lib/training/scr_loss.py`**
+- `_l0_penalty()`(~80줄, 3개 책임)를 `_raw_hi_penalty`(probe x scen 곱셈 결합)와
+  `_kernel_hi_penalty`(커널 HI 단독)로 분리.
+
+**6) `model_lib/evaluation/scr_evaluator.py`**
+- `predict_dataset()`(~118줄)를 `_build_routing_table`(라우팅 테이블) ->
+  `_predict_plain_batch`/`_predict_routed_batch`(배치 1개 추론, none vs hard/soft) ->
+  결과 concat + dict 구성만 남은 얇은 본체로 분리.
+- `_plot_capacity_curves()`(~100줄)를 `_extract_cell_series`(셀 하나 데이터 추출) ->
+  `_plot_capacity_curve_direction`(방향 하나의 3패널 채우기) -> 셀 루프 + figure
+  저장만 남은 얇은 본체로 분리.
+
+**검증**: 모든 파일 `py_compile` 통과. 구조 분리 전용 변경은 각 함수 단위로
+직접 실행 검증했다 — `segment_dataset.py`는 실제 `build_datasets()` 호출로
+cells/segs 개수가 이 세션의 모든 이전 run과 정확히 일치함을 확인(train=120
+val=40 test=40, segs 1676366/582720/661248). `hi_schema.py`는 리팩토링 전
+`_get_native_hi_cols()`와 새 `get_native_hi_cols()`의 출력이 byte-for-byte
+동일함을 직접 비교. `scr_model.py`는 커널 게이트·shared_gate·redundancy_mask를
+전부 채운 실제 구성으로 forward+backward를 실행해 shape/그래디언트 확인,
+`getattr(model, "raw_cnn", None)` 패턴이 속성 삭제 후에도 기존과 동일하게
+동작함을 확인. `scr_loss.py`는 hi_cost_weighted True/False 양쪽으로 forward+
+backward 실행. `scr_evaluator.py`는 실제 데이터로 만든 서브셋에 대해
+routing_mode none/hard/soft 전부 `predict_dataset()`을 돌리고 `_plot_capacity_
+curves()`가 만든 PNG를 육안으로 확인(6패널 구성·범례 정상).
+
+마지막으로 **datasets+models+training 세 폴더가 실제로 맞물려 돌아가는지** Step 8
+(`train.py`, `ACTIVE_MAX_EPOCHS=2`로 임시 단축 후 검증 뒤 원복)과 Step 9
+(`test.py`, 그 체크포인트로 oracle/hard/soft 3개 라우팅 모드 전부)를 실제로
+완주시켜 전부 exit 0으로 확인 — 데이터 로드, 모델 생성(게이트 구조: shared_gate
+27/66, 커널 게이트 시나리오별 폭 [8,11,12,7,10,11]), 학습 루프, 게이트 JSON/플롯
+저장, 체크포인트 로드, oracle/hard/soft 평가, scatter/confusion/capacity-curve/
+error-heatmap 전체 플롯 생성까지 에러 없이 완주했다(수치 자체는 2 epoch짜리
+스모크런이라 의미 없음 — 목적은 전 구간 배선이 끊기지 않았는지 확인). 검증용
+임시 run 디렉터리와 `ACTIVE_MAX_EPOCHS` 오버라이드는 검증 후 삭제/원복.
+
+### 2026-10-04 `FIXED_MIN_RAW_PARTIAL_CORR` 활성화(None -> 0.1) — "시너지" 정의 논의에서 시작
+
+사용자와 "시너지 개념의 효과를 어떻게 정량적으로 정의하는가"를 논의하다가, kernel.py
+Level2(비선형 융합)의 `min_raw_partial_corr` 필터(커널 예측값이 "자기 그룹 raw
+멤버로 이미 선형 설명되는 부분"을 빼고도 SOH와 관계가 남는지 검사 — 없으면 train_r2가
+높아도 그게 진짜 비선형 기여인지 raw 선형결합 재탕인지 구분이 안 됨)가
+`FIXED_MIN_RAW_PARTIAL_CORR=None`(비활성)이 기본값이라 지금 파이프라인에서
+전혀 작동하지 않고 있었다는 걸 확인했다.
+
+**값 선정**: 과거 유일하게 실측 쓰인 값(0.02, RESULTS_LOG.md 6개 run 전부)을
+조사해보니 6개 run 전부 "후보 N개 -> 최종 N개"로 단 한 건도 안 걸러진 사실상
+no-op 문턱이었다(synergy.py의 `min_partial_corr`에서 그냥 복붙된 값이라 독립
+튜닝된 적 없음). 공식 권장값도 문서에 없어서, 사용자에게 0.1(이 프로젝트의
+interaction.py가 이미 쓰는 `FIXED_INTERACTION_MIN_EFFECT_SIZE=0.1`, Cohen's
+small-effect 관례와 통일) / 0.02(역사적 값이지만 비추천) / 직접 지정 중
+선택지를 제시했고, **0.1**로 확정.
+
+**검증 겸 실측**: `run_pipeline.py 6 --to-step 7`로 활성화 후 재실행 — **결과는
+0.1에서도 raw-중복 탈락 0건, 최종 58개/평균 train R^2=0.3548로 직전
+global_dedup=True 베이스라인과 완전히 동일**했다. 즉 지금 레시피가 만드는
+커널 후보 전부가 0.1 문턱은 가볍게 통과한다는 뜻 — 두 가지로 해석 가능: (a)
+지금 살아남는 커널 HI들은 전부 "진짜" 비선형 기여가 있다(긍정적 신호), 또는
+(b) Nystroem+Ridge가 애초에 유연한 비선형 적합이라 raw 선형결합과 아주
+비슷하게만 움직여도 잔차 상관이 0.1을 넘기기 쉬운 구조일 수 있음(문턱이
+담보하는 변별력에 대한 열린 질문) — 둘 중 뭐가 맞는지는 이 필터 하나만으론
+확정할 수 없고, 추후 문턱을 더 올려보거나(예: 0.2~0.3) v-ctrl(셔플) 대조군과
+같이 봐야 판단 가능. 사용자에게 투명하게 보고.
+
+**검증**: `py_compile` 통과. 검증용 run(태그는 이전과 동일해 수치도 베이스라인과
+완전히 같았으므로 신규 정보 없음) 폴더와 `RESULTS_LOG.md` 2개 항목은 삭제해
+되돌림. `docs/PARAMETERS.md`의 해당 행도 "0.1(2026-10-04부터 활성)"로 갱신.

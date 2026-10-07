@@ -230,20 +230,34 @@ Fisher z-변환 상관계수 동일성 검정을 수행하고 Benjamini–Hochbe
 
 **처리** (시나리오별 독립 수행, 전부 `parameters.py` 값 — 2026-10-01부로 CLI
 플래그 아님):
-1. 전체 HI를 SOH와의 단순상관 절대값 내림차순 정렬(시드 순서로 사용).
-2. 미배정 HI 하나로 새 그룹을 시작해 `ACTIVE_MAX_GROUP_SIZE`(기본 4)까지
+0. **전역 사전 가지치기**(상시 적용, 2026-10-04 — 과거엔 `global_dedup` 플래그로
+   껐다 켰다 할 수 있었으나 지금은 파라미터 자체가 삭제됨): 그룹 성장을
+   시작하기 전에, 그 시나리오의 raw HI 전체를 대상으로
+   `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`(기본 0.9) 이상인 쌍을 변으로 연결해
+   연결요소를 구한다. 각 연결요소에서 SOH와 상관이 가장 큰 HI 하나만
+   "survivor"로 남겨 아래 그룹 성장의 후보로 삼고, 나머지는 자기 survivor가
+   최종적으로 속하게 된 그룹에 "attached"로만 사후 편입한다(시너지 점수
+   계산엔 기여 안 함). survivor끼리는 서로 다른 연결요소 출신이므로 **어느
+   그룹에 들어가든 항상 |corr|<threshold가 보장**된다 — 그룹 *간* 중복까지
+   완전히 차단(과거 `global_dedup=False` 상태의 "그룹 간 중복 미보장" 한계를
+   해소).
+1. survivor를 SOH와의 단순상관 절대값 내림차순 정렬(시드 순서로 사용).
+2. 미배정 survivor 하나로 새 그룹을 시작해 `ACTIVE_MAX_GROUP_SIZE`(기본 4)까지
    그리디하게 확장한다.
-3. 매 확장 단계: (a) 현재 그룹 멤버 전부와 raw 상관 절대값이
-   `ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD`(기본 0.9) 미만인 후보만 남겨
-   다중공선성을 배제하고, (b) 그중 SOH 단순상관 상위 `FIXED_PREFILTER_TOP_M`
-   (기본 15)개만 저비용으로 걸러낸 뒤, (c) 그 소수에 대해서만 **편상관계수**
-   (그룹 전체로 SOH/후보를 회귀한 잔차 간 상관)를 정밀 계산해 최댓값을
-   채택한다. 채택값이 `FIXED_MIN_PARTIAL_CORR`(기본 0.02) 미만이면 그룹
-   성장을 멈춘다.
-4. 모든 HI가 배정될 때까지 반복 — 약한 HI는 크기 1짜리 그룹으로 남고, 이런
-   그룹은 Step 7의 커널 융합 대상에서 제외된다.
+3. 매 확장 단계: (a) 미배정 survivor 중 SOH 단순상관 상위
+   `FIXED_PREFILTER_TOP_M`(기본 15)개만 저비용으로 걸러낸 뒤(0단계가 이미
+   survivor 간 다중공선성을 전역 보장하므로 여기서 다시 raw-corr을 재검사할
+   필요는 없음), (b) 그 소수에 대해서만 **편상관계수**(그룹 전체로 SOH/후보를
+   회귀한 잔차 간 상관)를 정밀 계산해 최댓값을 채택한다. 채택값이
+   `FIXED_MIN_PARTIAL_CORR`(기본 0.02) 미만이면 그룹 성장을 멈춘다.
+4. 모든 survivor가 배정될 때까지 반복 — 약한 survivor는 크기 1짜리 그룹으로
+   남고, 이런 그룹은 Step 7의 커널 융합 대상에서 제외된다. 마지막으로 0단계의
+   attached HI들을 각자의 survivor가 속한 최종 그룹에 붙인다.
 
-**출력**: `synergy_groups_{tag}.json` — 시나리오별 그룹 멤버 인덱스/이름/점수.
+**출력**: `synergy_groups_{tag}.json` — 시나리오별 그룹 멤버 인덱스/이름/점수
+(+ attached 목록). **실측 영향**(0단계 상시화 전후): 시나리오별 그룹 수
+18~22개 → 10~18개로 감소 — 순수 구조 변경이 아니라 실제 그룹 구성이 달라지는
+변경이다(`docs/REFACTORING.md` 2026-10-04 항목 참고).
 
 ---
 
@@ -255,8 +269,13 @@ Fisher z-변환 상관계수 동일성 검정을 수행하고 Benjamini–Hochbe
 **처리**: Step 6에서 만든 그룹 중 크기 2 이상인 것만 대상으로,
 **Nystroem(RBF 커널 근사) + Ridge 회귀** 파이프라인을 "그룹 멤버 HI들 →
 SOH"로 직접 학습시키고, 그 **예측값 자체를 새 "커널 HI" 특징**으로 쓴다(PCA나
-단순 가중합이 아니다). Raw HI를 대체하지 않고 옆에 "추가"한다. 2단계로
-다중공선성을 관리한다: (1) Step 6이 이미 그룹 내부 raw 중복 배제, (2) raw+kernel을
+단순 가중합이 아니다). Raw HI를 대체하지 않고 옆에 "추가"한다. 채택 전
+`FIXED_MIN_RAW_PARTIAL_CORR`(2026-10-04부터 0.1로 활성화, 이전 None=비활성)
+필터로 "커널 예측값이 자기 그룹 raw 멤버의 선형결합만으로 이미 설명되는 건
+아닌지"(raw-conditioned partial corr)를 검사한다 — 진짜 비선형 기여가 없으면
+후보에서 제외(현재 레시피에서는 실측상 탈락 0건).
+
+2단계로 다중공선성을 관리한다: (1) Step 6이 이미 그룹 내부 raw 중복 배제, (2) raw+kernel을
 합쳐 시나리오별로 상관 절대값이 매우 높은(기본 0.95) 쌍마다 한쪽을 제거 대상으로
 기록(실제 적용은 Step 8의 `train.py`가 담당). (2026-10-02 삭제: 예전엔 "커널
 HI끼리, 시나리오 무관하게 전체 train pooled로 상관을 검사"하는 중간 단계가 있었는데
@@ -268,8 +287,10 @@ HI끼리, 시나리오 무관하게 전체 train pooled로 상관을 검사"하�
 **출력**:
 - `kernel_group_features_{tag}.pkl` — 학습된 sklearn 파이프라인을 포함한 pickle.
   각 커널 피처의 `name, scenario, members(원본 HI), train_r2, model, mean, std`
-  (정규화 통계는 own-scenario 데이터로 계산). 검증 실행 예: 시나리오별 커널
-  HI 폭 `[16, 15, 16, 16, 15, 15]`, 평균 train R²=0.39.
+  (정규화 통계는 own-scenario 데이터로 계산). 검증 실행 예(Step 6의 0단계
+  전역 사전가지치기 상시화 이후, 2026-10-04 기준): 시나리오별 커널 HI 폭
+  `[chg_lo:8, chg_mid:10, chg_hi:12, dis_hi:7, dis_mid:10, dis_lo:11]`(총 58개),
+  평균 train R²=0.355.
 - `kernel_group_features_{tag}_combined_redundancy.json` — Step 8이 게이트
   출력에 적용할 (시나리오, raw HI) 배제 목록.
 
@@ -335,6 +356,12 @@ Stage A          Stage B               Stage B′
   있으면 그만큼 좁아진) `HardConcreteGate`. Interaction test(§7)에서 "공유"로
   판정된 HI는 여기서 빠지고 시나리오 무관 단일 `shared_gate`가 대신 담당한다.
   MSE 그래디언트만 받는다 — 순수하게 "이 시나리오에서 회귀에 유용한가"만 본다.
+  Step 7의 `combined_redundancy`(raw 쪽)로 만든 `redundancy_mask`도 **이
+  Stage B 출력(scen_x/scen_z)에만** 곱해진다 — Stage A(`probe_x`, 아래)엔
+  적용하지 않는다(의도적 설계). 2026-09-21에 입력 레벨(`nan_mask`)에서 한 번
+  더 강제했다가 그 마스크가 `probe_x`에도 공유돼 분류기 정확도가 붕괴한 적이
+  있어 되돌렸다 — 회귀 기준 "중복"이 분류 과제엔 유효한 판별 정보일 수 있기
+  때문이다.
 - **Stage B′ (커널 게이트)**: Step 7의 커널 HI(`x_kernel`)에 동일한 방식의
   시나리오별 게이트를 적용한다. `n_kernel_hi=0`이면(커널 블록 미사용) 이 단계
   전체가 비활성.

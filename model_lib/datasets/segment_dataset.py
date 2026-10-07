@@ -1,16 +1,12 @@
 """
-Segment-level dataset for SCR.
+model_lib/datasets/segment_dataset.py — SCR용 세그먼트 단위 PyTorch Dataset.
 
-Wide pkl format (one row = one cycle, HI columns per segment):
-  _4_data_hi/{MIT,HUST}/*.pkl
-
-Each cycle is reshaped to N_SEGS rows.  The cycle-level capacity_Ah is used
-as the SOH target for every segment in that cycle.
-
-Native seg format (future):
-  _4_data_hi/seg/{MIT,HUST}/*.pkl
-  one row = one segment, columns: cell_id, cycle, seg_id, scen, capacity_Ah, hi_0..hi_64
-  If this directory exists, it is loaded directly without reshape.
+실제 입력 포맷은 native seg pkl 하나뿐이다(2026-08-18 이후 — wide pkl에서 세그먼트별
+컬럼을 재구성하던 구 폴백은 삭제됨, 아래 `_load_raw_dataframe` 참고):
+  _4_data_hi/{axis}/seg/{MIT,HUST}/*.pkl
+  행 하나 = 세그먼트 하나. 컬럼: cell_id, cycle, segment_id, capacity_Ah,
+  hi_00..hi_{N_HI-1} 등. 사이클 전체 용량(SOH 타깃)은 같은 축의 wide(cycle) pkl에서
+  따로 가져와 덮어쓴다(`load_dataset_native_seg` 참고).
 """
 
 from __future__ import annotations
@@ -28,9 +24,7 @@ import torch
 from torch.utils.data import Dataset
 
 from utils.hi_schema import (
-    STAT_KEYS, DIFF_KEYS, LFP_KEYS, MORPH_KEYS,
-    get_hi_cols_for_seg, get_hi_cost_vector, N_HI, spec_from_qfrac,
-    EXCLUDE_STAT_LEAK, EXCLUDE_DQDV_LEAK,
+    get_hi_cols_for_seg, get_hi_cost_vector, get_native_hi_cols, N_HI, spec_from_qfrac,
     RAW_N, RAW_CH,
 )
 from common.scenario.base import ScenarioSpec
@@ -39,20 +33,19 @@ _DEFAULT_SPEC: ScenarioSpec = spec_from_qfrac()
 
 
 # ---------------------------------------------------------------------------
-# Cycle-level TRAIN-only subsampling (diagnostic, docs/260909_RESULTS.md §6-5)
+# 사이클 단위 TRAIN 전용 서브샘플링 (진단용, docs/260909_RESULTS.md §6-5)
 # ---------------------------------------------------------------------------
 
 def subsample_cycles_per_cell(df: pd.DataFrame, frac: float, seed: int) -> pd.DataFrame:
-    """Keep a random `frac` fraction of each cell's distinct *cycles* --
-    every segment/zone from a kept cycle is kept, none dropped within it.
+    """각 셀의 서로 다른 *사이클* 중 무작위로 frac 비율만 남긴다 — 남긴 사이클
+    안의 세그먼트/존은 전부 유지(하나도 안 버림).
 
-    This reduces per-gate training sample COUNT while leaving positional
-    (zone) diversity within the retained cycles fully intact, so it isolates
-    "sample count" from "positional diversity" when comparing assign="none"
-    (pooled, more samples/gate) against assign="position_bin" (split 6 ways,
-    fewer samples/gate) -- see docs/260909_RESULTS.md §6-5(e)/(diagnostic
-    requested 2026-09-12). Segment-level (row) subsampling would not isolate
-    this cleanly, since it could by chance also thin out specific zones.
+    게이트당 학습 샘플 "개수"만 줄이고 남은 사이클 안의 위치(zone) 다양성은
+    그대로 둬서, assign="none"(풀링, 게이트당 샘플 많음)과 assign="position_bin"
+    (6갈래 분할, 게이트당 샘플 적음)을 비교할 때 "샘플 개수"와 "위치 다양성"을
+    분리해서 볼 수 있다 — docs/260909_RESULTS.md §6-5(e)(2026-09-12 진단 요청).
+    세그먼트(행) 단위로 서브샘플링하면 우연히 특정 존만 줄어들 수 있어 이렇게
+    깔끔하게 분리되지 않는다.
     """
     rng = np.random.default_rng(seed)
     keep_idx: list[int] = []
@@ -65,7 +58,7 @@ def subsample_cycles_per_cell(df: pd.DataFrame, frac: float, seed: int) -> pd.Da
 
 
 # ---------------------------------------------------------------------------
-# Cell-level train / val / test split
+# 셀 단위 train / val / test 분할
 # ---------------------------------------------------------------------------
 
 def split_cells(
@@ -74,7 +67,8 @@ def split_cells(
     val_ratio: float = 0.1,
     seed: int = 42,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Reproducible cell-level split → (train, val, test) lists."""
+    """셀 ID 리스트를 재현 가능하게 섞어 (train, val, test) 세 리스트로 나눈다 —
+    train_ratio/val_ratio만큼 순서대로 잘라 담고 나머지는 전부 test로 둔다."""
     rng = np.random.default_rng(seed)
     ids = sorted(cell_ids)
     rng.shuffle(ids)
@@ -115,36 +109,14 @@ def split_cells_per_dataset(
 
 
 # ---------------------------------------------------------------------------
-# Internal loaders
+# 내부 로더
 # ---------------------------------------------------------------------------
 
-def _get_native_hi_cols() -> list[str]:
-    """66 HI column names in native seg format (no seg suffix).
-
-    2026-08-07: stat_q_abs/stat_energy_seg 포함(model_lib/utils/hi_schema.py와 동일
-    변경 — 이 함수가 그 파일의 _STAT_EXCLUDE 로직을 별도로 복제해서 갖고 있었음).
-    2026-08-08: EXCLUDE_STAT_LEAK도 hi_schema.py와 동일하게 반영(SOH_EXCLUDE_STAT_LEAK=1).
-    2026-09-19: EXCLUDE_DQDV_LEAK도 동일하게 반영(SOH_EXCLUDE_DQDV_LEAK=1, diff_dqdv_area 제외).
-    """
-    _STAT_EXCLUDE: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
-    _DIFF_EXCLUDE: set[str] = {"dqdv_area"} if EXCLUDE_DQDV_LEAK else set()
-    cols: list[str] = []
-    for key in STAT_KEYS:
-        if key in _STAT_EXCLUDE:
-            continue
-        cols.append(f"stat_{key}")
-    for key in DIFF_KEYS:
-        if key in _DIFF_EXCLUDE:
-            continue
-        cols.append(f"diff_{key}")
-    for key in LFP_KEYS:
-        cols.append(f"lfp_{key}")
-    for key in MORPH_KEYS:
-        cols.append(f"morph_{key}")
-    return cols
-
-
-_NATIVE_HI_COLS: list[str] = _get_native_hi_cols()
+# 2026-10-04: 로컬 _get_native_hi_cols()(STAT/DIFF/LFP/MORPH 제외 로직을 hi_schema.py와
+# 별도로 복제하고 있었음)를 삭제하고 hi_schema.get_native_hi_cols()로 통합했다 —
+# 두 함수가 byte-for-byte 동일 출력을 내는 것을 확인(model_lib/utils/hi_schema.py
+# 모듈 docstring의 _iter_included_hi_keys 참고).
+_NATIVE_HI_COLS: list[str] = get_native_hi_cols()
 
 
 def load_dataset_native_seg(
@@ -153,14 +125,12 @@ def load_dataset_native_seg(
     wide_data_dir: Path | None = None,
     spec: ScenarioSpec | None = None,
 ) -> pd.DataFrame:
-    """
-    Load native segment-format pkls (one row = one segment).
+    """native 세그먼트 포맷 pkl(행 하나=세그먼트 하나)을 로드한다.
 
-    capacity_Ah in native seg = stat_q_abs_{seg} (partial Ah per segment),
-    NOT the total cycle capacity. The correct SOH target is loaded from the
-    corresponding wide pkl in wide_data_dir if provided.
-
-    HI columns are mapped to hi_00..hi_64 via _get_native_hi_cols().
+    native seg의 capacity_Ah는 stat_q_abs_{seg}(세그먼트 일부 구간의 Ah)일 뿐
+    사이클 전체 용량이 아니다 — wide_data_dir가 주어지면 거기서 진짜 사이클 전체
+    용량(SOH 타깃)을 가져와 덮어쓴다. HI 컬럼은 get_native_hi_cols() 순서대로
+    hi_00..hi_{N_HI-1}로 이름을 바꾼다.
     """
     try:
         from utils.compat import install_numpy2_shim
@@ -182,7 +152,7 @@ def load_dataset_native_seg(
                 data = pickle.load(f)
             df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
 
-            # Replace per-segment capacity_Ah with cycle-level total capacity
+            # 세그먼트별 capacity_Ah를 사이클 전체 용량으로 교체
             cycle_cap: dict[int, float] | None = None
             if wide_ds_dir is not None:
                 wide_pkl = wide_ds_dir / f"{cell_id}.pkl"
@@ -196,9 +166,9 @@ def load_dataset_native_seg(
             if cycle_cap is not None:
                 df["capacity_Ah"] = df["cycle"].map(cycle_cap)
             else:
-                print(f"[dataset] WARNING: no wide pkl for {ds}/{cell_id}, using segment capacity_Ah")
+                print(f"[dataset] 경고: {ds}/{cell_id}에 대응하는 wide pkl 없음 — 세그먼트 자체 capacity_Ah 사용")
 
-            # Add metadata columns from segment_id via spec
+            # spec을 이용해 segment_id로부터 메타데이터 컬럼 추가
             _spec = spec or _DEFAULT_SPEC
             _seg_names  = _spec.scenario_names
             _id_to_name = {i: n for i, n in enumerate(_seg_names)}
@@ -211,7 +181,7 @@ def load_dataset_native_seg(
             df["direction"] = df["scen_idx"].map(_id_to_dir).astype(np.float32)
             df["level"]     = df["scen_idx"].map(_id_to_lvl).astype(np.int64)
 
-            # Map native HI cols → hi_00..hi_64 (exclude stat_q_abs)
+            # native HI 컬럼명을 hi_00..hi_{N_HI-1}로 매핑(stat_q_abs 등은 이미 제외된 상태)
             available = [c for c in _NATIVE_HI_COLS if c in df.columns]
             rename_map = {old: f"hi_{i:02d}" for i, old in enumerate(available)}
             df = df.rename(columns=rename_map)
@@ -246,13 +216,16 @@ def load_dataset_native_seg(
 
 
 # ---------------------------------------------------------------------------
-# Normalizer (fitted on train split)
+# 정규화기 (train split 기준으로 fit)
 # ---------------------------------------------------------------------------
 
 class SegmentNormalizer:
-    """Z-score normalization per HI feature; NaN → 0.0 after z-score."""
+    """HI 피처별 Z-score 정규화기 — NaN은 z-score 계산 후 0.0으로 채운다.
+    train split에서만 fit하고 val/test엔 그 통계를 그대로 적용해 누수를 막는다."""
 
     def __init__(self):
+        """평균/표준편차(mean_/std_)와 cap_init 전용 평균/표준편차를 전부
+        None/기본값으로 초기화한다 — fit() 호출 전까지는 미확정 상태."""
         self.mean_: np.ndarray | None = None  # (N_HI,)
         self.std_: np.ndarray | None = None   # (N_HI,)
         self.cap_init_mean_: float = 0.0   # cap_init z-score 전용 (SOH target과 무관)
@@ -260,9 +233,13 @@ class SegmentNormalizer:
 
     @property
     def hi_cols(self) -> list[str]:
+        """N_HI개 HI 컬럼명(hi_00..hi_{N_HI-1}) 리스트 — fit/transform이 공유."""
         return [f"hi_{i:02d}" for i in range(N_HI)]
 
     def fit(self, df: pd.DataFrame) -> "SegmentNormalizer":
+        """train split의 HI 컬럼별 평균/표준편차를 구해 저장한다(NaN은 무시하고,
+        표준편차가 0에 가까운 상수 컬럼은 1.0으로 고정해 0-division을 막는다).
+        cap_init(용량) 전용 평균/표준편차도 같은 자리에서 함께 구한다."""
         import warnings
         x = df[self.hi_cols].values.astype(np.float64)
         with warnings.catch_warnings():
@@ -283,6 +260,9 @@ class SegmentNormalizer:
         return self
 
     def transform_x(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        """fit()에서 구한 평균/표준편차로 HI를 z-score하고, 원래 NaN이었던
+        자리는 0.0으로 채운다. 반환값의 둘째 요소(mask)는 "원래 값이 있었는지"를
+        1.0/0.0으로 표시한 마스크."""
         x = df[self.hi_cols].values.astype(np.float64)
         nan_mask = np.isnan(x)
         x = (x - self.mean_) / self.std_
@@ -293,16 +273,10 @@ class SegmentNormalizer:
         """cap_init Ah → z-scored (모델 conditioning 입력용)."""
         return ((cap - self.cap_init_mean_) / self.cap_init_std_).astype(np.float32)
 
-    def inverse_cap_init(self, cap_norm: np.ndarray) -> np.ndarray:
-        return cap_norm * self.cap_init_std_ + self.cap_init_mean_
-
 
 # ---------------------------------------------------------------------------
-# PyTorch Dataset
+# PyTorch Dataset 클래스
 # ---------------------------------------------------------------------------
-
-HI_COLS = [f"hi_{i:02d}" for i in range(N_HI)]
-
 
 def _stack_raw_col(series, n: int) -> np.ndarray:
     """object 컬럼(list/ndarray per row) → (n, RAW_N) float32.
@@ -337,22 +311,65 @@ def _build_raw_tensor(df: pd.DataFrame) -> torch.Tensor:
     return torch.from_numpy(raw)
 
 
+def _compute_dataset_id(df: pd.DataFrame, cfg: dict) -> torch.Tensor:
+    """dataset_id 텐서 — 데이터셋 순서 인덱스(datasets 리스트 기준)를 [0, 1] 범위로
+    정규화한다(SegmentDataset.__init__에서 분리, 동작 변화 없음)."""
+    datasets_list = cfg.get("datasets", sorted(df["dataset"].unique().tolist()))
+    n_ds = max(len(datasets_list) - 1, 1)
+    ds_to_id = {ds: float(i) / n_ds for i, ds in enumerate(datasets_list)}
+    return torch.tensor(
+        df["dataset"].map(ds_to_id).fillna(0.0).values.astype(np.float32),
+        dtype=torch.float32,
+    )
+
+
+def _compute_cap_init_raw(df: pd.DataFrame, cfg: dict) -> np.ndarray:
+    """초기/정격 용량(raw Ah) 배열 — use_initial_capacity=True면 각 셀의 첫 사이클
+    실측 용량, False(기본)면 cfg["nominal_capacities"] 고정값(SegmentDataset.__init__에서
+    분리, 동작 변화 없음)."""
+    if cfg.get("use_initial_capacity", False):
+        first_cap = (
+            df.sort_values("cycle")
+            .groupby("cell_id")["capacity_Ah"]
+            .first()
+        )
+        return df["cell_id"].map(first_cap).values.astype(np.float32)
+
+    nominal = cfg.get("nominal_capacities", {})
+    _missing = sorted(set(df["dataset"].unique()) - set(nominal))
+    if _missing:
+        # 2026-09-05: 예전엔 없는 데이터셋을 .fillna(1.0)으로 조용히 채웠다 —
+        # TJU(정격 ~3.2Ah)처럼 실제 스케일이 1.0Ah와 크게 다른 데이터셋이
+        # nominal_capacities에 빠지면 SOH=cap_raw/1.0로 계산되어 조용히
+        # 완전히 틀린 타깃(예: 3.2 등 >100%)이 만들어지는데도 에러 없이
+        # 학습이 진행됐다. 데이터가 있는데 설정만 깜빡한 경우를 즉시 드러내도록
+        # 명시적으로 실패시킨다.
+        raise ValueError(
+            f"[dataset] use_initial_capacity=False인데 nominal_capacities에 "
+            f"없는 데이터셋: {_missing} (있는 키: {sorted(nominal)}) — "
+            f"cfg['data']['nominal_capacities']에 정격 용량(Ah)을 추가하세요. "
+            f"CALCE처럼 셀마다 정격이 다른 데이터셋(CS2 1.1Ah/CX2 1.35Ah)은 "
+            f"이 방식 자체가 부정확하므로 use_initial_capacity=True 권장."
+        )
+    return df["dataset"].map(nominal).values.astype(np.float32)
+
+
 class SegmentDataset(Dataset):
-    """
-    One sample = one (cell, cycle, segment) triple.
+    """샘플 하나 = (셀, 사이클, 세그먼트) 조합 하나 — SCRModel이 바로 소비하는
+    텐서들을 __getitem__에서 묶어서 돌려준다.
 
-    Tensors:
-      x_hi       : (N_HI,)   normalised HI features [float32]
-      nan_mask   : (N_HI,)   1.0 = valid, 0.0 = was NaN [float32]
-      direction  : scalar     +1.0 or -1.0 [float32]
-      level      : scalar     0/1/2 int64  (ground truth for classifier loss)
-      scen_idx    : scalar     0-5 int64
-      target     : scalar     SOH ratio = capacity_Ah / cap_init_Ah ∈ (0, 1] [float32]
-      dataset_id : scalar     데이터셋 인덱스 (datasets 리스트 순서, 0-based) [float32]
-      cap_init   : scalar     z-scored 초기/정격 용량 Ah (모델 conditioning용) [float32]
+    텐서:
+      x_hi       : (N_HI,)   정규화된 HI 피처 [float32]
+      nan_mask   : (N_HI,)   1.0=유효, 0.0=원래 NaN이었음 [float32]
+      direction  : 스칼라     +1.0(충전) 또는 -1.0(방전) [float32]
+      level      : 스칼라     0/1/2 int64(분류 손실의 정답 라벨)
+      scen_idx   : 스칼라     0 ~ n_scenarios-1 int64
+      target     : 스칼라     SOH 비율 = capacity_Ah / cap_init_Ah ∈ (0, 1] [float32]
+      dataset_id : 스칼라     데이터셋 인덱스(datasets 리스트 순서, 0-based) [float32]
+      cap_init   : 스칼라     z-scored 초기/정격 용량 Ah(모델 conditioning용) [float32]
 
-    Attributes (not in __getitem__):
-      cap_init_raw  : (N,) float32 numpy — 초기/정격 용량 Ah (평가 시 SOH→Ah 변환용)
+    속성(__getitem__에는 안 들어감):
+      cap_init_raw  : (N,) float32 numpy — 초기/정격 용량 Ah(평가 시 SOH→Ah 변환용)
       capacity_raw  : (N,) float32 numpy — 실측 capacity_Ah
     """
 
@@ -363,6 +380,9 @@ class SegmentDataset(Dataset):
         fit_normalizer: bool = False,
         data_cfg: dict | None = None,
     ):
+        """df(세그먼트 단위 DataFrame)를 정규화 + 텐서화해서 SCRModel 입력으로
+        바로 쓸 수 있는 형태로 만든다. fit_normalizer=True(train split에서만)면
+        normalizer를 이 df로 먼저 fit한다."""
         if fit_normalizer:
             normalizer.fit(df)
 
@@ -376,46 +396,10 @@ class SegmentDataset(Dataset):
         self.level = torch.tensor(df["level"].values, dtype=torch.long)
         self.scen_idx = torch.tensor(df["scen_idx"].values, dtype=torch.long)
 
-        # ----------------------------------------------------------------
-        # 메타 스칼라: dataset_id + cap_init
-        # ----------------------------------------------------------------
+        # 메타 스칼라: dataset_id + cap_init (각각 헬퍼로 분리, 동작 변화 없음)
         cfg = data_cfg or {}
-        datasets_list = cfg.get("datasets", sorted(df["dataset"].unique().tolist()))
-
-        # dataset_id: 데이터셋 순서 인덱스를 [0, 1] 범위로 정규화
-        n_ds = max(len(datasets_list) - 1, 1)
-        ds_to_id = {ds: float(i) / n_ds for i, ds in enumerate(datasets_list)}
-        self.dataset_id = torch.tensor(
-            df["dataset"].map(ds_to_id).fillna(0.0).values.astype(np.float32),
-            dtype=torch.float32,
-        )
-
-        # cap_init: 초기/정격 용량 raw Ah
-        if cfg.get("use_initial_capacity", False):
-            first_cap = (
-                df.sort_values("cycle")
-                .groupby("cell_id")["capacity_Ah"]
-                .first()
-            )
-            cap_init_raw = df["cell_id"].map(first_cap).values.astype(np.float32)
-        else:
-            nominal = cfg.get("nominal_capacities", {})
-            _missing = sorted(set(df["dataset"].unique()) - set(nominal))
-            if _missing:
-                # 2026-09-05: 예전엔 없는 데이터셋을 .fillna(1.0)으로 조용히 채웠다 —
-                # TJU(정격 ~3.2Ah)처럼 실제 스케일이 1.0Ah와 크게 다른 데이터셋이
-                # nominal_capacities에 빠지면 SOH=cap_raw/1.0로 계산되어 조용히
-                # 완전히 틀린 타깃(예: 3.2 등 >100%)이 만들어지는데도 에러 없이
-                # 학습이 진행됐다. 데이터가 있는데 설정만 깜빡한 경우를 즉시 드러내도록
-                # 명시적으로 실패시킨다.
-                raise ValueError(
-                    f"[dataset] use_initial_capacity=False인데 nominal_capacities에 "
-                    f"없는 데이터셋: {_missing} (있는 키: {sorted(nominal)}) — "
-                    f"cfg['data']['nominal_capacities']에 정격 용량(Ah)을 추가하세요. "
-                    f"CALCE처럼 셀마다 정격이 다른 데이터셋(CS2 1.1Ah/CX2 1.35Ah)은 "
-                    f"이 방식 자체가 부정확하므로 use_initial_capacity=True 권장."
-                )
-            cap_init_raw = df["dataset"].map(nominal).values.astype(np.float32)
+        self.dataset_id = _compute_dataset_id(df, cfg)
+        cap_init_raw = _compute_cap_init_raw(df, cfg)
 
         # target: SOH ratio (dataset-agnostic, 정규화 불필요)
         soh = cap_raw / np.where(cap_init_raw > 0, cap_init_raw, 1.0)
@@ -425,7 +409,7 @@ class SegmentDataset(Dataset):
         cap_init_norm = normalizer.transform_cap_init(cap_init_raw)
         self.cap_init = torch.tensor(cap_init_norm, dtype=torch.float32)
 
-        # metadata (not returned by __getitem__, but useful for evaluation)
+        # 메타데이터(__getitem__엔 안 들어가지만 평가 시 유용)
         self.cap_init_raw = cap_init_raw                          # SOH→Ah 변환용
         self.cell_ids = df["cell_id"].values.tolist()
         self.cycles = df["cycle"].values.tolist()
@@ -438,9 +422,11 @@ class SegmentDataset(Dataset):
         self.capacity_raw = cap_raw
 
     def __len__(self) -> int:
+        """전체 세그먼트(샘플) 개수."""
         return len(self.target)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        """인덱스 하나에 대응하는 샘플을 모델 입력 키로 묶어서 돌려준다."""
         return {
             "x_hi":      self.x_hi[idx],
             "x_raw":     self.x_raw[idx],
@@ -479,6 +465,8 @@ class FastTensorLoader:
         include_raw: bool = False,
         drop_last: bool = False,
     ) -> None:
+        """ds의 텐서들 중 모델에 필요한 키만 골라 참조로 들고 있는다 — 배치
+        생성 시점엔 인덱싱만 하면 되므로 사본을 만들지 않는다."""
         keys = list(self._MODEL_KEYS)
         if include_raw:
             keys.insert(1, "x_raw")
@@ -495,11 +483,14 @@ class FastTensorLoader:
         self.drop_last = drop_last
 
     def __len__(self) -> int:
+        """배치 개수(drop_last=True면 마지막 자투리 배치를 버린 개수)."""
         if self.drop_last:
             return self.n // self.bs
         return (self.n + self.bs - 1) // self.bs
 
     def __iter__(self):
+        """(shuffle이면 매번 새로 섞은) 인덱스를 batch_size씩 잘라 배치 dict를
+        순서대로 내놓는 제너레이터."""
         idx = torch.randperm(self.n) if self.shuffle else torch.arange(self.n)
         for i in range(0, self.n, self.bs):
             sel = idx[i:i + self.bs]
@@ -509,40 +500,24 @@ class FastTensorLoader:
 
 
 # ---------------------------------------------------------------------------
-# Top-level builder used by train_scr.py
+# 최상위 빌더 — 8_train/train.py가 호출
 # ---------------------------------------------------------------------------
 
-def build_datasets(
-    cfg: dict,
-    spec: ScenarioSpec | None = None,
-) -> tuple[SegmentDataset, SegmentDataset, SegmentDataset, SegmentNormalizer]:
-    """
-    Load data → split → build train/val/test SegmentDatasets.
+def _load_raw_dataframe(data_cfg: dict, spec: ScenarioSpec | None) -> pd.DataFrame:
+    """native seg pkl을 로드하고 direction_filter까지 적용한 DataFrame을 돌려준다
+    (build_datasets에서 분리, 동작 변화 없음).
 
-    is_cross_dataset_evaluate=false (default):
-        셀 단위 random split. datasets 전체에서 train/val/test 분리.
-    is_cross_dataset_evaluate=true:
-        datasets[0]을 train/val 소스, datasets[1]을 test 소스로 사용.
-        normalizer는 datasets[0] train 셀 기준으로만 fit.
-    """
-    data_cfg      = cfg["data"]
-    root          = PROJECT_ROOT
-    seg_dir       = root / data_cfg["seg_data_dir"]
-    wide_dir      = root / data_cfg["data_dir"]
+    2026-08-18(af9be9c) 시나리오 마지막 세그먼트만 살아남던 덮어쓰기 버그를 고치면서
+    세그먼트별 HI(diff_dqdv_area_chg_lo 등)가 wide(사이클 단위) pkl에는 더 이상 저장되지
+    않고 native seg pkl에만 저장되도록 바뀌었다. 예전엔 native seg pkl이 없으면 wide
+    pkl에서 세그먼트별 컬럼을 읽어 재구성하는 폴백(load_dataset_wide/_wide_to_segments)이
+    있었지만, 그 컬럼 자체가 더 이상 wide pkl에 없으므로 그 폴백은 항상 빈 데이터만
+    반환하다 아래와 무관한 "No data loaded" 에러로 죽었다 — 실제 원인(Step4 미실행)을
+    전혀 알려주지 못해서 폴백 자체를 제거하고 아래처럼 조기에 명확한 에러를 낸다."""
+    seg_dir  = PROJECT_ROOT / data_cfg["seg_data_dir"]
+    wide_dir = PROJECT_ROOT / data_cfg["data_dir"]
     datasets_list = data_cfg["datasets"]
-    is_cross      = data_cfg.get("is_cross_dataset_evaluate", False)
 
-    # ------------------------------------------------------------------
-    # Data loading (공통) — native seg pkl 전용.
-    #
-    # 2026-08-18(af9be9c) 시나리오 마지막 세그먼트만 살아남던 덮어쓰기 버그를 고치면서
-    # 세그먼트별 HI(diff_dqdv_area_chg_lo 등)가 wide(사이클 단위) pkl에는 더 이상 저장되지
-    # 않고 native seg pkl에만 저장되도록 바뀌었다. 예전엔 native seg pkl이 없으면 wide
-    # pkl에서 세그먼트별 컬럼을 읽어 재구성하는 폴백(load_dataset_wide/_wide_to_segments)이
-    # 있었지만, 그 컬럼 자체가 더 이상 wide pkl에 없으므로 그 폴백은 항상 빈 데이터만
-    # 반환하다 아래와 무관한 "No data loaded" 에러로 죽었다 — 실제 원인(Step4 미실행)을
-    # 전혀 알려주지 못해서 폴백 자체를 제거하고 아래처럼 조기에 명확한 에러를 낸다.
-    # ------------------------------------------------------------------
     if not seg_dir.exists():
         raise RuntimeError(
             f"[dataset] native seg pkl 디렉터리가 없습니다: {seg_dir}\n"
@@ -567,122 +542,155 @@ def build_datasets(
         _n_before = len(df)
         df = df[df["direction"] == _dir_val].reset_index(drop=True)
         print(f"[dataset] direction_filter={direction_filter!r} 적용: {_n_before:,} → {len(df):,} rows")
+    return df
 
-    # ------------------------------------------------------------------
-    # Split
-    # ------------------------------------------------------------------
+
+def _split_cross_dataset(
+    df: pd.DataFrame, datasets_list: list[str], train_ratio: float, val_ratio: float, seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """datasets[0]을 train/val 소스, datasets[1]을 test 소스로 쓰는 cross-dataset
+    분할(build_datasets의 is_cross_dataset_evaluate=true 경로, 동작 변화 없음)."""
+    if len(datasets_list) < 2:
+        raise ValueError(
+            "is_cross_dataset_evaluate=true이려면 config에 데이터셋이 최소 2개 필요합니다"
+        )
+    train_src = datasets_list[0]
+    test_src  = datasets_list[1]
+
+    df_tv   = df[df["dataset"] == train_src].reset_index(drop=True)
+    df_test = df[df["dataset"] == test_src].reset_index(drop=True)
+
+    if len(df_tv) == 0:
+        raise RuntimeError(f"[dataset] train 소스 '{train_src}'에 데이터가 없습니다")
+    if len(df_test) == 0:
+        raise RuntimeError(f"[dataset] test 소스 '{test_src}'에 데이터가 없습니다")
+
+    # train/val 비율을 train_src 내에서 재정규화 (test_ratio 부분 제외)
+    tv_total  = train_ratio + val_ratio
+    adj_train = train_ratio / tv_total
+    adj_val   = val_ratio   / tv_total
+
+    tv_cells = df_tv["cell_id"].unique().tolist()
+    train_cells, val_cells, _ = split_cells(
+        tv_cells, train_ratio=adj_train, val_ratio=adj_val, seed=seed,
+    )
+
+    train_df = df_tv[df_tv["cell_id"].isin(train_cells)].reset_index(drop=True)
+    val_df   = df_tv[df_tv["cell_id"].isin(val_cells)].reset_index(drop=True)
+    test_df  = df_test
+
+    print(f"[dataset] cross-dataset: train/val 소스={train_src} | test 소스={test_src}")
+    return train_df, val_df, test_df
+
+
+def _split_same_pool(
+    df: pd.DataFrame, data_cfg: dict, train_ratio: float, val_ratio: float, seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """같은 전체 풀에서 셀 단위로 train/val/test를 나눈다(build_datasets의
+    is_cross_dataset_evaluate=false 경로, 동작 변화 없음) — forced_test_cells/
+    stratify_split_by_dataset/plain 3가지 전략 중 설정된 것을 적용한다."""
+    cell_ids = df["cell_id"].unique().tolist()
+    forced_test = data_cfg.get("forced_test_cells")
+    if forced_test:
+        # 실험9(§8-5, docs/260810_RESULTS.md): datasets 구성이 다른 run들(풀링/MIT-only/
+        # HUST-only) 간에 test 셀을 고정해 짝지어진(paired) 비교가 가능하도록 한다.
+        # split_cells()는 그 run의 cell_ids 리스트 "전체"를 shuffle하므로, datasets가
+        # 다르면 같은 seed를 써도 다른 셀이 뽑힌다(리스트 길이·내용이 달라지기 때문) —
+        # forced_test_cells를 먼저 떼어내 이 문제를 우회한다. 이 필드가 없으면(기본값)
+        # 아래 분기는 전혀 실행되지 않아 기존 동작과 100% 동일하다.
+        forced_test_set = set(forced_test) & set(cell_ids)
+        remaining = [c for c in cell_ids if c not in forced_test_set]
+        tv_total  = train_ratio + val_ratio
+        adj_train = train_ratio / tv_total
+        adj_val   = val_ratio   / tv_total
+        train_cells, val_cells, _ = split_cells(
+            remaining, train_ratio=adj_train, val_ratio=adj_val, seed=seed,
+        )
+        test_cells = sorted(forced_test_set)
+        print(f"[dataset] forced_test_cells 지정: {len(test_cells)}개 고정 test "
+              f"(전체 지정 {len(forced_test)}개 중 이 run에 존재하는 것만) — "
+              f"나머지 {len(remaining)}개를 train/val로 재분할")
+    elif data_cfg.get("stratify_split_by_dataset", False):
+        # 2026-09-05: 데이터셋별 6:2:2 독립 split (opt-in — 기본 False라 기존
+        # 단일 풀링 split을 쓰는 run들의 재현성에는 전혀 영향 없음). MIT/HUST/TJU/
+        # CALCE처럼 셀 수 편차가 큰 데이터셋을 함께 쓸 때 모든 split에 4개
+        # 데이터셋이 항상 비율대로 섞이도록 보장한다(split_cells_per_dataset 참고).
+        cell_ids_by_ds: dict[str, list[str]] = {
+            ds: sub["cell_id"].unique().tolist()
+            for ds, sub in df.groupby("dataset")
+        }
+        train_cells, val_cells, test_cells = split_cells_per_dataset(
+            cell_ids_by_ds, train_ratio=train_ratio, val_ratio=val_ratio, seed=seed,
+        )
+        print(f"[dataset] stratify_split_by_dataset=True — 데이터셋별 독립 6:2:2 적용: "
+              + ", ".join(f"{ds}={len(ids)}셀" for ds, ids in sorted(cell_ids_by_ds.items())))
+    else:
+        train_cells, val_cells, test_cells = split_cells(
+            cell_ids, train_ratio=train_ratio, val_ratio=val_ratio, seed=seed,
+        )
+
+    train_df = df[df["cell_id"].isin(train_cells)].reset_index(drop=True)
+    val_df   = df[df["cell_id"].isin(val_cells)].reset_index(drop=True)
+    test_df  = df[df["cell_id"].isin(test_cells)].reset_index(drop=True)
+    return train_df, val_df, test_df
+
+
+def _apply_train_cycle_frac(train_df: pd.DataFrame, data_cfg: dict, seed: int) -> pd.DataFrame:
+    """train_cycle_frac<1.0이면 train split에만 cycle 단위 서브샘플링을 적용한다
+    (진단용, build_datasets에서 분리 — val/test는 그대로 둬서 기존 run들과 평가가
+    비교 가능하게 유지, 동작 변화 없음)."""
+    train_cycle_frac = data_cfg.get("train_cycle_frac", 1.0)
+    if train_cycle_frac >= 1.0:
+        return train_df
+    n_before = len(train_df)
+    train_df = subsample_cycles_per_cell(train_df, frac=train_cycle_frac, seed=seed)
+    print(f"[dataset] train_cycle_frac={train_cycle_frac} 적용 — "
+          f"train 세그먼트 {n_before:,} -> {len(train_df):,}개로 축소 (cycle 단위, "
+          f"zone 다양성은 유지)")
+    return train_df
+
+
+def build_datasets(
+    cfg: dict,
+    spec: ScenarioSpec | None = None,
+) -> tuple[SegmentDataset, SegmentDataset, SegmentDataset, SegmentNormalizer]:
+    """
+    데이터 로드 → 분할 → train/val/test SegmentDataset 생성까지 처리하는 최상위 진입점.
+
+    is_cross_dataset_evaluate=false (default):
+        셀 단위 random split. datasets 전체에서 train/val/test 분리.
+    is_cross_dataset_evaluate=true:
+        datasets[0]을 train/val 소스, datasets[1]을 test 소스로 사용.
+        normalizer는 datasets[0] train 셀 기준으로만 fit.
+
+    2026-10-04: 단일 책임 원칙에 따라 서브함수로 분리했다(동작 변화 없는 순수 구조
+    정리) — _load_raw_dataframe(로딩+방향필터) -> _split_cross_dataset/_split_same_pool
+    (분할 전략) -> _apply_train_cycle_frac(train 서브샘플링) -> SegmentDataset 생성.
+    """
+    data_cfg = cfg["data"]
     train_ratio = data_cfg.get("train_ratio", 0.6)
     val_ratio   = data_cfg.get("val_ratio",   0.2)
     seed        = data_cfg.get("split_seed",  42)
 
-    if is_cross:
-        if len(datasets_list) < 2:
-            raise ValueError(
-                "is_cross_dataset_evaluate=true requires at least 2 datasets in config"
-            )
-        train_src = datasets_list[0]
-        test_src  = datasets_list[1]
+    df = _load_raw_dataframe(data_cfg, spec)
 
-        df_tv   = df[df["dataset"] == train_src].reset_index(drop=True)
-        df_test = df[df["dataset"] == test_src].reset_index(drop=True)
-
-        if len(df_tv) == 0:
-            raise RuntimeError(f"[dataset] train source '{train_src}' has no data")
-        if len(df_test) == 0:
-            raise RuntimeError(f"[dataset] test source '{test_src}' has no data")
-
-        # train/val 비율을 train_src 내에서 재정규화 (test_ratio 부분 제외)
-        tv_total    = train_ratio + val_ratio
-        adj_train   = train_ratio / tv_total
-        adj_val     = val_ratio   / tv_total
-
-        tv_cells = df_tv["cell_id"].unique().tolist()
-        train_cells, val_cells, _ = split_cells(
-            tv_cells,
-            train_ratio=adj_train,
-            val_ratio=adj_val,
-            seed=seed,
+    if data_cfg.get("is_cross_dataset_evaluate", False):
+        train_df, val_df, test_df = _split_cross_dataset(
+            df, data_cfg["datasets"], train_ratio, val_ratio, seed,
         )
-        test_cells = df_test["cell_id"].unique().tolist()
-
-        train_df = df_tv[df_tv["cell_id"].isin(train_cells)].reset_index(drop=True)
-        val_df   = df_tv[df_tv["cell_id"].isin(val_cells)].reset_index(drop=True)
-        test_df  = df_test
-
-        print(f"[dataset] cross-dataset: train/val={train_src} | test={test_src}")
     else:
-        cell_ids = df["cell_id"].unique().tolist()
-        forced_test = data_cfg.get("forced_test_cells")
-        if forced_test:
-            # 실험9(§8-5, docs/260810_RESULTS.md): datasets 구성이 다른 run들(풀링/MIT-only/
-            # HUST-only) 간에 test 셀을 고정해 짝지어진(paired) 비교가 가능하도록 한다.
-            # split_cells()는 그 run의 cell_ids 리스트 "전체"를 shuffle하므로, datasets가
-            # 다르면 같은 seed를 써도 다른 셀이 뽑힌다(리스트 길이·내용이 달라지기 때문) —
-            # forced_test_cells를 먼저 떼어내 이 문제를 우회한다. 이 필드가 없으면(기본값)
-            # 아래 분기는 전혀 실행되지 않아 기존 동작과 100% 동일하다.
-            forced_test_set = set(forced_test) & set(cell_ids)
-            remaining = [c for c in cell_ids if c not in forced_test_set]
-            tv_total  = train_ratio + val_ratio
-            adj_train = train_ratio / tv_total
-            adj_val   = val_ratio   / tv_total
-            train_cells, val_cells, _ = split_cells(
-                remaining,
-                train_ratio=adj_train,
-                val_ratio=adj_val,
-                seed=seed,
-            )
-            test_cells = sorted(forced_test_set)
-            print(f"[dataset] forced_test_cells 지정: {len(test_cells)}개 고정 test "
-                  f"(전체 지정 {len(forced_test)}개 중 이 run에 존재하는 것만) — "
-                  f"나머지 {len(remaining)}개를 train/val로 재분할")
-        elif data_cfg.get("stratify_split_by_dataset", False):
-            # 2026-09-05: 데이터셋별 6:2:2 독립 split (opt-in — 기본 False라 기존
-            # 단일 풀링 split을 쓰는 run들의 재현성에는 전혀 영향 없음). MIT/HUST/TJU/
-            # CALCE처럼 셀 수 편차가 큰 데이터셋을 함께 쓸 때 모든 split에 4개
-            # 데이터셋이 항상 비율대로 섞이도록 보장한다(split_cells_per_dataset 참고).
-            cell_ids_by_ds: dict[str, list[str]] = {
-                ds: sub["cell_id"].unique().tolist()
-                for ds, sub in df.groupby("dataset")
-            }
-            train_cells, val_cells, test_cells = split_cells_per_dataset(
-                cell_ids_by_ds,
-                train_ratio=train_ratio,
-                val_ratio=val_ratio,
-                seed=seed,
-            )
-            print(f"[dataset] stratify_split_by_dataset=True — 데이터셋별 독립 6:2:2 적용: "
-                  + ", ".join(f"{ds}={len(ids)}셀" for ds, ids in sorted(cell_ids_by_ds.items())))
-        else:
-            train_cells, val_cells, test_cells = split_cells(
-                cell_ids,
-                train_ratio=train_ratio,
-                val_ratio=val_ratio,
-                seed=seed,
-            )
+        train_df, val_df, test_df = _split_same_pool(df, data_cfg, train_ratio, val_ratio, seed)
 
-        train_df = df[df["cell_id"].isin(train_cells)].reset_index(drop=True)
-        val_df   = df[df["cell_id"].isin(val_cells)].reset_index(drop=True)
-        test_df  = df[df["cell_id"].isin(test_cells)].reset_index(drop=True)
+    train_df = _apply_train_cycle_frac(train_df, data_cfg, seed)
 
-    # train_cycle_frac<1.0: 진단용 cycle 단위 서브샘플링, train split에만 적용
-    # (val/test는 그대로 둬서 기존 run들과 평가가 비교 가능하게 유지).
-    train_cycle_frac = data_cfg.get("train_cycle_frac", 1.0)
-    if train_cycle_frac < 1.0:
-        n_before = len(train_df)
-        train_df = subsample_cycles_per_cell(train_df, frac=train_cycle_frac, seed=seed)
-        print(f"[dataset] train_cycle_frac={train_cycle_frac} 적용 — "
-              f"train 세그먼트 {n_before:,} -> {len(train_df):,}개로 축소 (cycle 단위, "
-              f"zone 다양성은 유지)")
-
-    # ------------------------------------------------------------------
-    # Build datasets (normalizer는 train 기준 fit)
-    # ------------------------------------------------------------------
+    # SegmentDataset 생성 (normalizer는 train 기준 fit)
     norm     = SegmentNormalizer()
     train_ds = SegmentDataset(train_df, norm, fit_normalizer=True,  data_cfg=data_cfg)
     val_ds   = SegmentDataset(val_df,   norm, fit_normalizer=False, data_cfg=data_cfg)
     test_ds  = SegmentDataset(test_df,  norm, fit_normalizer=False, data_cfg=data_cfg)
 
-    print(f"[dataset] cells  train={len(train_cells)} val={len(val_cells)} test={len(test_cells)}")
+    print(f"[dataset] cells  train={train_df['cell_id'].nunique()} "
+          f"val={val_df['cell_id'].nunique()} test={test_df['cell_id'].nunique()}")
     print(f"[dataset] segs   train={len(train_ds)} val={len(val_ds)} test={len(test_ds)}")
 
     return train_ds, val_ds, test_ds, norm

@@ -81,10 +81,6 @@ class HardConcreteGate(nn.Module):
         z = (s * (self.ZETA - self.GAMMA) + self.GAMMA).clamp(0.0, 1.0)
         return (z > 0).nonzero(as_tuple=False).squeeze(1).tolist()
 
-    @torch.no_grad()
-    def active_count(self) -> int:
-        return len(self.active_indices())
-
     def extra_repr(self) -> str:
         return f"n_features={self.n_features}"
 

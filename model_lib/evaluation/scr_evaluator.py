@@ -5,6 +5,11 @@ figures/scatter_*.png, capacity_curve_*.png, confusion_matrix_*.png는 이 모�
 _plot_scatter/_plot_capacity_curves/_plot_confusion_matrix를 9_eval/test.py가 호출해
 생성한다. metrics/metrics.json은 save_metrics()가 만든다. routing/, predictions/ 산출물은
 test.py가 자체 로직으로 직접 쓴다(이 모듈은 관여하지 않음).
+
+2026-10-04: 단일 책임 원칙에 따라 서브함수로 분리했다(동작 변화 없는 순수 구조
+정리) — predict_dataset은 _build_routing_table/_predict_plain_batch/
+_predict_routed_batch로, _plot_capacity_curves는 _extract_cell_series/
+_plot_capacity_curve_direction으로 나눴다. 각 함수 docstring 참고.
 """
 
 from __future__ import annotations
@@ -90,6 +95,73 @@ class SCREvaluator:
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
+    def _build_routing_table(self) -> torch.Tensor | None:
+        """spec.routing((방향,레벨)->시나리오, jagged list일 수 있음)을 패딩된
+        (n_dir, n_classes) long 텐서로 만든다 — hard/soft 라우팅 전용. spec에
+        routing이 없으면 None(predict_dataset에서 분리, 동작 변화 없음)."""
+        if not hasattr(self._spec, "routing"):
+            return None
+        _r = self._spec.routing
+        n_dir = len(_r)
+        n_cls = max(len(row) for row in _r)
+        routing_t = torch.zeros(n_dir, n_cls, dtype=torch.long, device=self.device)
+        for d, row in enumerate(_r):
+            for c, sid in enumerate(row):
+                routing_t[d, c] = sid
+        return routing_t
+
+    def _predict_plain_batch(self, batch_d: dict) -> tuple[dict, np.ndarray]:
+        """routing_mode="none" 또는 분류기 미주입 — 방향(direction)만으로 헤드 선택,
+        분류기 우회(predict_dataset에서 분리, 동작 변화 없음)."""
+        out = self.model(batch_d)
+        lv_pred = out["level_logits"].argmax(1).cpu().numpy()
+        return out, lv_pred
+
+    def _predict_routed_batch(
+        self, batch_d: dict, routing_mode: str, routing_t: torch.Tensor,
+    ) -> tuple[dict, np.ndarray]:
+        """routing_mode="hard"|"soft" — 학습된 분류기로 먼저 레벨을 예측하고, routing_t로
+        (방향,레벨)->시나리오를 찾아 그 시나리오 헤드로 회귀한다(predict_dataset에서
+        분리, 동작 변화 없음). hard: argmax 레벨 하나로 단일 헤드만 통과. soft: 전체
+        클래스에 대해 각각 통과시킨 뒤 분류기 확률로 가중평균."""
+        x_hi    = batch_d["x_hi"]
+        dir_t   = batch_d["direction"]
+        dir_idx = (dir_t <= 0).long()              # 0=charge, 1=discharge
+        B = x_hi.size(0)
+
+        # Phase 1 probe mask 적용 — train_classifier.py와 동일한 입력
+        # (2026-09-25: CNNProbeClassifier 분기 삭제 — v4는 self._classifier에
+        # 항상 model.probe_mlp만 주입하므로 이 else 경로만 실제로 쓰였다.)
+        probe_x_clf = self.model.get_probe_x(x_hi, dir_t, batch_d["scen_idx"])
+        clf_inp    = torch.cat([probe_x_clf, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
+        clf_logits = self._classifier(clf_inp)    # (B, n_classes)
+
+        if routing_mode == "hard":
+            class_pred = clf_logits.argmax(1)                     # (B,)
+            batch_d["scen_idx"] = routing_t[dir_idx, class_pred]  # (B,)
+            out = self.model(batch_d)
+            lv_pred = class_pred.cpu().numpy()
+        else:  # soft
+            clf_probs = torch.softmax(clf_logits, dim=1)  # (B, n_classes)
+            cap_cls   = []
+            for c in range(self._n_classes):
+                b_c = dict(batch_d)
+                b_c["scen_idx"] = routing_t[dir_idx, c]   # (B,)
+                out_c = self.model(b_c)
+                cap_cls.append(out_c["cap_pred"])
+            cap_stack = torch.stack(cap_cls, dim=1)        # (B, n_classes)
+            cap_merged = (clf_probs * cap_stack).sum(1)    # (B,)
+            # argmax for reporting
+            class_pred = clf_logits.argmax(1)
+            lv_pred = class_pred.cpu().numpy()
+            out = {
+                "cap_pred": cap_merged,
+                "level_logits": clf_logits,
+                "probe_z": torch.zeros(B, N_HI, device=self.device),
+                "scen_z":  torch.zeros(B, N_HI, device=self.device),
+            }
+        return out, lv_pred
+
     @torch.no_grad()
     def predict_dataset(
         self,
@@ -102,6 +174,11 @@ class SCREvaluator:
           "none" — 방향(direction)만으로 헤드 선택, 분류기 우회 (기본)
           "hard" — 분류기 argmax → 단일 시나리오 헤드 (분류기 활성화 필요)
           "soft" — 분류기 확률 가중 평균 (분류기 활성화 필요)
+
+        2026-10-04: 단일 책임 원칙에 따라 서브함수로 분리했다(동작 변화 없는 순수
+        구조 정리) — _build_routing_table(라우팅 테이블) ->
+        _predict_plain_batch/_predict_routed_batch(배치 1개 추론) -> 이 함수는 루프
+        돌며 결과를 모으고 concat해 최종 dict로 반환하는 역할만 남는다.
         """
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=_collate)
         self.model.eval()
@@ -111,63 +188,16 @@ class SCREvaluator:
         scen_idxs, directions = [], []
         probe_zs, scen_zs = [], []
 
-        # routing table: (n_dir, n_classes) — hard/soft 라우팅용
-        _use_clf = (routing_mode != "none" and self._classifier is not None)
-        _routing_t = None
-        if _use_clf and hasattr(self._spec, "routing"):
-            # spec.routing은 jagged list일 수 있으므로 padding 후 수동 채움
-            _r = self._spec.routing
-            _n_dir = len(_r)
-            _n_cls = max(len(row) for row in _r)
-            _routing_t = torch.zeros(_n_dir, _n_cls, dtype=torch.long, device=self.device)
-            for _d, _row in enumerate(_r):
-                for _c, _sid in enumerate(_row):
-                    _routing_t[_d, _c] = _sid
+        use_clf = (routing_mode != "none" and self._classifier is not None)
+        routing_t = self._build_routing_table() if use_clf else None
 
         for batch in loader:
             batch_d = {k: v.to(self.device) for k, v in batch.items()}
-            B = batch_d["x_hi"].size(0)
 
-            if _use_clf and _routing_t is not None:
-                x_hi    = batch_d["x_hi"]
-                dir_t   = batch_d["direction"]
-                dir_idx = (dir_t <= 0).long()              # 0=charge, 1=discharge
-
-                # Phase 1 probe mask 적용 — train_classifier.py와 동일한 입력
-                # (2026-09-25: CNNProbeClassifier 분기 삭제 — v4는 self._classifier에
-                # 항상 model.probe_mlp만 주입하므로 이 else 경로만 실제로 쓰였다.)
-                probe_x_clf = self.model.get_probe_x(x_hi, dir_t, batch_d["scen_idx"])
-                clf_inp    = torch.cat([probe_x_clf, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
-                clf_logits = self._classifier(clf_inp)    # (B, n_classes)
-
-                if routing_mode == "hard":
-                    class_pred = clf_logits.argmax(1)                     # (B,)
-                    batch_d["scen_idx"] = _routing_t[dir_idx, class_pred]  # (B,)
-                    out = self.model(batch_d)
-                    lv_pred = class_pred.cpu().numpy()
-
-                else:  # soft
-                    clf_probs = torch.softmax(clf_logits, dim=1)  # (B, n_classes)
-                    cap_cls   = []
-                    for c in range(self._n_classes):
-                        b_c = dict(batch_d)
-                        b_c["scen_idx"] = _routing_t[dir_idx, c]   # (B,)
-                        out_c = self.model(b_c)
-                        cap_cls.append(out_c["cap_pred"])
-                    cap_stack = torch.stack(cap_cls, dim=1)        # (B, n_classes)
-                    cap_merged = (clf_probs * cap_stack).sum(1)    # (B,)
-                    # argmax for reporting
-                    class_pred = clf_logits.argmax(1)
-                    lv_pred = class_pred.cpu().numpy()
-                    out = {
-                        "cap_pred": cap_merged,
-                        "level_logits": clf_logits,
-                        "probe_z": torch.zeros(B, N_HI, device=self.device),
-                        "scen_z":  torch.zeros(B, N_HI, device=self.device),
-                    }
+            if use_clf and routing_t is not None:
+                out, lv_pred = self._predict_routed_batch(batch_d, routing_mode, routing_t)
             else:
-                out = self.model(batch_d)
-                lv_pred = out["level_logits"].argmax(1).cpu().numpy()
+                out, lv_pred = self._predict_plain_batch(batch_d)
 
             preds_norm.append(out["cap_pred"].cpu().numpy())
             trues_norm.append(batch["target"].numpy())
@@ -187,13 +217,10 @@ class SCREvaluator:
         probe_zs     = np.concatenate(probe_zs)   # (N, 65)
         scen_zs      = np.concatenate(scen_zs)    # (N, 65)
 
-        # target은 SOH ratio (∈ (0,1]) — inverse_target 불필요
-        cap_pred_raw = preds_norm   # SOH ratio
-        cap_true_raw = trues_norm   # SOH ratio
-
+        # target은 SOH ratio (∈ (0,1]) — inverse_target 불필요, norm/raw가 같은 배열
         return {
-            "cap_pred_raw":  cap_pred_raw,   # SOH ratio
-            "cap_true_raw":  cap_true_raw,   # SOH ratio
+            "cap_pred_raw":  preds_norm,   # SOH ratio
+            "cap_true_raw":  trues_norm,   # SOH ratio
             "cap_pred_norm": preds_norm,
             "cap_true_norm": trues_norm,
             "cap_init_raw":  ds.cap_init_raw,  # Ah per sample (SOH→Ah 변환용)
@@ -523,99 +550,115 @@ class SCREvaluator:
     # Pred lines are split by segment sub-type (Low / Mid / High) rather
     # than averaged, so misrouted predictions are visible as separate lines.
     # ------------------------------------------------------------------
+    def _extract_cell_series(self, pred_dict: dict, cell: str) -> dict | None:
+        """pred_dict에서 cell 하나에 해당하는 행만 뽑아 capacity curve 플롯에 필요한
+        배열들을 묶어 돌려준다. 그 셀이 split에 없으면 경고를 찍고 None
+        (_plot_capacity_curves에서 분리, 동작 변화 없음)."""
+        cell_ids = np.array(pred_dict["cell_ids"])
+        sel = cell_ids == cell
+        if sel.sum() == 0:
+            print(f"[eval] rep cell '{cell}' not found in test split, skipping")
+            return None
+
+        cap_init_ah = pred_dict["cap_init_raw"]                  # Ah per sample
+        cap_true    = pred_dict["cap_true_raw"] * cap_init_ah    # SOH→Ah
+        cap_pred    = pred_dict["cap_pred_raw"] * cap_init_ah    # SOH→Ah
+        return {
+            "cyc":  np.array(pred_dict["cycles"])[sel],
+            "true": cap_true[sel],
+            "pred": cap_pred[sel],
+            "dir":  pred_dict["direction"][sel],
+            "qlo":  np.array(pred_dict["q_frac_lo"], dtype=np.float64)[sel],
+            "seg":  np.array(pred_dict["seg_names"])[sel],
+        }
+
+    def _plot_capacity_curve_direction(
+        self, ax_cap, ax_err, ax_rel, series: dict, dir_name: str, is_charge: bool,
+    ) -> None:
+        """한 셀의 한 방향(충전/방전)에 대해 capacity curve/절대오차/상대오차 3개
+        패널을 채운다 — scen_idx(zone) 카테고리로 뭉뚱그려 평균내는 대신, q_frac_lo
+        (세그먼트 시작 q-fraction, 축 설계상 사이클과 무관하게 고정)로 정렬한
+        "세그먼트 순번"별로 선을 따로 그린다(2026-09-18, _plot_capacity_curves에서
+        분리는 2026-10-04 — 둘 다 동작 변화 없음). True capacity는 세그먼트와 무관하게
+        사이클당 하나의 값이라 한 줄만 그린다."""
+        uniq_cyc = np.unique(series["cyc"])
+        dir_mask = (series["dir"] > 0) if is_charge else (series["dir"] < 0)
+
+        d_cyc  = series["cyc"][dir_mask]
+        d_true = series["true"][dir_mask]
+        d_pred = series["pred"][dir_mask]
+        d_qlo  = series["qlo"][dir_mask]
+        d_seg  = series["seg"][dir_mask]
+
+        true_line = np.array([
+            d_true[d_cyc == cy].mean() if (d_cyc == cy).any() else np.nan
+            for cy in uniq_cyc
+        ])
+        ax_cap.plot(uniq_cyc, true_line, "b-", label="True", linewidth=1.5)
+
+        # 세그먼트 순번: 이 방향의 고유 q_frac_lo를 오름차순 정렬 -- 축 설계상
+        # 사이클 간 완전히 고정이므로 첫 사이클에서 뽑은 목록이 전체 대표값이다.
+        first_cyc = uniq_cyc[0]
+        order_qlo = np.sort(np.unique(d_qlo[d_cyc == first_cyc]))
+        if len(order_qlo) == 0:
+            order_qlo = np.sort(np.unique(d_qlo))
+        n_order = max(len(order_qlo), 1)
+        colors = plt.cm.viridis(np.linspace(0.05, 0.90, n_order))
+
+        for k, qlo_val in enumerate(order_qlo):
+            seg_mask = np.isclose(d_qlo, qlo_val, atol=1e-6)
+            if seg_mask.sum() == 0:
+                continue
+            s_cyc  = d_cyc[seg_mask]
+            s_pred = d_pred[seg_mask]
+            pred_line = np.array([
+                s_pred[s_cyc == cy].mean() if (s_cyc == cy).any() else np.nan
+                for cy in uniq_cyc
+            ])
+            zone_name = d_seg[seg_mask][0] if seg_mask.any() else "?"
+            label = f"seg{k + 1} ({zone_name})"
+            color = colors[k]
+
+            ax_cap.plot(uniq_cyc, pred_line, color=color, linewidth=1.2, label=label)
+
+            err_abs = np.abs(pred_line - true_line)
+            err_rel = err_abs / np.where(true_line == 0, 1.0, np.abs(true_line)) * 100
+            ax_err.plot(uniq_cyc, err_abs, color=color, linewidth=1.0, label=label)
+            ax_rel.plot(uniq_cyc, err_rel, color=color, linewidth=1.0, label=label)
+
+        ax_cap.set_xlabel("Cycle"); ax_cap.set_ylabel("Capacity (Ah)")
+        ax_cap.set_title(f"{dir_name} — capacity curve")
+        ax_cap.legend(fontsize=7, ncol=2)
+        ax_err.set_xlabel("Cycle"); ax_err.set_ylabel("|Error| (Ah)")
+        ax_err.set_title(f"{dir_name} — absolute error")
+        ax_err.legend(fontsize=7, ncol=2)
+        ax_rel.set_xlabel("Cycle"); ax_rel.set_ylabel("Relative error (%)")
+        ax_rel.set_title(f"{dir_name} — relative error (%)")
+        ax_rel.legend(fontsize=7, ncol=2)
+
     def _plot_capacity_curves(self, pred_dict: dict) -> None:
-        """방향(충전/방전)별로, scen_idx(zone) 카테고리로 뭉뚱그려 평균내는 대신 개별
-        세그먼트 단위로 그린다(2026-09-18). q_frac_wide 등 표준 축은 zone(3개)×n_samples
-        (예: 2)개를 한 방향에 두는데, 예전엔 같은 zone의 n_samples 예측을 평균해 zone당
-        선 하나(3개/방향)만 보여줬다 — 이제 q_frac_lo(세그먼트 시작 q-fraction, 축 설계상
-        사이클과 무관하게 고정)로 정렬한 "세그먼트 순번"(1..n_order, 보통 6=zone3×samples2)
-        별로 선을 따로 그린다. True capacity는 세그먼트와 무관하게 사이클당 하나의 값(원래도
-        전 세그먼트에 동일 라벨이 복제된 것뿐이라 평균해도 값이 안 바뀜)이라 한 줄만 그린다."""
+        """대표 셀(self.rep_cells)마다 2행(충전/방전)×3열(capacity/절대오차/상대오차)
+        figure를 저장한다.
+
+        2026-10-04: 단일 책임 원칙에 따라 서브함수로 분리했다(동작 변화 없는 순수
+        구조 정리) — _extract_cell_series(셀 하나의 데이터 추출) ->
+        _plot_capacity_curve_direction(방향 하나의 3패널 채우기) -> 이 함수는 셀
+        루프 + figure 생성/저장만 남는다."""
         if not _HAS_MPL:
             return
 
-        cell_ids    = np.array(pred_dict["cell_ids"])
-        cycles      = np.array(pred_dict["cycles"])
-        cap_init_ah = pred_dict["cap_init_raw"]           # Ah per sample
-        cap_true    = pred_dict["cap_true_raw"] * cap_init_ah   # SOH→Ah
-        cap_pred    = pred_dict["cap_pred_raw"] * cap_init_ah   # SOH→Ah
-        directions  = pred_dict["direction"]
-        q_frac_lo   = np.array(pred_dict["q_frac_lo"], dtype=np.float64)
-        seg_names   = np.array(pred_dict["seg_names"])
-
         for cell in self.rep_cells:
-            sel = cell_ids == cell
-            if sel.sum() == 0:
-                print(f"[eval] rep cell '{cell}' not found in test split, skipping")
+            series = self._extract_cell_series(pred_dict, cell)
+            if series is None:
                 continue
-
-            c_cyc  = cycles[sel]
-            c_true = cap_true[sel]
-            c_pred = cap_pred[sel]
-            c_dir  = directions[sel]
-            c_qlo  = q_frac_lo[sel]
-            c_seg  = seg_names[sel]
-
-            uniq_cyc = np.unique(c_cyc)
 
             fig, axes = plt.subplots(2, 3, figsize=(17, 8))
             fig.suptitle(cell, fontsize=12, y=1.01)
 
             for row, (dir_name, is_charge) in enumerate((("Charge", True), ("Discharge", False))):
-                dir_mask = (c_dir > 0) if is_charge else (c_dir < 0)
-                ax_cap, ax_err, ax_rel = axes[row, 0], axes[row, 1], axes[row, 2]
-
-                d_cyc  = c_cyc[dir_mask]
-                d_true = c_true[dir_mask]
-                d_pred = c_pred[dir_mask]
-                d_qlo  = c_qlo[dir_mask]
-                d_seg  = c_seg[dir_mask]
-
-                true_line = np.array([
-                    d_true[d_cyc == cy].mean() if (d_cyc == cy).any() else np.nan
-                    for cy in uniq_cyc
-                ])
-                ax_cap.plot(uniq_cyc, true_line, "b-", label="True", linewidth=1.5)
-
-                # 세그먼트 순번: 이 방향의 고유 q_frac_lo를 오름차순 정렬 -- 축 설계상
-                # 사이클 간 완전히 고정이므로 첫 사이클에서 뽑은 목록이 전체 대표값이다.
-                first_cyc = uniq_cyc[0]
-                order_qlo = np.sort(np.unique(d_qlo[d_cyc == first_cyc]))
-                if len(order_qlo) == 0:
-                    order_qlo = np.sort(np.unique(d_qlo))
-                n_order = max(len(order_qlo), 1)
-                colors = plt.cm.viridis(np.linspace(0.05, 0.90, n_order))
-
-                for k, qlo_val in enumerate(order_qlo):
-                    seg_mask = np.isclose(d_qlo, qlo_val, atol=1e-6)
-                    if seg_mask.sum() == 0:
-                        continue
-                    s_cyc  = d_cyc[seg_mask]
-                    s_pred = d_pred[seg_mask]
-                    pred_line = np.array([
-                        s_pred[s_cyc == cy].mean() if (s_cyc == cy).any() else np.nan
-                        for cy in uniq_cyc
-                    ])
-                    zone_name = d_seg[seg_mask][0] if seg_mask.any() else "?"
-                    label = f"seg{k + 1} ({zone_name})"
-                    color = colors[k]
-
-                    ax_cap.plot(uniq_cyc, pred_line, color=color, linewidth=1.2, label=label)
-
-                    err_abs = np.abs(pred_line - true_line)
-                    err_rel = err_abs / np.where(true_line == 0, 1.0, np.abs(true_line)) * 100
-                    ax_err.plot(uniq_cyc, err_abs, color=color, linewidth=1.0, label=label)
-                    ax_rel.plot(uniq_cyc, err_rel, color=color, linewidth=1.0, label=label)
-
-                ax_cap.set_xlabel("Cycle"); ax_cap.set_ylabel("Capacity (Ah)")
-                ax_cap.set_title(f"{dir_name} — capacity curve")
-                ax_cap.legend(fontsize=7, ncol=2)
-                ax_err.set_xlabel("Cycle"); ax_err.set_ylabel("|Error| (Ah)")
-                ax_err.set_title(f"{dir_name} — absolute error")
-                ax_err.legend(fontsize=7, ncol=2)
-                ax_rel.set_xlabel("Cycle"); ax_rel.set_ylabel("Relative error (%)")
-                ax_rel.set_title(f"{dir_name} — relative error (%)")
-                ax_rel.legend(fontsize=7, ncol=2)
+                self._plot_capacity_curve_direction(
+                    axes[row, 0], axes[row, 1], axes[row, 2], series, dir_name, is_charge,
+                )
 
             fig.tight_layout()
             safe_name = cell.replace("/", "_")

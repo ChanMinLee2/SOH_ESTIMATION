@@ -17,6 +17,16 @@ Stage B — scenario-conditioned regression
   3. Capacity head: [probe_x || scen_x || direction || cap_init] → SOH ratio
 
 At inference JSON masks may replace the L0 gates (fixed binary vectors).
+
+2026-10-04: SCRModel.__init__(225줄)을 단일 책임 원칙에 따라 4개 빌더 메서드로
+분리했다(동작 변화 없는 순수 구조 정리) — _build_probe_gates(Stage A) ->
+_build_scen_gates(Stage B) -> _build_kernel_gates(Stage B') -> (cap_head는 그대로
+인라인) -> _build_probe_mlp. 같은 라운드에서 self.raw_cnn/with_raw_cnn/
+_raw_cnn_frozen(2026-09-25부터 영구 False/None 고정 데드 스텁 — 의존하는
+models/raw_cnn.py 자체가 repo에 없어 한 번도 실행된 적 없는 코드였음)을 완전히
+삭제하고 forward()의 대응 분기도 제거했다. model_lib/tools/visualize_results.py는
+`getattr(model, "raw_cnn", None)`로 이미 방어적으로 읽고 있어(속성이 아예 없어도
+None 반환, 기존과 동일 동작) 수정 불필요 — 실제로 안 건드림.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ import torch.nn.functional as F
 
 from utils.hi_schema import N_HI, spec_from_qfrac
 from models.cap_heads import build_cap_head
+from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate
 
 # model_lib/models/scr_model.py → repo root (train_scr.py/test_scr.py의 PROJECT_ROOT와 동일 계산)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -128,11 +139,24 @@ class SCRModel(nn.Module):
         else:
             self.redundancy_mask = None
 
-        from models.hard_concrete import HardConcreteGate, GroupedHardConcreteGate
+        self._build_probe_gates(charge_probe_mask, discharge_probe_mask)  # Stage A
+        self._build_scen_gates(scen_masks, scen_group_ids, shared_hi_mask, _gate_bank_size)  # Stage B
+        self._build_kernel_gates(n_kernel_hi, kernel_hi_counts, kernel_hi_costs, _gate_bank_size)  # Stage B'
 
-        # ----------------------------------------------------------------
-        # Stage A — direction-aware probe gates
-        # ----------------------------------------------------------------
+        # Capacity head — input: probe_x (N_HI) || scen_x (N_HI) [|| kernel_x (n_kernel_hi)]
+        # || direction (1) || cap_init (1). Phase 1: 항상 MLP(model_cfg=None). Phase 2:
+        # model_cfg["regression_model"]에 따라 mlp/transformer/i_transformer/resnet_tab/
+        # ft_transformer.
+        self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout,
+                                        n_kernel_hi=self.n_kernel_hi)
+
+        self._build_probe_mlp(with_probe_mlp, d_probe, dropout)  # Phase 1 dual-objective CE head
+
+    def _build_probe_gates(
+        self, charge_probe_mask: Optional[torch.Tensor], discharge_probe_mask: Optional[torch.Tensor],
+    ) -> None:
+        """Stage A — direction-aware probe gates. 두 마스크가 모두 주어지면(Phase 2/test)
+        학습 가능한 게이트 대신 고정 buffer를 쓰고, 아니면(Phase 1) HardConcreteGate를 만든다."""
         fixed_probe = (charge_probe_mask is not None and
                        discharge_probe_mask is not None)
         self._fixed_probe = fixed_probe
@@ -146,10 +170,12 @@ class SCRModel(nn.Module):
             self.register_buffer("_charge_probe_mask_buf",    charge_probe_mask.float())
             self.register_buffer("_discharge_probe_mask_buf", discharge_probe_mask.float())
 
-        # ----------------------------------------------------------------
-        # Stage B — per-scenario gates (n_scenarios × N_HI), 단 shared_hi_mask가 있으면
-        # 그 HI들은 이 폭에서 빠지고 아래 shared_gate가 대신 담당한다(v4).
-        # ----------------------------------------------------------------
+    def _build_scen_gates(
+        self, scen_masks: Optional[torch.Tensor], scen_group_ids: Optional[dict[int, list[int]]],
+        shared_hi_mask: Optional[torch.Tensor], gate_bank_size: int,
+    ) -> None:
+        """Stage B — per-scenario gates (n_scenarios × N_HI), 단 shared_hi_mask가 있으면
+        그 HI들은 이 폭에서 빠지고 shared_gate가 대신 담당한다(v4)."""
         self.shared_gate = None
         if shared_hi_mask is not None:
             shared_hi_mask = shared_hi_mask.bool()
@@ -168,7 +194,7 @@ class SCRModel(nn.Module):
             self.scen_gates = nn.ModuleList([
                 GroupedHardConcreteGate(scen_gate_width, scen_group_ids[s]) if s in scen_group_ids
                     else HardConcreteGate(scen_gate_width)
-                    for s in range(_gate_bank_size)
+                    for s in range(gate_bank_size)
                 ])
             self._fixed_scen = False
         else:
@@ -176,12 +202,15 @@ class SCRModel(nn.Module):
             self.scen_gates = None
             self._fixed_scen = True
 
-        # ----------------------------------------------------------------
-        # Stage B' — 커널 융합 HI 블록(선택) — raw HI(scen_gates)를 대체하지 않고
-        # 별도 폭(n_kernel_hi)의 독립 게이트로 "추가"한다. kernel.py가
-        # 그룹당 1개씩 만든 RBF 커널 특징을 소비하는 용도(다중공선성/시너지 그룹 정보를
-        # raw HI와 나란히 쓰고 싶을 때). n_kernel_hi=0이면 완전히 비활성(기존과 동일 동작).
-        # ----------------------------------------------------------------
+    def _build_kernel_gates(
+        self, n_kernel_hi: int, kernel_hi_counts: Optional[list[int]],
+        kernel_hi_costs: Optional[dict[int, list[float]]], gate_bank_size: int,
+    ) -> None:
+        """Stage B' — 커널 융합 HI 블록(선택) — raw HI(scen_gates)를 대체하지 않고 별도
+        폭(n_kernel_hi)의 독립 게이트로 "추가"한다. kernel.py가 그룹당 1개씩 만든 RBF
+        커널 특징을 소비하는 용도. n_kernel_hi=0이면 완전히 비활성(기존과 동일 동작).
+        kernel_hi_costs가 주어지면 scr_loss.py의 커널 L0 페널티 비용 가중치로 쓸
+        self.kernel_hi_costs를 검증 후 채운다."""
         if kernel_hi_counts is not None:
             assert len(kernel_hi_counts) == self.n_scenarios, (
                 f"kernel_hi_counts 길이({len(kernel_hi_counts)})가 n_scenarios"
@@ -200,7 +229,7 @@ class SCRModel(nn.Module):
             self.n_kernel_hi = n_kernel_hi
             if n_kernel_hi > 0:
                 self.scen_kernel_gates = nn.ModuleList(
-                    [HardConcreteGate(n_kernel_hi) for _ in range(_gate_bank_size)]
+                    [HardConcreteGate(n_kernel_hi) for _ in range(gate_bank_size)]
                 )
             else:
                 self.scen_kernel_gates = None
@@ -224,41 +253,11 @@ class SCRModel(nn.Module):
         else:
             self.kernel_hi_costs = None
 
-        # ----------------------------------------------------------------
-        # Capacity head
-        # input: probe_x (N_HI) || scen_x (N_HI) [|| kernel_x (n_kernel_hi)] [|| cnn_emb (3)]
-        #        || direction (1) || cap_init (1)
-        # = m active probe HIs + k active scen HIs [+ 커널 융합 HI] [+ raw V/I/t CNN 임베딩 3D]
-        #   + 2 스칼라
-        # Phase 1: 항상 MLP (model_cfg=None)
-        # Phase 2: model_cfg["regression_model"] 에 따라
-        #   mlp / transformer / i_transformer / resnet_tab / ft_transformer
-        # ----------------------------------------------------------------
-        self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout,
-                                        n_kernel_hi=self.n_kernel_hi)
-
-        # ----------------------------------------------------------------
-        # raw_cnn — 2026-09-25 삭제. 회귀 헤드용 원시 V/|I| 곡선 CNN 임베딩 실험
-        # (REGRESSION_UPGRADE.md §5/§8)이었는데, 의존하는 models/raw_cnn.py 자체가
-        # repo에 없었다(with_raw_cnn=True로 켤 때만 import되는 경로라 지금까지
-        # 한 번도 실행된 적 없이 방치된 깨진 코드였음 — 켰으면 ModuleNotFoundError).
-        # v4는 train.py/test.py가 with_raw_cnn을 항상 강제 False로 덮어써서 애초에
-        # 실사용 경로도 아니었다. self.raw_cnn/self._raw_cnn_frozen은 forward()/
-        # visualize_results.py가 여전히 참조하므로 "항상 없음" 상태로 남겨둔다.
-        # (2026-09-27: 같은 이유로 with_raw_flat도 train.py/test.py가 항상 강제
-        # False로 덮어써서 완전히 죽어있었다 — raw_flat_norm/BatchNorm1d 생성 코드
-        # 자체를 삭제. forward()의 elif 분기도 같이 제거했다.)
-        # ----------------------------------------------------------------
-        self.with_raw_cnn = False
-        self._raw_cnn_frozen = False
-        self.raw_cnn = None
-
-        # ----------------------------------------------------------------
-        # probe_mlp — Phase 1 dual-objective CE head
-        # probe_x (N_HI, mostly zeros) → n_classes logits
-        # CE gradient flows through probe_mlp → probe_gate only
-        # MSE gradient flows through cap_head → probe_gate + scen_gates
-        # ----------------------------------------------------------------
+    def _build_probe_mlp(self, with_probe_mlp: bool, d_probe: int, dropout: float) -> None:
+        """probe_mlp — Phase 1 dual-objective CE head. probe_x(N_HI, 대부분 0)+direction(1)
+        -> n_classes logits. CE 그래디언트는 probe_mlp를 거쳐 probe_gate에만 흐르고,
+        MSE 그래디언트는 cap_head를 거쳐 probe_gate+scen_gates에 흐른다.
+        with_probe_mlp=False면 None(기존 동작)."""
         if with_probe_mlp:
             # 입력: probe_x (N_HI) + direction (1) → N_HI+1
             # direction 추가로 충/방전 간 sparsity 패턴 구분
@@ -441,8 +440,7 @@ class SCRModel(nn.Module):
         # Stage B: scenario-conditioned gate (MSE gradient only)
         scen_x, scen_z = self._apply_scen_gate(x, scen_idx) # (B, N_HI)
 
-        # Capacity head: probe_x + scen_x [+ 커널 융합 HI] [+ raw CNN 임베딩]
-        #                + direction + cap_init
+        # Capacity head: probe_x + scen_x [+ 커널 융합 HI] + direction + cap_init
         feat_parts = [probe_x, scen_x]
         if self.scen_kernel_gates is not None:
             x_kernel = batch["x_kernel"]                     # (B, n_kernel_hi), 이미 정규화됨
@@ -450,15 +448,8 @@ class SCRModel(nn.Module):
             feat_parts.append(kernel_x)
         else:
             kernel_z = None
-        if self.raw_cnn is not None:
-            if self._raw_cnn_frozen:
-                with torch.no_grad():
-                    cnn_emb = self.raw_cnn(batch["x_raw"])       # (B, 3)=[h_scen,h_intensity,h_soh] — 그래디언트 차단
-            else:
-                cnn_emb = self.raw_cnn(batch["x_raw"])           # (B, 3) — Phase2와 함께 학습
-            feat_parts.append(cnn_emb)
         feat_parts += [direction.unsqueeze(1), batch["cap_init"].unsqueeze(1)]
-        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+3+2)
+        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+n_kernel_hi+2)
         cap_pred = self.cap_head(feat)                       # (B,)
 
         # CE head: [probe_x || direction] → class logits (Phase 1 dual-objective only)

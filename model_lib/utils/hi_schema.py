@@ -103,6 +103,27 @@ def _make_seg_prefix(seg: str) -> dict[str, str]:
     }
 
 
+def _iter_included_hi_keys():
+    """(category, key) 튜플을 stat->diff->lfp->morph 순서로, leakage 제외 설정
+    (EXCLUDE_STAT_LEAK/EXCLUDE_DQDV_LEAK)을 반영해서 순회한다 — get_hi_cols_for_seg/
+    get_hi_cost_vector/get_native_hi_cols 전부 이 순서 하나를 공유한다(2026-10-04
+    통합 — 전에는 model_lib/datasets/segment_dataset.py가 이 제외 로직을 별도로
+    복제해서 갖고 있었다, 그 파일 자신의 docstring이 "수동 동기화 필요"라고 인정하던
+    부분)."""
+    stat_exclude: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
+    diff_exclude: set[str] = {"dqdv_area"} if EXCLUDE_DQDV_LEAK else set()
+    for key in STAT_KEYS:
+        if key not in stat_exclude:
+            yield "stat", key
+    for key in DIFF_KEYS:
+        if key not in diff_exclude:
+            yield "diff", key
+    for key in LFP_KEYS:
+        yield "lfp", key
+    for key in MORPH_KEYS:
+        yield "morph", key
+
+
 def get_hi_cols_for_seg(seg: str) -> list[str]:
     """
     Returns ordered list of 66 HI column names for the wide pkl format
@@ -110,22 +131,7 @@ def get_hi_cols_for_seg(seg: str) -> list[str]:
     stat_q_abs/stat_energy_seg 포함(2026-08-07, 모듈 docstring 참고) — 단
     SOH_EXCLUDE_STAT_LEAK=1이면 제외(2026-08-08).
     """
-    cols: list[str] = []
-    _STAT_EXCLUDE: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
-    _DIFF_EXCLUDE: set[str] = {"dqdv_area"} if EXCLUDE_DQDV_LEAK else set()
-    for key in STAT_KEYS:
-        if key in _STAT_EXCLUDE:
-            continue
-        cols.append(f"stat_{key}_{seg}")
-    for key in DIFF_KEYS:
-        if key in _DIFF_EXCLUDE:
-            continue
-        cols.append(f"diff_{key}_{seg}")
-    for key in LFP_KEYS:
-        cols.append(f"lfp_{key}_{seg}")
-    for key in MORPH_KEYS:
-        cols.append(f"morph_{key}_{seg}")
-    return cols
+    return [f"{cat}_{key}_{seg}" for cat, key in _iter_included_hi_keys()]
 
 
 def get_hi_cost_vector(seg: str) -> list[float]:
@@ -133,22 +139,14 @@ def get_hi_cost_vector(seg: str) -> list[float]:
     Returns cost value for each of the 66 HIs (same ordering as get_hi_cols_for_seg).
     Used to weight the L0 penalty.
     """
-    _STAT_EXCLUDE: set[str] = {"q_abs", "energy_seg"} if EXCLUDE_STAT_LEAK else set()
-    _DIFF_EXCLUDE: set[str] = {"dqdv_area"} if EXCLUDE_DQDV_LEAK else set()
-    costs: list[float] = []
-    for key in STAT_KEYS:
-        if key in _STAT_EXCLUDE:
-            continue
-        costs.append(CATEGORY_COSTS["stat"])
-    for key in DIFF_KEYS:
-        if key in _DIFF_EXCLUDE:
-            continue
-        costs.append(CATEGORY_COSTS["diff"])
-    for _ in LFP_KEYS:
-        costs.append(CATEGORY_COSTS["lfp"])
-    for _ in MORPH_KEYS:
-        costs.append(CATEGORY_COSTS["morph"])
-    return costs
+    return [CATEGORY_COSTS[cat] for cat, _ in _iter_included_hi_keys()]
+
+
+def get_native_hi_cols() -> list[str]:
+    """native seg pkl 포맷의 HI 컬럼명(세그 접미사 없음, 예: "stat_v_mean_cw") —
+    model_lib/datasets/segment_dataset.py의 _get_native_hi_cols()를 여기로 통합
+    (2026-10-04, 로직 중복 제거 — 위 _iter_included_hi_keys 참고)."""
+    return [f"{cat}_{key}" for cat, key in _iter_included_hi_keys()]
 
 
 N_HI: int = len(get_hi_cols_for_seg("dis_hi"))  # == 66 기본, EXCLUDE_STAT_LEAK=1->64, +EXCLUDE_DQDV_LEAK=1->63

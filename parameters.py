@@ -90,7 +90,7 @@ N_HI_TO_ENV = {
 }
 
 # ── 태그/경로 ────────────────────────────────────────────────────────────
-ACTIVE_P1_TAG = "refact"             # 구 --p1-tag
+ACTIVE_P1_TAG = "noscenverify"       # TEMP no_scen 파이프라인 검증용, 검증 후 "refact"로 원복 — 구 --p1-tag
 ACTIVE_REP_CELLS = None                 # 구 --rep-cells (None=데이터셋별 5개 자동 선정)
 ACTIVE_DATA_DIR = None                  # 구 --data-dir — noscen/scen/HI63.. 축마다 값이
                                          # 다 달라서 고정 불가, CLI로 계속 필요. None이면
@@ -119,6 +119,9 @@ ACTIVE_AXIS_CONFIG: dict = {            # 이 값이 곧 train.py의 하드코�
     "min_pts": 5,
     "calibration_period": 100,
     "offset_amp": 0.005,
+    "assign": "none",  # TEMP no_scen 검증용(2026-10-05) — QFracWideSegmenter의
+        # assign="none"(존 구분 제거, n_scenarios=2 "chg"/"dis"만)이 QFracRefSegmenter에
+        # **kwargs/super()로 그대로 상속됨을 확인(코드 수정 불필요). 검증 후 이 줄 삭제.
 }
 
 # ── 모델/재현성 ──────────────────────────────────────────────────────────
@@ -151,7 +154,12 @@ FIXED_SEG_AXIS = "q_frac_ref"           # 구 --seg-axis. vwindow 등 다른 축
 # 바뀌므로 이 상수도 반드시 같이 갱신할 것.
 _CANONICAL_AXIS_DIR = (
     DATA_4_HI_ROOT / "q_frac_ref"
-    / "n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA"
+    # TEMP no_scen 검증용(2026-10-05) — ACTIVE_AXIS_CONFIG에 assign="none"을 추가한 데
+    # 맞춰 _noscen 접미사 폴더로 리다이렉트(4_hi_analysis/logics.py의 _qfw_tag가
+    # assign="none"일 때 자동으로 붙이는 접미사, minpts5 바로 뒤에 삽입됨 — 기존
+    # 정식 레시피 경로와 겹치지 않음). 검증 후 아래 원래 경로로 되돌릴 것.
+    / "n1-35%_n2-20%_N-2_minpts5_noscen_lag-1_noise-3%_ou-200_calib-100_offA-5mA"
+    # / "n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA"  # 원래 경로
 )
 FIXED_CANONICAL_DATA_DIR = str(_CANONICAL_AXIS_DIR / "cycle").replace("\\", "/")
 FIXED_CANONICAL_SEG_DATA_DIR = str(_CANONICAL_AXIS_DIR / "seg").replace("\\", "/")
@@ -220,10 +228,20 @@ FIXED_KERNEL_SYNERGY_GROUPS_JSON = None # 구 --kernel-synergy-groups-json (None
 FIXED_KERNEL_ALPHA = 1.0                # 구 --kernel-alpha (Ridge 정규화 강도)
 FIXED_KERNEL_GAMMA = None               # 구 --kernel-gamma (None=sklearn 기본 1/n_features)
 FIXED_KERNEL_N_COMPONENTS = 100         # 구 --kernel-n-components (Nystroem 랜드마크 수)
-# 구 --kernel-redundancy-threshold(2차 배제, 커널끼리 pooled)는 2026-09-25부터
-# ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD(위)를 그대로 재사용 — 별도 상수 없음.
+# 2026-10-02: 구 "2차 배제(커널끼리 pooled)" 단계 자체가 삭제됐다(synergy.py의
+# global_dedup 상시화 + 커널 측 own-scenario zero-masking으로 무의미해짐 —
+# docs/REFACTORING.md 2026-10-02 "kernel.py 2차 다중공선성 배제 단계 삭제" 참고).
+# 그 단계가 쓰던 ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD 재사용도 함께 없어짐.
 FIXED_KERNEL_MAX_FEATURES = None        # 구 --kernel-max-features (None=무제한)
-FIXED_MIN_RAW_PARTIAL_CORR = None       # 구 --min-raw-partial-corr (None=비활성)
+FIXED_MIN_RAW_PARTIAL_CORR = 0.1        # 구 --min-raw-partial-corr — 2026-10-04부로 활성화
+    # (이전 기본값 None=비활성). 커널 예측값이 "자기 그룹 raw 멤버로 이미 선형
+    # 설명되는 부분"을 빼고도 SOH와 남는 관계가 있는지(raw-conditioned partial
+    # corr) 검사 — 이게 없으면 train_r2가 높아도 그게 진짜 "비선형 시너지"인지
+    # "raw 멤버 선형결합을 재탕한 것"인지 구분이 안 된다. 과거 유일하게 실측 쓰인
+    # 값은 0.02였는데(synergy.py의 min_partial_corr에서 그냥 복붙된 값, RESULTS_LOG.md
+    # 확인 결과 6개 run 전부 "후보 N개 -> 최종 N개"로 단 한 건도 안 걸러진 사실상
+    # no-op 문턱이었음) — 이번에 interaction.py의 FIXED_INTERACTION_MIN_EFFECT_SIZE
+    # (0.1, Cohen's small-effect 관례)와 맞춰 실제로 의미 있게 작동할 값으로 교체.
 FIXED_COMBINED_REDUNDANCY_THRESHOLD = 0.95  # 구 --combined-redundancy-threshold (3차 배제, 시나리오별)
 FIXED_KERNEL_TAG = None                 # 구 --kernel-tag (None=--p1-tag에서 자동 파생)
 

@@ -143,6 +143,12 @@ STEP4_DIS_ZONE_COLORS = [
     ("#f9e79f", "Dis SoC 0~30%"),
 ]
 
+# _plot_step4_axis_aware_cycle_segments 전용(2026-10-05) — 시나리오마다 다른 색
+# 계열(순서대로 순환)을 배정하고, 같은 시나리오 안의 세그먼트는 순서에 따라
+# 옅음→진함 그라데이션을 준다(scenario_id % len(...)로 색 계열 선택).
+_STEP4_SEG_CMAPS = [plt.cm.Blues, plt.cm.Oranges, plt.cm.Greens,
+                    plt.cm.Purples, plt.cm.Reds, plt.cm.YlOrBr]
+
 
 def _plot_step4_correlation_heatmap_panel(ax, keys, title, corr_df, hi_labels: dict, datasets=("MIT", "HUST")):
     """단일 히트맵. |ρ| 평균 내림차순 정렬."""
@@ -1095,10 +1101,166 @@ def _plot_step4_cycle_segments(dataset: str, cell_id: str, cycle: int) -> Path:
     return out
 
 
+def _plot_step4_axis_aware_cycle_segments(dataset: str, cell_id: str, cycle: int) -> Path:
+    """사이클 하나의 충전/방전 구간을, **지금 활성화된 `P.FIXED_SEG_AXIS` +
+    `P.ACTIVE_AXIS_CONFIG`로 실제 세그멘터**(`get_segmenter(...)._extract`)를 돌려
+    진짜 세그먼트 경계를 그린다. 옵션 3(`_plot_step4_cycle_segments`)은 하드코딩된
+    `_STEP4_SEG_BOUNDS=[0,0.4,0.7,1.0]`(범용 3-zone 근사 스케치)를 쓰기 때문에
+    `assign="none"`(no_scen)처럼 존 구조 자체가 달라지는 축 변형을 반영하지
+    못한다 — 이 함수는 공식 생성 경로(`get_segmenter`)를 그대로 써서 그 문제를
+    피한다(2026-10-05 신설, no_scen 검증 중 발견).
+
+    세그먼트 경계(q_frac_lo/hi)는 `segmenter._extract()`가 실제로 반환하는
+    `SegmentRecord.meta`에서 그대로 가져온다 — 축마다 몇 개/어떤 폭의 세그먼트가
+    나오는지까지 정확하다. `scenario_id`별로 색을 칠해 범례에 시나리오 이름을
+    표시한다(no_scen이면 `chg`/`dis` 2개, 정식 축이면 6개)."""
+    from common.scenario import get_segmenter
+
+    data_dir = _resolve_step4_dataset_dir(dataset)
+    pkl_path = data_dir / f"{cell_id}.pkl"
+    if not pkl_path.exists():
+        raise FileNotFoundError(f"PKL 파일 없음: {pkl_path}")
+    meta, df_all = _load_step4_cell_pkl(pkl_path)
+    cell_id = meta.get("cell_id", cell_id)
+    cyc_df = df_all[df_all["cycle"] == cycle]
+    if len(cyc_df) == 0:
+        available = sorted(df_all["cycle"].unique())
+        raise ValueError(f"cycle {cycle} 없음. 사용 가능: {available[:10]}...")
+
+    segmenter = get_segmenter(P.FIXED_SEG_AXIS, {P.FIXED_SEG_AXIS: P.ACTIVE_AXIS_CONFIG})
+    spec = segmenter.get_spec()
+
+    def _phase_arrays(phase_df):
+        """_compute_step4_qfrac과 동일 적분(t/v/i/dt/q), q는 비율이 아니라
+        누적 Ah(segmenter._extract가 받는 그대로의 단위)."""
+        if len(phase_df) < 10:
+            return None
+        t = phase_df["time_s"].values.astype(float)
+        v = phase_df["voltage_V"].values.astype(float)
+        i = np.abs(phase_df["current_A"].values.astype(float))
+        dt = np.clip(np.diff(t, prepend=t[0]), 0, None)
+        q = np.cumsum(i * dt) / 3600.0
+        return t, v, i, dt, q
+
+    chg_arr = _phase_arrays(cyc_df[cyc_df["phase"] == "charge"])
+    dis_arr = _phase_arrays(cyc_df[cyc_df["phase"] == "discharge"])
+    chg_records = (segmenter._extract(chg_arr[1], chg_arr[2], chg_arr[3], chg_arr[4],
+                                       1, cell_id, cycle, 0)[0] if chg_arr else [])
+    dis_records = (segmenter._extract(dis_arr[1], dis_arr[2], dis_arr[3], dis_arr[4],
+                                       -1, cell_id, cycle, 0)[0] if dis_arr else [])
+
+    def _segment_colors(records: list) -> dict:
+        """레코드(파이썬 객체 id)별 색 — 시나리오마다 다른 색 계열(파랑/주황/...)을
+        쓰고, 같은 시나리오 안에서는 세그먼트 순서(q_frac_lo 기준)에 따라 옅은색
+        → 진한색으로 그라데이션을 준다. no_scen처럼 한 시나리오에 세그먼트가
+        여러 개 몰려도(원래는 전부 동일 단색) 순서를 눈으로 구분할 수 있다."""
+        by_scen: dict[int, list] = {}
+        for rec in sorted(records, key=lambda r: r.meta["q_frac_lo"]):
+            by_scen.setdefault(rec.scenario_id, []).append(rec)
+        colors: dict[int, tuple] = {}
+        for scenario_id, recs in by_scen.items():
+            cmap = _STEP4_SEG_CMAPS[scenario_id % len(_STEP4_SEG_CMAPS)]
+            shades = np.linspace(0.35, 0.85, len(recs)) if len(recs) > 1 else [0.6]
+            for rec, shade in zip(recs, shades):
+                colors[id(rec)] = cmap(shade)
+        return colors
+
+    fig, (ax_v, ax_vq, ax_i) = plt.subplots(
+        3, 1, figsize=(14, 10), gridspec_kw={"height_ratios": [1.6, 1.6, 1]})
+    fig.suptitle(
+        f"Cell: {cell_id} | Cycle: {cycle} | axis={P.FIXED_SEG_AXIS} "
+        f"| assign={P.ACTIVE_AXIS_CONFIG.get('assign', 'position_bin')}",
+        fontsize=11, fontweight="bold")
+
+    def _draw_phase_time(arr, records, t_offset, label, line_color):
+        """V-t/I-t 패널 — 세그먼트 구간(실제 겹침 포함)을 그라데이션 배경으로 칠하고
+        순번을 상단에 적는다."""
+        if arr is None:
+            return t_offset
+        t, v, i, dt, q = arr
+        t_shift = t - t[0] + t_offset
+        ax_v.plot(t_shift, v, color=line_color, lw=0.9, label=f"{label} V", zorder=3)
+        ax_i.plot(t_shift, i, color=line_color, lw=0.9, zorder=3)
+        q_frac = q / q[-1] if q[-1] > 0 else q
+
+        seg_colors = _segment_colors(records)
+        v_top = float(np.nanmax(v)) if len(v) else 0.0
+        for seg_no, rec in enumerate(sorted(records, key=lambda r: r.meta["q_frac_lo"]), start=1):
+            lo_q, hi_q = rec.meta["q_frac_lo"], rec.meta["q_frac_hi"]
+            idx_lo = int(np.clip(np.searchsorted(q_frac, lo_q), 0, len(t) - 1))
+            idx_hi = int(np.clip(np.searchsorted(q_frac, hi_q), 0, len(t) - 1))
+            t_lo, t_hi = t_shift[idx_lo], t_shift[idx_hi]
+            color = seg_colors[id(rec)]
+            for ax in (ax_v, ax_i):
+                ax.axvspan(t_lo, t_hi, color=color, alpha=0.55, lw=0, zorder=1)
+            ax_v.text((t_lo + t_hi) / 2, v_top, str(seg_no), ha="center", va="bottom",
+                      fontsize=7, zorder=4)
+        return float(t_shift[-1]) if len(t_shift) else t_offset
+
+    def _draw_phase_qfrac(arr, records, x_offset, label, line_color):
+        """V-q_frac 패널("vq curve") — 세그먼트 경계가 q_frac_lo/hi 그 자체라
+        searchsorted 없이 정확하고, 시간축 왜곡(CC/CV 구간별 체류시간 차이) 없이
+        세그먼트 폭이 설계한 그대로(n2 기준 균등) 보인다."""
+        if arr is None:
+            return x_offset
+        t, v, i, dt, q = arr
+        q_frac = (q / q[-1] if q[-1] > 0 else q) + x_offset
+        ax_vq.plot(q_frac, v, color=line_color, lw=0.9, label=f"{label} V", zorder=3)
+
+        seg_colors = _segment_colors(records)
+        v_top = float(np.nanmax(v)) if len(v) else 0.0
+        for seg_no, rec in enumerate(sorted(records, key=lambda r: r.meta["q_frac_lo"]), start=1):
+            lo_q = rec.meta["q_frac_lo"] + x_offset
+            hi_q = rec.meta["q_frac_hi"] + x_offset
+            color = seg_colors[id(rec)]
+            ax_vq.axvspan(lo_q, hi_q, color=color, alpha=0.55, lw=0, zorder=1)
+            ax_vq.text((lo_q + hi_q) / 2, v_top, str(seg_no), ha="center", va="bottom",
+                       fontsize=7, zorder=4)
+        return x_offset + 1.0
+
+    t_end = _draw_phase_time(chg_arr, chg_records, 0.0, "Charge", "#1a1a1a")
+    _draw_phase_time(dis_arr, dis_records, t_end + 1.0, "Discharge", "#555555")
+    x_end = _draw_phase_qfrac(chg_arr, chg_records, 0.0, "Charge", "#1a1a1a")
+    _draw_phase_qfrac(dis_arr, dis_records, x_end + 0.15, "Discharge", "#555555")
+
+    scen_handles = [plt.Line2D([0], [0], color=_STEP4_SEG_CMAPS[sid % len(_STEP4_SEG_CMAPS)](0.6),
+                                lw=7, alpha=0.6, label=name)
+                     for sid, name in enumerate(spec.scenario_names)]
+    ax_v.legend(handles=scen_handles, loc="upper right", fontsize=7, ncol=3, framealpha=0.9,
+                title="시나리오(색 계열) — 같은 계열 내 옅음→진함 = 세그먼트 순서",
+                title_fontsize=7)
+    ax_v.set_ylabel("Voltage (V)", fontsize=10)
+    ax_v.set_title("V-t curve (실제 시간 — CC/CV 등 체류시간 차이로 세그먼트 폭이 달라 보임)",
+                    fontsize=9)
+    ax_v.grid(True, alpha=0.3)
+    ax_v.tick_params(labelbottom=False, labelsize=9)
+
+    ax_vq.set_ylabel("Voltage (V)", fontsize=10)
+    ax_vq.set_xlabel("q_frac (충전/방전 각자 0→1, 둘 사이 약간 띄움)", fontsize=10)
+    ax_vq.set_title("V-Q curve (q_frac 기준 — 세그먼트 폭이 설계한 그대로 균등하게 보임)",
+                     fontsize=9)
+    ax_vq.grid(True, alpha=0.3)
+
+    ax_i.set_ylabel("|Current| (A)", fontsize=10)
+    ax_i.set_xlabel("time (s, phase별 재배치)", fontsize=10)
+    ax_i.grid(True, alpha=0.3)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    out_dir = STEP_DIR / "segment"
+    out_dir.mkdir(exist_ok=True)
+    out = out_dir / f"axis_segment_{dataset.lower()}_{cell_id}_cycle{cycle}.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  저장: {out}")
+    return out
+
+
 STEP4_DIAG_PLOTS = {
     1: ("셀 하나 사이클 오버레이+용량열화", _plot_step4_cell_cycle_overlay),
     2: ("데이터셋 전체 셀 사이클 오버레이", _plot_step4_dataset_cell_cycle_overlay),
-    3: ("사이클 하나 SOC-zone 세그먼트", _plot_step4_cycle_segments),
+    3: ("사이클 하나 SOC-zone 세그먼트(근사 3-zone 스케치)", _plot_step4_cycle_segments),
+    4: ("사이클 하나 SOC-zone 세그먼트(현재 ACTIVE_AXIS_CONFIG 정확 반영)",
+        _plot_step4_axis_aware_cycle_segments),
 }
 
 
@@ -1135,7 +1297,7 @@ def main() -> None:
            maxdev_thresh=P.FIXED_STEP4_DIAG_MAXDEV_THRESH)
     elif fn is _plot_step4_dataset_cell_cycle_overlay:
         fn(dataset, n_workers=P.FIXED_STEP4_DIAG_WORKERS)
-    elif fn is _plot_step4_cycle_segments:
+    elif fn in (_plot_step4_cycle_segments, _plot_step4_axis_aware_cycle_segments):
         fn(dataset, P.FIXED_STEP4_DIAG_CELL, P.FIXED_STEP4_DIAG_CYCLE)
 
 

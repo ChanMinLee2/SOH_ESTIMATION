@@ -83,7 +83,7 @@ yaml `main`/`fixed` 분리를 제안하던 문서)는 그 제안이 실제로 �
 | `FIXED_SHUFFLE_SEED` | `FIXED_DEFAULT_SEED` | Step5~6 `--shuffle-from` 대조군 전용 시드 |
 | `FIXED_KERNEL_ALPHA` / `_GAMMA` / `_N_COMPONENTS` | 1.0 / None / 100 | Step7 Ridge/Nystroem 하이퍼파라미터 |
 | `FIXED_KERNEL_MAX_FEATURES` | None(무제한) | Step7 시나리오별 커널 피처 쿼터 |
-| `FIXED_MIN_RAW_PARTIAL_CORR` | None(비활성) | Step7 raw HI 추가 필터 |
+| `FIXED_MIN_RAW_PARTIAL_CORR` | 0.1(2026-10-04부터 활성, 이전 None) | Step7 커널 HI가 자기 raw 그룹 멤버 선형결합을 재탕하는 건 아닌지 거르는 필터 |
 | `FIXED_COMBINED_REDUNDANCY_THRESHOLD` | 0.95 | Step7 3차(raw+kernel) 배제 임계값 |
 | `FIXED_TRAIN_CYCLE_FRAC` | None(=1.0) | Step8 train split cycle 서브샘플 비율(진단용) |
 | `FIXED_BETA_MIN` | None(=0.1) | Step8 temperature annealing 하한 |
