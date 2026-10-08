@@ -130,14 +130,38 @@ class SCRModel(nn.Module):
 
         _gate_bank_size = self.n_scenarios
 
+        # 방향(충전/방전)별 후보 시나리오 개수 — 분류기(Stage A)가 "그 방향 안의
+        # 후보 시나리오 전부"를 보게 할 때(2026-10-07, probe_kernel_gates/
+        # probe_redundancy_mask) 두 방향의 폭이 같아야 probe_mlp 입력 차원이
+        # 고정된다. 정식 6-시나리오 레시피는 3/3, no_scen(assign="none")은 1/1이라
+        # 항상 대칭 — 비대칭 축이 생기면 여기서 바로 에러를 내 조용한 오동작을 막는다.
+        n_ch_scen = len(spec.charge_scenario_ids)
+        n_dis_scen = len(spec.discharge_scenario_ids)
+        assert n_ch_scen == n_dis_scen, (
+            f"charge/discharge 시나리오 개수가 다릅니다({n_ch_scen} vs {n_dis_scen}) — "
+            "probe_kernel_gates/probe_redundancy_mask는 양방향 폭이 같다고 가정합니다."
+        )
+        self._n_dir_scenarios = n_ch_scen
+
         if redundancy_mask is not None:
             assert redundancy_mask.shape == (self.n_scenarios, N_HI), (
                 f"redundancy_mask shape {tuple(redundancy_mask.shape)}가 "
                 f"(n_scenarios={self.n_scenarios}, N_HI={N_HI})와 다릅니다."
             )
             self.register_buffer("redundancy_mask", redundancy_mask.float(), persistent=False)
+            # 2026-10-07: 분류기(Stage A)용 합집합 마스크 — redundancy_mask는
+            # (n_scenarios, N_HI)라 시나리오를 알아야 행을 고를 수 있는데, 분류기는
+            # direction만 알고 시나리오는 모른다(그걸 맞추는 게 분류기의 일). 그래서
+            # 그 방향에 속한 시나리오들의 마스크를 "합집합"(하나라도 허용하면 허용)으로
+            # 합쳐 (2, N_HI) 텐서를 만든다 — 사용자 확정(교집합 대신 합집합: 정보 보존
+            # 우선, §결론 및 향후 방향 1번).
+            ch_mask  = redundancy_mask[spec.charge_scenario_ids].any(dim=0)
+            dis_mask = redundancy_mask[spec.discharge_scenario_ids].any(dim=0)
+            probe_redundancy_mask = torch.stack([ch_mask, dis_mask], dim=0)  # (2, N_HI)
+            self.register_buffer("probe_redundancy_mask", probe_redundancy_mask.float(), persistent=False)
         else:
             self.redundancy_mask = None
+            self.probe_redundancy_mask = None
 
         self._build_probe_gates(charge_probe_mask, discharge_probe_mask)  # Stage A
         self._build_scen_gates(scen_masks, scen_group_ids, shared_hi_mask, _gate_bank_size)  # Stage B
@@ -210,7 +234,16 @@ class SCRModel(nn.Module):
         폭(n_kernel_hi)의 독립 게이트로 "추가"한다. kernel.py가 그룹당 1개씩 만든 RBF
         커널 특징을 소비하는 용도. n_kernel_hi=0이면 완전히 비활성(기존과 동일 동작).
         kernel_hi_costs가 주어지면 scr_loss.py의 커널 L0 페널티 비용 가중치로 쓸
-        self.kernel_hi_costs를 검증 후 채운다."""
+        self.kernel_hi_costs를 검증 후 채운다.
+
+        2026-10-07: 분류기(Stage A)용 probe_kernel_gates도 여기서 함께 만든다 —
+        scen_kernel_gates와 완전히 같은 모양(시나리오별 K_s 폭)이지만 독립된
+        파라미터다. scen_kernel_gates는 "진짜 시나리오" 행만 보고
+        (_apply_gate_list가 scen_idx로 라우팅), probe_kernel_gates는 forward()에서
+        "그 방향의 후보 시나리오 전부"에 적용된다(진짜 시나리오를 모르는 분류기가
+        회귀와 동일한 커널 HI+다중공선성 배제 로직을 쓰되, 라우팅 기준만 scen_idx
+        대신 direction으로 바뀐 것) — 입력 행 선택 기준이 달라 파라미터를 공유하지
+        않는다."""
         if kernel_hi_counts is not None:
             assert len(kernel_hi_counts) == self.n_scenarios, (
                 f"kernel_hi_counts 길이({len(kernel_hi_counts)})가 n_scenarios"
@@ -224,6 +257,9 @@ class SCRModel(nn.Module):
             self.scen_kernel_gates = nn.ModuleList(
                 [HardConcreteGate(max(k, 1)) for k in kernel_hi_counts]
             )
+            self.probe_kernel_gates = nn.ModuleList(
+                [HardConcreteGate(max(k, 1)) for k in kernel_hi_counts]
+            )
         else:
             self.kernel_hi_counts = None
             self.n_kernel_hi = n_kernel_hi
@@ -231,8 +267,12 @@ class SCRModel(nn.Module):
                 self.scen_kernel_gates = nn.ModuleList(
                     [HardConcreteGate(n_kernel_hi) for _ in range(gate_bank_size)]
                 )
+                self.probe_kernel_gates = nn.ModuleList(
+                    [HardConcreteGate(n_kernel_hi) for _ in range(gate_bank_size)]
+                )
             else:
                 self.scen_kernel_gates = None
+                self.probe_kernel_gates = None
 
         if kernel_hi_costs is not None:
             assert self.kernel_hi_counts is not None, (
@@ -255,14 +295,22 @@ class SCRModel(nn.Module):
 
     def _build_probe_mlp(self, with_probe_mlp: bool, d_probe: int, dropout: float) -> None:
         """probe_mlp — Phase 1 dual-objective CE head. probe_x(N_HI, 대부분 0)+direction(1)
-        -> n_classes logits. CE 그래디언트는 probe_mlp를 거쳐 probe_gate에만 흐르고,
-        MSE 그래디언트는 cap_head를 거쳐 probe_gate+scen_gates에 흐른다.
-        with_probe_mlp=False면 None(기존 동작)."""
+        [+ 커널 후보 블록] -> n_classes logits. CE 그래디언트는 probe_mlp를 거쳐
+        probe_gate(+probe_kernel_gates)에만 흐르고, MSE 그래디언트는 cap_head를 거쳐
+        probe_gate+scen_gates(+scen_kernel_gates)에 흐른다. with_probe_mlp=False면
+        None(기존 동작).
+
+        2026-10-07: probe_kernel_gates가 있으면(§_build_kernel_gates) 입력 폭에
+        그 방향의 후보 시나리오 수(self._n_dir_scenarios) × 커널 폭(self.n_kernel_hi)
+        만큼 추가한다 — 없으면(기존 레시피, 커널 HI 자체가 없는 run) N_HI+1 그대로라
+        100% 하위호환."""
         if with_probe_mlp:
-            # 입력: probe_x (N_HI) + direction (1) → N_HI+1
+            # 입력: probe_x (N_HI) + direction (1) [+ 커널 후보 (n_dir*n_kernel_hi)]
             # direction 추가로 충/방전 간 sparsity 패턴 구분
+            kernel_extra = (self._n_dir_scenarios * self.n_kernel_hi
+                             if self.probe_kernel_gates is not None else 0)
             self.probe_mlp: Optional[nn.Sequential] = nn.Sequential(
-                nn.Linear(N_HI + 1, d_probe),
+                nn.Linear(N_HI + 1 + kernel_extra, d_probe),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(d_probe, d_probe // 2),
@@ -284,7 +332,11 @@ class SCRModel(nn.Module):
         direction : (B,)  +1.0=charge, -1.0=discharge
         scen_idx   : (B,)  0-5
         Returns (probe_x, probe_z): both (B, N_HI)
-        """
+
+        probe_redundancy_mask(2026-10-07, 분류기에도 회귀와 동일한 다중공선성
+        배제를 반영)이 있으면 마지막에 곱한다 — redundancy_mask와 동일한 "강제
+        0" 패턴(§_apply_scen_gate 참고), 다만 행 선택 기준이 scen_idx 대신
+        direction(그 방향 3개 시나리오의 합집합 — 하나라도 허용하면 허용)."""
         B = x.size(0)
         probe_x = torch.zeros_like(x)
         probe_z = torch.zeros_like(x)
@@ -312,6 +364,12 @@ class SCRModel(nn.Module):
                 mx, zz = self.discharge_probe_gate(x[dis_sel])
                 probe_x[dis_sel] = mx
                 probe_z[dis_sel] = zz
+
+        if self.probe_redundancy_mask is not None:
+            dir_idx = (direction <= 0).long()           # 0=charge, 1=discharge
+            row_mask = self.probe_redundancy_mask[dir_idx]  # (B, N_HI)
+            probe_x = probe_x * row_mask
+            probe_z = probe_z * row_mask
 
         return probe_x, probe_z
 
@@ -410,6 +468,49 @@ class SCRModel(nn.Module):
             z_out[sel, :k_s] = zz
         return masked, z_out
 
+    def _apply_probe_kernel_gate(
+        self, x_kernel_probe: torch.Tensor, direction: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """2026-10-07 신설 — 분류기(Stage A)용 커널 후보 블록.
+
+        scen_kernel_gates는 "진짜 시나리오" 행만 골라 그 시나리오 게이트에
+        통과시키지만, 분류기는 시나리오를 모르는 입장이라(그걸 맞추는 게 분류기의
+        일) 그 대신 "이 세그먼트의 direction에 속한 후보 시나리오 전부"를
+        각자의 own 커널 게이트(probe_kernel_gates[s] — scen_kernel_gates[s]와
+        같은 모양, 독립 파라미터)에 통과시켜 이어붙인다. train.py가
+        x_kernel_probe((B, n_scenarios, max_k) — 모든 시나리오에 대해 미리
+        predict해둔 값, ds.x_kernel처럼 진짜 scen_idx로 고른 게 아니라 전부
+        보존)를 batch에 실어준다.
+
+        x_kernel_probe : (B, n_scenarios, max_k)
+        direction      : (B,)  +1.0=charge, -1.0=discharge
+        Returns (masked, z): 둘 다 (B, n_dir_scenarios * max_k) — direction과
+        무관하게 폭이 고정(probe_mlp가 고정 크기 입력을 받아야 하므로).
+        """
+        B = x_kernel_probe.size(0)
+        max_k = self.n_kernel_hi
+        n_dir = self._n_dir_scenarios
+        masked = torch.zeros(B, n_dir, max_k, device=x_kernel_probe.device, dtype=x_kernel_probe.dtype)
+        z_out = torch.zeros_like(masked)
+
+        ch_sel  = (direction > 0)
+        dis_sel = (direction <= 0)
+        for dir_sel, scen_ids in (
+            (ch_sel, self.spec.charge_scenario_ids),
+            (dis_sel, self.spec.discharge_scenario_ids),
+        ):
+            if not dir_sel.any():
+                continue
+            for slot, s in enumerate(scen_ids):
+                k_s = self.kernel_hi_counts[s] if self.kernel_hi_counts is not None else max_k
+                if k_s == 0:
+                    continue  # 그 시나리오는 own 커널이 0개 — 더미 게이트(폭1)엔 애초에 실값이 없음
+                x_s = x_kernel_probe[dir_sel, s, :k_s]
+                mx, zz = self.probe_kernel_gates[s](x_s)
+                masked[dir_sel, slot, :k_s] = mx
+                z_out[dir_sel, slot, :k_s] = zz
+        return masked.reshape(B, n_dir * max_k), z_out.reshape(B, n_dir * max_k)
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
@@ -452,9 +553,17 @@ class SCRModel(nn.Module):
         feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+n_kernel_hi+2)
         cap_pred = self.cap_head(feat)                       # (B,)
 
-        # CE head: [probe_x || direction] → class logits (Phase 1 dual-objective only)
+        # CE head: [probe_x || direction [|| 커널 후보]] → class logits
+        # (Phase 1 dual-objective only). 2026-10-07: probe_kernel_gates가 있으면
+        # 그 방향의 후보 시나리오 전부의 커널 HI를 이어붙인다(§_apply_probe_kernel_gate).
+        probe_kernel_z = None
         if self.probe_mlp is not None:
-            probe_x_dir = torch.cat([probe_x, direction.unsqueeze(1)], dim=1)
+            probe_mlp_parts = [probe_x, direction.unsqueeze(1)]
+            if self.probe_kernel_gates is not None:
+                x_kernel_probe = batch["x_kernel_probe"]   # (B, n_scenarios, max_k)
+                probe_kernel_x, probe_kernel_z = self._apply_probe_kernel_gate(x_kernel_probe, direction)
+                probe_mlp_parts.append(probe_kernel_x)
+            probe_x_dir = torch.cat(probe_mlp_parts, dim=1)
             level_logits = self.probe_mlp(probe_x_dir)
         else:
             level_logits = torch.zeros(
@@ -470,6 +579,8 @@ class SCRModel(nn.Module):
         }
         if kernel_z is not None:
             out["kernel_z"] = kernel_z
+        if probe_kernel_z is not None:
+            out["probe_kernel_z"] = probe_kernel_z
         return out
 
     # ------------------------------------------------------------------
@@ -490,6 +601,18 @@ class SCRModel(nn.Module):
         """
         probe_x, _ = self._apply_probe_gate(x_hi, direction, scen_idx)
         return probe_x
+
+    @torch.no_grad()
+    def get_probe_kernel_x(
+        self, x_kernel_probe: torch.Tensor, direction: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """get_probe_x의 커널 버전(2026-10-07) — scr_evaluator.py가 forward()
+        전체를 안 거치고 분류기 입력만 수동으로 재구성할 때(hard/soft 라우팅 평가)
+        쓴다. probe_kernel_gates가 없으면(커널 HI 자체가 없는 run) None."""
+        if self.probe_kernel_gates is None:
+            return None
+        x_k, _ = self._apply_probe_kernel_gate(x_kernel_probe, direction)
+        return x_k
 
     @torch.no_grad()
     def get_selected_probe_his(self) -> dict[str, list[int]]:

@@ -133,7 +133,16 @@ class SCREvaluator:
         # (2026-09-25: CNNProbeClassifier 분기 삭제 — v4는 self._classifier에
         # 항상 model.probe_mlp만 주입하므로 이 else 경로만 실제로 쓰였다.)
         probe_x_clf = self.model.get_probe_x(x_hi, dir_t, batch_d["scen_idx"])
-        clf_inp    = torch.cat([probe_x_clf, dir_t.unsqueeze(1)], dim=1)  # (B, N_HI+1)
+        clf_parts  = [probe_x_clf, dir_t.unsqueeze(1)]
+        # 2026-10-07: probe_kernel_gates(분류기용 커널 후보 블록)가 있는 모델이면
+        # scr_model.py::forward()와 똑같이 그 블록도 입력에 이어붙여야 probe_mlp의
+        # 입력 폭(N_HI+1+n_dir*max_k)과 맞는다 — get_probe_kernel_x가 probe_kernel_gates
+        # 없는 모델이면 None을 돌려줘서 자동으로 기존(N_HI+1)과 동일 동작.
+        if "x_kernel_probe" in batch_d:
+            probe_kernel_x = self.model.get_probe_kernel_x(batch_d["x_kernel_probe"], dir_t)
+            if probe_kernel_x is not None:
+                clf_parts.append(probe_kernel_x)
+        clf_inp    = torch.cat(clf_parts, dim=1)  # (B, N_HI+1[+n_dir*max_k])
         clf_logits = self._classifier(clf_inp)    # (B, n_classes)
 
         if routing_mode == "hard":

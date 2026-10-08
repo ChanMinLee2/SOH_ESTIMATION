@@ -173,6 +173,16 @@ def _apply_kernel_features(
     2026-09-18(L0 비용 가중치 추가): 각 커널 HI의 비용은 그 커널을 만든 멤버 raw HI들의
     카테고리 비용(hi_schema.CATEGORY_COSTS)의 평균이다 — kernel.py가
     pkl 저장 시점에 f["cost"]로 미리 계산해둔 값을 그대로 읽는다(구 pkl 호환: 없으면 1.0).
+
+    2026-10-07(분류기용 커널 HI 추가): 시나리오별 predict를 "자기 시나리오 행만"이
+    아니라 "전체 행"에 대해 돌려서 (N, n_scenarios, max_k) 후보 텐서
+    x_kernel_all을 한 번만 계산하고, 거기서 ds.x_kernel(회귀용 — 진짜 scen_idx로
+    gather, 이전과 바이트 단위로 동일한 값)과 ds.x_kernel_probe(분류기용 — 전체
+    시나리오 후보를 그대로 보존, scr_model.py::_apply_probe_kernel_gate가 소비)을
+    둘 다 뽑아낸다. predict는 행 독립적 연산(Nystroem+Ridge, 배치 간 상호작용 없음)
+    이라 "부분집합 predict"와 "전체 predict 후 그 부분만 읽기"가 수학적으로 동일 —
+    순수 확장이지 기존 ds.x_kernel 값을 바꾸는 변경이 아니다. 계산량은 시나리오당
+    "자기 행만" -> "전체 행"으로 늘어난다(대략 n_scenarios배).
     """
     with open(pkl_path, "rb") as fh:
         artifact = pickle.load(fh)
@@ -206,16 +216,19 @@ def _apply_kernel_features(
     for ds in datasets:
         x = (ds.x_hi * ds.nan_mask).numpy()  # NaN 위치 0으로 (fit 시점과 동일 처리)
         scen_idx_np = ds.scen_idx.numpy()
-        x_kernel = np.zeros((x.shape[0], max_k), dtype=np.float32)
+        n = x.shape[0]
+        # 모든 시나리오(진짜 scen_idx와 무관) x 전체 행 — 분류기용 "후보" 포함.
+        x_kernel_all = np.zeros((n, spec.n_scenarios, max_k), dtype=np.float32)
         for s in range(spec.n_scenarios):
-            row_mask = scen_idx_np == s
-            if not row_mask.any():
-                continue
-            x_scen = x[row_mask]
             for local_j, f in enumerate(feats_by_scen[s]):
-                pred = f["model"].predict(x_scen[:, f["members"]])
-                x_kernel[row_mask, local_j] = (pred - f["mean"]) / f["std"]  # train 통계로 z-score
-        ds.x_kernel = torch.from_numpy(x_kernel.astype(np.float32))
+                pred = f["model"].predict(x[:, f["members"]])
+                x_kernel_all[:, s, local_j] = (pred - f["mean"]) / f["std"]  # train 통계로 z-score
+        # 회귀용(기존 ds.x_kernel): 진짜 scen_idx로 그 시나리오의 후보값만 골라냄
+        # — x_kernel_all[row, scen_idx_np[row], :]와 수학적으로 동일(predict가 행
+        # 독립적이라 부분집합/전체 predict 결과가 일치).
+        ds.x_kernel = torch.from_numpy(x_kernel_all[np.arange(n), scen_idx_np, :])
+        # 분류기용(신규): 전체 시나리오 후보 그대로 보존.
+        ds.x_kernel_probe = torch.from_numpy(x_kernel_all)
 
     avg_r2 = float(np.mean([f["train_r2"] for f in features])) if features else 0.0
     print(f"[p1v2] kernel-features-pkl 적용: {pkl_path} "
@@ -249,6 +262,9 @@ def _gate_saturation_fraction(model: SCRModel) -> float:
     gates = [model.charge_probe_gate, model.discharge_probe_gate, *model.scen_gates]
     if model.scen_kernel_gates is not None:
         gates += list(model.scen_kernel_gates)
+    if model.probe_kernel_gates is not None:
+        gates += list(model.probe_kernel_gates)  # 2026-10-07: 분류기용 커널 후보 블록도
+            # 학습 가능한 게이트 파라미터라 포화도 집계에서 빠지면 안 됨(위 scen_kernel_gates와 동일 이유).
     if model.shared_gate is not None:
         gates.append(model.shared_gate)  # v4: scen_gates가 shared 몫만큼 좁아진 대신
             # shared_gate가 그 몫을 담당하므로, 얘를 빼면 포화도가 실제보다 낮게(더 좋게)
@@ -256,6 +272,27 @@ def _gate_saturation_fraction(model: SCRModel) -> float:
     probs = [gate.gate_prob().detach().cpu() for gate in gates]
     p = torch.cat(probs)
     return float(((p > 0.1) & (p < 0.9)).float().mean().item())
+
+
+def _mean_off_hi_count(model: SCRModel) -> float:
+    """2026-10-08: 에폭별 loss_curves.png에 "몇 개의 raw HI가 꺼져 있는지" 추이를
+    같이 보여주기 위한 헬퍼 — 시나리오별로 전체 폭(N_HI=64) gate_prob 벡터를
+    복원(_save_scen_masks_with_shared와 동일한 shared+specific 재조립 로직)한 뒤
+    gate_prob<=0.5인 개수를 세고, 6개 시나리오 평균을 반환한다. 체크포인트 없이도
+    현재 게이트 파라미터만으로 즉시 계산 가능(데이터 forward 불필요)."""
+    n_hi = model.scen_gates[0].gate_prob().numel() if model.shared_gate is None else (
+        model._shared_idx.numel() + model._specific_idx.numel())
+    off_counts = []
+    for s in range(model.n_scenarios):
+        if model.shared_gate is not None:
+            full_prob = torch.zeros(n_hi)
+            full_prob[model._shared_idx.detach().cpu()] = model.shared_gate.gate_prob().detach().cpu()
+            if model._specific_idx.numel() > 0:
+                full_prob[model._specific_idx.detach().cpu()] = model.scen_gates[s].gate_prob().detach().cpu()
+        else:
+            full_prob = model.scen_gates[s].gate_prob().detach().cpu()
+        off_counts.append(int((full_prob <= 0.5).sum().item()))
+    return float(sum(off_counts) / len(off_counts))
 
 
 def _save_scen_masks_with_shared(model: SCRModel, json_path, hi_cols_by_seg: dict[int, list[str]]) -> None:
@@ -542,7 +579,7 @@ def t5_define_output_paths(params: SimpleNamespace, data: SimpleNamespace, hyper
     log_path = output_dir / "logs" / "train_log_v2.csv"
     with open(log_path, "w", encoding="utf-8") as f:
         f.write("epoch,lambda_l0,lambda_scen,beta,tr_rmse,tr_r2,tr_mse,tr_ce,tr_l0,"
-                 "val_rmse,val_r2,gate_saturation,is_selected\n")
+                 "val_rmse,val_r2,val_cls_acc,n_hi_off,gate_saturation,is_selected\n")
 
     # 2026-09-18: config.yaml/p1v2_summary.json을 여기(학습 루프 시작 전)에서도 한 번 써둔다
     # — 원래는 학습이 끝난 뒤(맨 아래)에만 썼는데, 여기서 미리 써두면
@@ -654,16 +691,22 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
         # ---- val epoch ----
         model.eval()
         val_preds, val_targets = [], []
+        val_cls_correct = val_cls_total = 0
         with torch.no_grad():
             for batch in val_loader:
                 batch = {k: v.to(device) for k, v in batch.items()}
                 out = model(batch)
                 val_preds.append(out["cap_pred"].cpu())
                 val_targets.append(batch["target"].cpu())
+                if model.probe_mlp is not None:
+                    val_cls_correct += int((out["level_logits"].argmax(dim=1) == batch["level"]).sum().item())
+                    val_cls_total += batch["level"].numel()
         val_p, val_t = torch.cat(val_preds).numpy(), torch.cat(val_targets).numpy()
         val_rmse_v, val_r2_v = float(_rmse(val_t, val_p)), float(_r2(val_t, val_p))
+        val_cls_acc_v = (val_cls_correct / val_cls_total) if val_cls_total > 0 else 0.0
 
         sat = _gate_saturation_fraction(model)
+        n_hi_off_v = _mean_off_hi_count(model)
 
         # Stage1: 체크포인트 선택 = "L0가 완전히 램프된 이후" 구간에서 val_rmse 우선,
         # sat은 fallback(2026-09-18, 기준 변경 — 기존 sat-1순위 방식은 docs 2026-09-04
@@ -691,7 +734,8 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{epoch+1},{eff_l0:.6f},{loss_fn.lambda_scen:.6f},{beta_now:.4f},"
                     f"{tr_rmse_v:.6f},{tr_r2_v:.6f},{tr_mse_v:.6f},{tr_ce_v:.6f},{tr_l0_v:.6f},"
-                    f"{val_rmse_v:.6f},{val_r2_v:.6f},{sat:.6f},{int(is_selected)}\n")
+                    f"{val_rmse_v:.6f},{val_r2_v:.6f},{val_cls_acc_v:.6f},{n_hi_off_v:.3f},"
+                    f"{sat:.6f},{int(is_selected)}\n")
 
         if (epoch + 1) % 10 == 0 or is_selected:
             _msg = (f"epoch {epoch+1:4d}  lambda_l0={eff_l0:.4f}  beta={beta_now:.3f}  "
@@ -751,6 +795,14 @@ def t7_save_results(params: SimpleNamespace, data: SimpleNamespace, hyperparams:
             model, output_dir / "gates" / "regression_kernel_HIs.json", kernel_cols_by_seg,
             gates=model.scen_kernel_gates,
         )
+        if model.probe_kernel_gates is not None:
+            # 2026-10-07: 분류기용 커널 후보 블록 랭킹도 같은 스키마로 저장 —
+            # scen_kernel_gates와 이름 목록(kernel_cols_by_seg)은 동일(같은 kernel.py
+            # 산출물에서 왔으므로), 게이트 파라미터만 독립(probe_kernel_gates).
+            _save_scen_masks_to_json(
+                model, output_dir / "gates" / "classification_kernel_HIs.json", kernel_cols_by_seg,
+                gates=model.probe_kernel_gates,
+            )
 
     _plot_gate_probs(
         model, output_dir / "gates" / "gate_probs.png", hi_cols_ref,

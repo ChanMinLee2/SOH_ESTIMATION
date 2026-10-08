@@ -18,6 +18,8 @@ L0_penalty: for each scenario, computes E[cost of active HIs].
   전혀 없었음(docs/260917_RESULTS.md). 커널별 비용은 model.kernel_hi_costs가 있으면
   그 커널을 만든 멤버 raw HI 카테고리(stat/diff/lfp/morph) 비용의 평균을 쓰고,
   없으면(구 pkl/미지정) 균일 비용 1.0으로 하위호환.
+  2026-10-07부터 probe_kernel_gates(분류기용 커널 후보 블록, §scr_model.py)도 같은
+  방식으로 패널티에 합산됨 — 회귀뿐 아니라 분류기의 커널 HI 사용에도 희소화 압력.
 
 hi_cost_weighted(2026-09-19, 기본 False로 전환): True면 raw HI는 CATEGORY_COSTS
 (stat/diff/lfp/morph), 커널 HI는 멤버 카테고리 비용 평균으로 L0 페널티를 가중한다.
@@ -162,6 +164,32 @@ class SCRLoss(nn.Module):
         penalty = penalty + kernel_penalty / norm
         return penalty
 
+    def _probe_kernel_hi_penalty(self, model: nn.Module, device: torch.device) -> torch.Tensor:
+        """분류기(Stage A)용 커널 후보 블록(model.probe_kernel_gates) L0 페널티
+        (2026-10-07 신설) — _kernel_hi_penalty와 완전히 같은 구조(게이트 확률 자체가
+        활성 확률, 비용도 같은 model.kernel_hi_costs를 재사용 — 커널 HI 자체의
+        계산 비용은 어느 게이트가 읽든 동일하므로)지만 model.scen_kernel_gates
+        대신 model.probe_kernel_gates를 본다. probe_kernel_gates가 없으면
+        (커널 HI 자체가 없는 run) 기여 없음(0)."""
+        penalty = torch.zeros(1, device=device)
+        probe_kernel_gates = getattr(model, "probe_kernel_gates", None)
+        if probe_kernel_gates is None:
+            return penalty
+
+        kernel_costs = getattr(model, "kernel_hi_costs", None) if self.hi_cost_weighted else None
+        kernel_penalty = torch.zeros(1, device=device)
+        for s, gate in enumerate(probe_kernel_gates):
+            p = gate.gate_prob()
+            if kernel_costs is not None:
+                c = torch.tensor(kernel_costs[s], dtype=p.dtype, device=p.device)
+                kernel_penalty = kernel_penalty + (c * p).sum()
+            else:
+                kernel_penalty = kernel_penalty + p.sum()
+        _n_scen = model.n_scenarios
+        norm = self.l0_norm_constant if self.l0_norm_constant is not None else _n_scen
+        penalty = penalty + kernel_penalty / norm
+        return penalty
+
     def _l0_penalty(self, model: nn.Module) -> torch.Tensor:
         """
         L0 penalty summed across all 6 scenarios.
@@ -175,10 +203,13 @@ class SCRLoss(nn.Module):
         2026-10-04: 단일 책임 원칙에 따라 raw HI 몫(_raw_hi_penalty)과 커널 HI
         몫(_kernel_hi_penalty)을 분리했다(동작 변화 없는 순수 구조 정리) — 각 함수
         docstring에 계산 디테일 참고.
+        2026-10-07: 분류기(Stage A)용 커널 후보 블록(_probe_kernel_hi_penalty)도
+        추가 — 회귀와 동일하게 분류기의 커널 HI 사용에도 희소화 압력을 건다.
         """
         device = self.cost_vec.device
         eff_cost_vec = self.cost_vec if self.hi_cost_weighted else torch.ones_like(self.cost_vec)
 
         penalty = self._raw_hi_penalty(model, eff_cost_vec, device)
         penalty = penalty + self._kernel_hi_penalty(model, device)
+        penalty = penalty + self._probe_kernel_hi_penalty(model, device)
         return penalty.squeeze()

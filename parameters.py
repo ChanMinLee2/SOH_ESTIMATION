@@ -90,7 +90,7 @@ N_HI_TO_ENV = {
 }
 
 # ── 태그/경로 ────────────────────────────────────────────────────────────
-ACTIVE_P1_TAG = "noscenverify"       # TEMP no_scen 파이프라인 검증용, 검증 후 "refact"로 원복 — 구 --p1-tag
+ACTIVE_P1_TAG = "refact"                # 구 --p1-tag
 ACTIVE_REP_CELLS = None                 # 구 --rep-cells (None=데이터셋별 5개 자동 선정)
 ACTIVE_DATA_DIR = None                  # 구 --data-dir — noscen/scen/HI63.. 축마다 값이
                                          # 다 달라서 고정 불가, CLI로 계속 필요. None이면
@@ -119,9 +119,6 @@ ACTIVE_AXIS_CONFIG: dict = {            # 이 값이 곧 train.py의 하드코�
     "min_pts": 5,
     "calibration_period": 100,
     "offset_amp": 0.005,
-    "assign": "none",  # TEMP no_scen 검증용(2026-10-05) — QFracWideSegmenter의
-        # assign="none"(존 구분 제거, n_scenarios=2 "chg"/"dis"만)이 QFracRefSegmenter에
-        # **kwargs/super()로 그대로 상속됨을 확인(코드 수정 불필요). 검증 후 이 줄 삭제.
 }
 
 # ── 모델/재현성 ──────────────────────────────────────────────────────────
@@ -154,12 +151,7 @@ FIXED_SEG_AXIS = "q_frac_ref"           # 구 --seg-axis. vwindow 등 다른 축
 # 바뀌므로 이 상수도 반드시 같이 갱신할 것.
 _CANONICAL_AXIS_DIR = (
     DATA_4_HI_ROOT / "q_frac_ref"
-    # TEMP no_scen 검증용(2026-10-05) — ACTIVE_AXIS_CONFIG에 assign="none"을 추가한 데
-    # 맞춰 _noscen 접미사 폴더로 리다이렉트(4_hi_analysis/logics.py의 _qfw_tag가
-    # assign="none"일 때 자동으로 붙이는 접미사, minpts5 바로 뒤에 삽입됨 — 기존
-    # 정식 레시피 경로와 겹치지 않음). 검증 후 아래 원래 경로로 되돌릴 것.
-    / "n1-35%_n2-20%_N-2_minpts5_noscen_lag-1_noise-3%_ou-200_calib-100_offA-5mA"
-    # / "n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA"  # 원래 경로
+    / "n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA"
 )
 FIXED_CANONICAL_DATA_DIR = str(_CANONICAL_AXIS_DIR / "cycle").replace("\\", "/")
 FIXED_CANONICAL_SEG_DATA_DIR = str(_CANONICAL_AXIS_DIR / "seg").replace("\\", "/")

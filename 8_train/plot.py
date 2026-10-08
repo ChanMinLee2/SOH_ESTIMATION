@@ -23,13 +23,17 @@ from models.scr_model import SCRModel
 
 def _plot_loss_curves(log_path: Path, output_path: Path) -> None:
     """
-    2개 서브플롯:
-      좌) 가중된 기여도(stackplot) — mse + lambda_scen*ce + lambda_l0*l0 쌓은 면적의
+    기본 2개 + (로그에 있으면) 2개 추가, 최대 4개 서브플롯(2x2):
+      좌상) 가중된 기여도(stackplot) — mse + lambda_scen*ce + lambda_l0*l0 쌓은 면적의
           맨 위 선이 곧 total loss와 같다(SCRLoss.forward의 total 정의 그대로).
-      우) 가중치를 곱하기 전 raw 값(log-scale) — 람다가 변하는 것과 무관하게 각 항
+      우상) 가중치를 곱하기 전 raw 값(log-scale) — 람다가 변하는 것과 무관하게 각 항
           자체가 줄어들고 있는지 보기 위함.
-    train_log_v2.csv에 tr_mse/tr_ce/tr_l0 컬럼이 없는 과거 run(이 기능 추가 이전)은
-    조용히 건너뛴다.
+      좌하) 분류기(probe_mlp) 밸리데이션 정확도 에폭별 추이(2026-10-08 추가).
+      우하) 평균 OFF raw HI 개수(시나리오 6개 평균, out of N_HI=64) 에폭별 추이
+          (2026-10-08 추가) — train.py::_mean_off_hi_count가 매 에폭 기록.
+    train_log_v2.csv에 필요한 컬럼이 없는 과거 run은 해당 패널만 조용히 건너뛴다
+    (완전히 옛 run이면 좌상/우상 2개만, val_cls_acc/n_hi_off가 없던 run은 2026-10-08
+    이전 run이라 아래 2개만 빠짐).
     """
     try:
         import matplotlib
@@ -40,6 +44,16 @@ def _plot_loss_curves(log_path: Path, output_path: Path) -> None:
         print("[train] matplotlib/pandas 미설치 — loss_curves.png 생략")
         return
 
+    # 2026-10-08: 한글 라벨(가중된 기여도/분류기 정확도 등)이 깨지는 문제 — 다른
+    # step들의 plot.py와 동일한 폰트 폴백 관례(모듈 docstring 참고)를 여기도 적용.
+    for _font in ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]:
+        try:
+            plt.rcParams["font.family"] = _font
+            break
+        except Exception:
+            continue
+    plt.rcParams["axes.unicode_minus"] = False
+
     df = pd.read_csv(log_path)
     required = {"tr_mse", "tr_ce", "tr_l0", "lambda_l0", "lambda_scen"}
     if not required.issubset(df.columns):
@@ -47,12 +61,16 @@ def _plot_loss_curves(log_path: Path, output_path: Path) -> None:
               f"(옛 run이거나 2026-10-02 이전 로그)")
         return
 
+    has_cls_hi = {"val_cls_acc", "n_hi_off"}.issubset(df.columns)
+
     epoch = df["epoch"]
     mse = df["tr_mse"]
     ce_w = df["lambda_scen"] * df["tr_ce"]
     l0_w = df["lambda_l0"] * df["tr_l0"]
 
-    fig, (ax_w, ax_raw) = plt.subplots(1, 2, figsize=(14, 5))
+    n_rows = 2 if has_cls_hi else 1
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 5 * n_rows))
+    (ax_w, ax_raw) = axes[0] if has_cls_hi else axes
 
     ax_w.stackplot(epoch, mse, ce_w, l0_w,
                    labels=["mse", "lambda_scen*ce", "lambda_l0*l0"],
@@ -71,8 +89,33 @@ def _plot_loss_curves(log_path: Path, output_path: Path) -> None:
     ax_raw.set_ylabel("loss (log)")
     ax_raw.legend(fontsize=8)
 
+    if has_cls_hi:
+        ax_acc, ax_hi = axes[1]
+
+        ax_acc.plot(epoch, df["val_cls_acc"], color="mediumvioletred", linewidth=1.3)
+        if "is_selected" in df.columns:
+            sel = df[df["is_selected"] == 1]
+            ax_acc.scatter(sel["epoch"], sel["val_cls_acc"], color="black", s=14,
+                           zorder=3, label="selected checkpoint")
+            ax_acc.legend(fontsize=8)
+        ax_acc.set_title("분류기(probe_mlp) val 정확도", fontsize=10, fontweight="bold")
+        ax_acc.set_xlabel("epoch")
+        ax_acc.set_ylabel("val classification accuracy")
+        ax_acc.set_ylim(0, 1.0)
+
+        ax_hi.plot(epoch, df["n_hi_off"], color="firebrick", linewidth=1.3)
+        if "is_selected" in df.columns:
+            sel = df[df["is_selected"] == 1]
+            ax_hi.scatter(sel["epoch"], sel["n_hi_off"], color="black", s=14, zorder=3,
+                          label="selected checkpoint")
+            ax_hi.legend(fontsize=8)
+        ax_hi.set_title("평균 OFF raw HI 개수 (6시나리오 평균, N_HI=64)", fontsize=10, fontweight="bold")
+        ax_hi.set_xlabel("epoch")
+        ax_hi.set_ylabel("# HI off (avg over scenarios)")
+        ax_hi.set_ylim(0, 64)
+
     fig.suptitle("Phase 1 — Loss term breakdown by epoch", fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.tight_layout(rect=[0, 0, 1, 0.96 if has_cls_hi else 0.95])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

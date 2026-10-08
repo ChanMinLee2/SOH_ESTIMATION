@@ -125,7 +125,11 @@ class _KernelAugmentedDataset(torch.utils.data.Dataset):
     forward에서 KeyError: 'x_kernel'이 난다. segment_dataset.py/scr_evaluator.py는 건드리지
     않고(중복 구현/기존 스크립트 수정 금지), 여기서만 __getitem__에 x_kernel을 끼워 넣는
     얇은 래퍼로 우회한다. __getattr__로 나머지 속성(cell_ids/cycles/seg_names 등)은 원본
-    데이터셋에 그대로 위임 — _pick_rep_cells 등 기존 코드가 요구하는 속성 접근에 영향 없음."""
+    데이터셋에 그대로 위임 — _pick_rep_cells 등 기존 코드가 요구하는 속성 접근에 영향 없음.
+
+    2026-10-07: x_kernel_probe(분류기용 커널 후보 블록, train.py::_apply_kernel_features가
+    x_kernel과 함께 붙여둠)도 같은 방식으로 끼워 넣는다 — 있으면만 추가, 없으면
+    기존과 완전히 동일 동작(구 checkpoint/커널 미사용 run 하위호환)."""
 
     def __init__(self, base_ds):
         self._base = base_ds
@@ -136,6 +140,8 @@ class _KernelAugmentedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         item = self._base[idx]
         item["x_kernel"] = self._base.x_kernel[idx]
+        if hasattr(self._base, "x_kernel_probe"):
+            item["x_kernel_probe"] = self._base.x_kernel_probe[idx]
         return item
 
     def __getattr__(self, name):

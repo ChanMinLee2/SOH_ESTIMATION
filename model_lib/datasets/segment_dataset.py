@@ -475,6 +475,11 @@ class FastTensorLoader:
             # 학습 직전 ds.x_kernel로 붙여둠) — 있으면 자동으로 배치에 포함, 없으면
             # 기존과 완전히 동일 동작.
             keys.append("x_kernel")
+        if hasattr(ds, "x_kernel_probe"):
+            # 2026-10-07: 분류기(Stage A)용 커널 후보 블록(train.py::_apply_kernel_features가
+            # ds.x_kernel과 함께 붙여둠, (N, n_scenarios, max_k)) — x_kernel과 동일한
+            # hasattr 패턴으로 자동 포함.
+            keys.append("x_kernel_probe")
         self.keys = keys
         self.tensors = {k: getattr(ds, k) for k in keys}
         self.n = len(ds)
