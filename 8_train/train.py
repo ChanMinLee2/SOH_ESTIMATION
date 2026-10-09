@@ -150,6 +150,7 @@ def _resolve_device(s: str) -> torch.device:
 
 def _apply_kernel_features(
     datasets: list, pkl_path: Path, spec, combined_redundancy: dict | None = None,
+    use_probe_kernel: bool = False,
 ) -> tuple[dict[int, list[str]], list[int], dict[int, list[float]]]:
     """kernel.py 산출물을 로드해 각 dataset에 x_kernel(정규화된
     RBF 커널 융합값)을 새로 붙인다 — x_hi(raw HI)는 건드리지 않는다(v2: 대체가 아니라
@@ -174,15 +175,14 @@ def _apply_kernel_features(
     카테고리 비용(hi_schema.CATEGORY_COSTS)의 평균이다 — kernel.py가
     pkl 저장 시점에 f["cost"]로 미리 계산해둔 값을 그대로 읽는다(구 pkl 호환: 없으면 1.0).
 
-    2026-10-07(분류기용 커널 HI 추가): 시나리오별 predict를 "자기 시나리오 행만"이
-    아니라 "전체 행"에 대해 돌려서 (N, n_scenarios, max_k) 후보 텐서
-    x_kernel_all을 한 번만 계산하고, 거기서 ds.x_kernel(회귀용 — 진짜 scen_idx로
-    gather, 이전과 바이트 단위로 동일한 값)과 ds.x_kernel_probe(분류기용 — 전체
-    시나리오 후보를 그대로 보존, scr_model.py::_apply_probe_kernel_gate가 소비)을
-    둘 다 뽑아낸다. predict는 행 독립적 연산(Nystroem+Ridge, 배치 간 상호작용 없음)
-    이라 "부분집합 predict"와 "전체 predict 후 그 부분만 읽기"가 수학적으로 동일 —
-    순수 확장이지 기존 ds.x_kernel 값을 바꾸는 변경이 아니다. 계산량은 시나리오당
-    "자기 행만" -> "전체 행"으로 늘어난다(대략 n_scenarios배).
+    2026-10-07(분류기용 커널 HI 추가, 2026-10-09 기본 비활성으로 롤백): 시나리오별
+    predict를 "자기 시나리오 행만"이 아니라 "전체 행"에 대해 돌려서 (N, n_scenarios,
+    max_k) 후보 텐서 x_kernel_all을 계산하면 ds.x_kernel_probe(분류기용, 전체 시나리오
+    후보 보존)도 같이 뽑을 수 있었는데, 실측 결과(58개 후보 중 2개만 쓰임, 회귀 성능
+    무변화) 분류기 쪽은 효과가 없다고 판단해 use_probe_kernel=False(기본)면 이 비싼
+    경로(계산량 대략 n_scenarios배) 자체를 건너뛰고 기존처럼 "자기 시나리오 행만"
+    predict한다 — ds.x_kernel_probe는 안 만들어지고 FastTensorLoader도 자동으로
+    배치에 안 실음. use_probe_kernel=True면 2026-10-07 동작을 재현한다.
     """
     with open(pkl_path, "rb") as fh:
         artifact = pickle.load(fh)
@@ -217,18 +217,31 @@ def _apply_kernel_features(
         x = (ds.x_hi * ds.nan_mask).numpy()  # NaN 위치 0으로 (fit 시점과 동일 처리)
         scen_idx_np = ds.scen_idx.numpy()
         n = x.shape[0]
-        # 모든 시나리오(진짜 scen_idx와 무관) x 전체 행 — 분류기용 "후보" 포함.
-        x_kernel_all = np.zeros((n, spec.n_scenarios, max_k), dtype=np.float32)
-        for s in range(spec.n_scenarios):
-            for local_j, f in enumerate(feats_by_scen[s]):
-                pred = f["model"].predict(x[:, f["members"]])
-                x_kernel_all[:, s, local_j] = (pred - f["mean"]) / f["std"]  # train 통계로 z-score
-        # 회귀용(기존 ds.x_kernel): 진짜 scen_idx로 그 시나리오의 후보값만 골라냄
-        # — x_kernel_all[row, scen_idx_np[row], :]와 수학적으로 동일(predict가 행
-        # 독립적이라 부분집합/전체 predict 결과가 일치).
-        ds.x_kernel = torch.from_numpy(x_kernel_all[np.arange(n), scen_idx_np, :])
-        # 분류기용(신규): 전체 시나리오 후보 그대로 보존.
-        ds.x_kernel_probe = torch.from_numpy(x_kernel_all)
+        if use_probe_kernel:
+            # 모든 시나리오(진짜 scen_idx와 무관) x 전체 행 — 분류기용 "후보" 포함.
+            x_kernel_all = np.zeros((n, spec.n_scenarios, max_k), dtype=np.float32)
+            for s in range(spec.n_scenarios):
+                for local_j, f in enumerate(feats_by_scen[s]):
+                    pred = f["model"].predict(x[:, f["members"]])
+                    x_kernel_all[:, s, local_j] = (pred - f["mean"]) / f["std"]  # train 통계로 z-score
+            # 회귀용(기존 ds.x_kernel): 진짜 scen_idx로 그 시나리오의 후보값만 골라냄
+            # — x_kernel_all[row, scen_idx_np[row], :]와 수학적으로 동일(predict가 행
+            # 독립적이라 부분집합/전체 predict 결과가 일치).
+            ds.x_kernel = torch.from_numpy(x_kernel_all[np.arange(n), scen_idx_np, :])
+            # 분류기용: 전체 시나리오 후보 그대로 보존.
+            ds.x_kernel_probe = torch.from_numpy(x_kernel_all)
+        else:
+            # 기본(2026-10-09 롤백): 자기 시나리오 행만 predict — 분류기용 전체 후보는
+            # 계산하지 않는다(x_kernel_probe 자체를 안 만듦).
+            x_kernel = np.zeros((n, max_k), dtype=np.float32)
+            for s in range(spec.n_scenarios):
+                row_mask = scen_idx_np == s
+                if not row_mask.any():
+                    continue
+                for local_j, f in enumerate(feats_by_scen[s]):
+                    pred = f["model"].predict(x[row_mask][:, f["members"]])
+                    x_kernel[row_mask, local_j] = (pred - f["mean"]) / f["std"]
+            ds.x_kernel = torch.from_numpy(x_kernel)
 
     avg_r2 = float(np.mean([f["train_r2"] for f in features])) if features else 0.0
     print(f"[p1v2] kernel-features-pkl 적용: {pkl_path} "
@@ -239,22 +252,39 @@ def _apply_kernel_features(
     return names_by_scen, kernel_hi_counts, costs_by_scen
 
 
-def _build_redundancy_mask(combined_redundancy: dict, spec) -> torch.Tensor:
+def _build_redundancy_mask(combined_redundancy: dict, spec, key: str = "removed_raw_idx") -> torch.Tensor:
     """kernel.py의 3차 결합(raw+kernel) 다중공선성 배제 결과 중 raw HI
     쪽을 SCRModel(redundancy_mask=...)용 bool 텐서 (n_scenarios, N_HI)로 만든다(2026-09-18,
     요구사항2를 raw HI에도 게이트 구조로 강제 — scr_model.py의 _apply_scen_gate가 이 마스크를
     scen_gates 출력에 곱해 False 위치는 log_alpha와 무관하게 항상 0으로 만든다). True=허용,
-    False=그 시나리오에서 배제된 raw HI."""
+    False=그 시나리오에서 배제된 raw HI.
+
+    key(2026-10-09 추가): 기본 "removed_raw_idx"(회귀용, SOH 상관 기준 2순위)가
+    아니라 "removed_raw_idx_classifier"(분류기용, 분산 기준 2순위)를 주면 같은
+    시나리오별 구조로 분류기 전용 마스크를 만든다 — kernel.py::k6_build_combined_
+    redundancy가 두 필드를 같은 edges/degree에서 2순위만 다르게 계산해 저장한다."""
     by_scenario = combined_redundancy.get("by_scenario", combined_redundancy)
     seg_name_to_idx = {n: i for i, n in enumerate(spec.scenario_names)}
     mask = torch.ones(spec.n_scenarios, N_HI, dtype=torch.bool)
     for seg_name, info in by_scenario.items():
-        removed_raw_idx = info.get("removed_raw_idx", [])
+        removed_raw_idx = info.get(key, [])
         if not removed_raw_idx:
             continue
         s = seg_name_to_idx[seg_name]
         mask[s, removed_raw_idx] = False
     return mask
+
+
+def _build_probe_redundancy_mask(combined_redundancy: dict, spec) -> torch.Tensor:
+    """2026-10-09: 분류기(Stage A) 전용 다중공선성 마스크 — 시나리오별
+    removed_raw_idx_classifier(분산 기준 2순위)로 (n_scenarios, N_HI) 마스크를 만든 뒤,
+    그 방향에 속한 시나리오들을 합집합(하나라도 허용하면 허용)으로 합쳐 (2, N_HI)로
+    축소한다. 예전엔 회귀용 redundancy_mask를 그대로 union했었는데(2026-10-07),
+    이제는 애초에 2순위 기준부터 다른 별도 계산 결과를 union한다."""
+    scen_level = _build_redundancy_mask(combined_redundancy, spec, key="removed_raw_idx_classifier")
+    ch_mask = scen_level[spec.charge_scenario_ids].any(dim=0)
+    dis_mask = scen_level[spec.discharge_scenario_ids].any(dim=0)
+    return torch.stack([ch_mask, dis_mask], dim=0)  # (2, N_HI)
 
 
 def _gate_saturation_fraction(model: SCRModel) -> float:
@@ -348,6 +378,7 @@ def t1_set_params_and_config() -> SimpleNamespace:
     l0_norm_constant = P.FIXED_L0_NORM_CONSTANT
     hi_cost_weighted_l0 = P.ACTIVE_HI_COST_WEIGHTED_L0
     val_rmse_epsilon = P.FIXED_VAL_RMSE_EPSILON
+    use_probe_kernel = getattr(P, "ACTIVE_USE_PROBE_KERNEL", False)
 
     device = _resolve_device(device_str)
     torch.manual_seed(seed)
@@ -379,6 +410,7 @@ def t1_set_params_and_config() -> SimpleNamespace:
         batch_size_override=batch_size_override, lambda_l0_override=lambda_l0_override,
         l0_warmup_epochs_override=l0_warmup_epochs_override, l0_norm_constant=l0_norm_constant,
         hi_cost_weighted_l0=hi_cost_weighted_l0, val_rmse_epsilon=val_rmse_epsilon,
+        use_probe_kernel=use_probe_kernel,
     )
 
 
@@ -441,7 +473,7 @@ def t2_load_pkl_json(args: argparse.Namespace, params: SimpleNamespace) -> Simpl
     if kernel_features_pkl:
         kernel_names_by_scen, kernel_hi_counts, kernel_costs_by_scen = _apply_kernel_features(
             [train_ds, val_ds, test_ds], Path(kernel_features_pkl), params.spec,
-            combined_redundancy=combined_redundancy,
+            combined_redundancy=combined_redundancy, use_probe_kernel=params.use_probe_kernel,
         )
 
     return SimpleNamespace(
@@ -469,6 +501,16 @@ def t3_build_tensor_masks(params: SimpleNamespace, data: SimpleNamespace) -> Sim
               f"(게이트 출력 0-강제만 적용 — 입력 레벨 마스킹은 분류기 오염 버그로 제거됨, "
               f"{int((~redundancy_mask).sum().item())}개 (시나리오,HI) 조합 배제)")
 
+    probe_redundancy_mask = None
+    if data.combined_redundancy is not None:
+        # 2026-10-09: 분류기 전용 — removed_raw_idx_classifier(분산 기준 2순위)를
+        # 방향별로 union. redundancy_mask(회귀용, SOH상관 기준)에서 더는 파생시키지
+        # 않는다 — kernel.py가 애초에 다른 2순위로 따로 계산해 저장한 결과를 쓴다.
+        probe_redundancy_mask = _build_probe_redundancy_mask(data.combined_redundancy, params.spec)
+        n_removed = int((~probe_redundancy_mask).sum().item())
+        print(f"[p1v2] combined-redundancy-json 적용(분류기용, 분산 기준): "
+              f"{n_removed}개 (방향,HI) 조합 배제")
+
     shared_hi_mask = None
     if data.interaction_json:
         interaction_data = json.loads(Path(data.interaction_json).read_text(encoding="utf-8"))
@@ -486,7 +528,8 @@ def t3_build_tensor_masks(params: SimpleNamespace, data: SimpleNamespace) -> Sim
               f"({n_shared}/{len(shared_hi_mask)}개 HI -> shared_gate, "
               f"{len(shared_hi_mask) - n_shared}개 -> 기존 scen_gates)")
 
-    return SimpleNamespace(redundancy_mask=redundancy_mask, shared_hi_mask=shared_hi_mask)
+    return SimpleNamespace(redundancy_mask=redundancy_mask, probe_redundancy_mask=probe_redundancy_mask,
+                            shared_hi_mask=shared_hi_mask)
 
 
 def t4_build_model_and_hparams(params: SimpleNamespace, data: SimpleNamespace, masks: SimpleNamespace) -> SimpleNamespace:
@@ -515,6 +558,8 @@ def t4_build_model_and_hparams(params: SimpleNamespace, data: SimpleNamespace, m
         kernel_hi_counts=data.kernel_hi_counts,
         kernel_hi_costs=data.kernel_costs_by_scen,
         redundancy_mask=masks.redundancy_mask,
+        probe_redundancy_mask=masks.probe_redundancy_mask,
+        with_probe_kernel=params.use_probe_kernel,
     ).to(params.device)
 
     loss_cfg = cfg["loss"]

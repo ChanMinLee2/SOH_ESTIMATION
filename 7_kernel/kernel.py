@@ -27,9 +27,17 @@ docs/260820_RESULTS.md 참고).
     "by_scenario": {
       seg_name: {"removed_raw_idx": [...], "removed_raw_names": [...],
                  "removed_kernel_names": [...], "n_total_checked": int,
-                 "n_edges": int}, ...
+                 "n_edges": int,
+                 "removed_raw_idx_classifier": [...],
+                 "removed_raw_names_classifier": [...]}, ...
     },
   }
+  removed_raw_idx_classifier(2026-10-09 신설): 분류기는 더 이상 커널 HI를 쓰지
+  않기로 결정됐고(probe_kernel_gates 폐기), raw HI 다중공선성 배제 기준도 회귀와
+  다르게 가져간다 — degree(1순위)는 동일하게 쓰되, 2순위를 "SOH 상관"이 아니라
+  "분산"으로 바꿔 판정한 결과(분류 과제에는 SOH 상관보다 분산이 더 적절한 기준
+  이라는 판단, k6_build_combined_redundancy 참고). edges/degree 계산은 회귀용과
+  공유하고 2순위 배열만 다르다.
 
 2026-10-02: --out-dir를 제외한 모든 CLI 인자를 제거했다
 실행은 그냥:
@@ -377,19 +385,43 @@ def k5_compute_normalization(data: SimpleNamespace, cap: SimpleNamespace) -> dic
     return n_final_by_scenario
 
 
+def _resolve_redundancy_losers(edges: list[tuple[int, int]], degree: np.ndarray,
+                                tiebreak: np.ndarray) -> set[int]:
+    """|r|>=threshold 쌍마다 '패자' 하나를 정한다 — degree(관계 개수) 1순위,
+    tiebreak 배열(값이 낮은 쪽 패배) 2순위, 인덱스 큰 쪽 3순위. 회귀용(tiebreak=
+    |target_corr|)과 분류기용(tiebreak=분산) 둘 다 이 함수를 공유한다(2026-10-09,
+    k6_build_combined_redundancy 참고) — edges/degree는 라벨과 무관한 구조적 계산이라
+    두 기준이 같은 그래프 위에서 다른 2순위만 적용받는다."""
+    removed_set: set[int] = set()
+    for i, j in edges:
+        if degree[i] != degree[j]:
+            loser = i if degree[i] > degree[j] else j
+        elif tiebreak[i] != tiebreak[j]:
+            loser = i if tiebreak[i] < tiebreak[j] else j
+        else:
+            loser = max(i, j)
+        removed_set.add(loser)
+    return removed_set
+
+
 def k6_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace, cap: SimpleNamespace) -> dict:
     """6) 결합(raw+kernel) 다중공선성 배제 — 시나리오별로(pooled 아님, 그 시나리오 데이터에서만)
     raw HI(64)+이 시나리오가 만든 커널 HI를 합쳐 |r|>=threshold 쌍의 '패자'를 기록한다(실제
     마스킹 적용은 train.py --combined-redundancy-json이 담당, scr_model.py는 무변경 — 여긴
     기록만 한다). 같은 시나리오 안의 커널끼리 중복도 own_feats에 다 포함돼 여기서 함께 잡힌다
-    (2026-10-02: 이 역할을 따로 하던 구 2차 pooled dedup 단계는 삭제됨 — 모듈 docstring 참고)."""
+    (2026-10-02: 이 역할을 따로 하던 구 2차 pooled dedup 단계는 삭제됨 — 모듈 docstring 참고).
+
+    2026-10-09: 분류기용 배제 목록(removed_raw_idx_classifier)도 같은 루프에서 함께
+    계산한다 — edges/degree(구조적, 라벨 무관)는 동일하게 재사용하고 2순위 tiebreak만
+    분산으로 바꾼다(회귀는 SOH 상관, 분류기는 SOH라는 타깃 자체가 없고 "분산이 큰 쪽이
+    더 변별력 있다"는 판단 — 사용자 결정, docs/261008_REPORT.md §3 향후과제 연장선)."""
     # 2026-09-18, 요구사항2. |r|>=0.95인 각 쌍에 대해 "패자"를 정해 제거한다(사용자 피드백,
     # 2026-09-18 정정 — 처음엔 "쌍이 있으면 둘 다 제거"였는데, 그러면 서로 얽힌 쌍이 많을수록
     # 무차별로 다 날아가 버려서 아래 규칙으로 변경):
     #   1) 다른 HI와도 |r|>=0.95인 관계 개수(= 이 컴포넌트 안에서의 degree)가 더 많은 쪽을
     #      제거(더 많이 겹치는 쪽이 더 중복도가 높다고 보고 우선 정리).
     #   2) degree가 같으면, 타깃(SOH)과의 단순상관 |target_corr|가 더 낮은 쪽을 제거
-    #      ("자체 상관계수가 더 높은 HI를 살려").
+    #      ("자체 상관계수가 더 높은 HI를 살려") — 분류기용은 분산이 더 낮은 쪽을 제거.
     #   3) 그래도 같으면(초저확률) 인덱스가 더 큰 쪽을 제거(결정성 확보용 임의 규칙).
     COMBINED_REDUNDANCY_THRESHOLD = params.combined_redundancy_threshold  # 기본 0.95,
         # fig3(hi_design_rationale)/redundancy_gate_resolution.py와 동일 관례 —
@@ -429,25 +461,23 @@ def k6_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace,
             degree[i] += 1
             degree[j] += 1
 
-        removed_set: set[int] = set()
-        for i, j in edges:
-            if degree[i] != degree[j]:
-                loser = i if degree[i] > degree[j] else j
-            elif abs(target_corr[i]) != abs(target_corr[j]):
-                loser = i if abs(target_corr[i]) < abs(target_corr[j]) else j
-            else:
-                loser = max(i, j)
-            removed_set.add(loser)
-        removed = sorted(removed_set)
-
+        removed = sorted(_resolve_redundancy_losers(edges, degree, np.abs(target_corr)))
         removed_raw_idx = [i for i in removed if i < n_raw]
         removed_kernel_names = [combined_names[i] for i in removed if i >= n_raw]
+
+        # 2026-10-09: 분류기용 — 같은 edges/degree, 2순위만 분산으로.
+        variance = np.var(combined, axis=0)
+        removed_clf = sorted(_resolve_redundancy_losers(edges, degree, variance))
+        removed_raw_idx_clf = [i for i in removed_clf if i < n_raw]
+
         combined_redundancy[seg_name] = {
             "removed_raw_idx": removed_raw_idx,
             "removed_raw_names": [combined_names[i] for i in removed_raw_idx],
             "removed_kernel_names": removed_kernel_names,
             "n_total_checked": combined.shape[1],
             "n_edges": len(edges),
+            "removed_raw_idx_classifier": removed_raw_idx_clf,
+            "removed_raw_names_classifier": [combined_names[i] for i in removed_raw_idx_clf],
         }
 
     return combined_redundancy
@@ -469,9 +499,11 @@ def k7_save_results(
     )
     n_removed_raw_total = sum(len(v["removed_raw_idx"]) for v in combined_redundancy.values())
     n_removed_kernel_total = sum(len(v["removed_kernel_names"]) for v in combined_redundancy.values())
+    n_removed_raw_clf_total = sum(
+        len(v["removed_raw_idx_classifier"]) for v in combined_redundancy.values())
     print(f"[kernel] 결합(raw+kernel) 다중공선성 배제(시나리오별, |r|>={params.combined_redundancy_threshold}): "
           f"raw {n_removed_raw_total}개/kernel {n_removed_kernel_total}개 제거 대상 "
-          f"-> {combined_redundancy_out_path}")
+          f"(분류기용 raw {n_removed_raw_clf_total}개, 분산 기준) -> {combined_redundancy_out_path}")
 
     out_path = params.out_dir / f"kernel_group_features_{params.tag}.pkl"
     artifact = {

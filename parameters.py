@@ -71,6 +71,16 @@ ACTIVE_MAX_EPOCHS = None                # 구 --max-epochs (None=yaml training.e
 ACTIVE_PATIENCE = None                  # 구 --patience (None=train.py 기본 60)
 ACTIVE_BATCH_SIZE = None                # 구 --batch-size (None=yaml training.batch_size)
 ACTIVE_HI_COST_WEIGHTED_L0 = False      # 구 --hi-cost-weighted-l0
+ACTIVE_USE_PROBE_KERNEL = False         # 2026-10-09 신설 — 분류기(Stage A)에 커널 HI
+                                         # 후보(probe_kernel_gates) 사용 여부. 2026-10-07엔
+                                         # 기본 사용이었으나, 실측 결과(58개 후보 중 2개만
+                                         # 선택, 회귀 성능도 무변화, docs/261008_REPORT.md)
+                                         # 효과가 없어 기본 False로 롤백. True면 2026-10-07
+                                         # 동작 재현 가능(완전 삭제 아닌 토글).
+                                         # 분류기 쪽 raw HI 다중공선성 배제는 이 토글과
+                                         # 무관하게 항상 적용됨(2026-10-09부터 분산 기준
+                                         # 별도 계산, kernel.py::k6_build_combined_redundancy
+                                         # 의 removed_raw_idx_classifier).
 ACTIVE_LAMBDA_L0_OVERRIDE = 0.000237    # 구 --lambda-l0-override — 2026-09-21부터 기본
                                          # 활성 고정값으로 전환(이 세션 모든 run이 이 값을
                                          # 명시했음, 더는 "옵션"이 아니라 표준 설정).

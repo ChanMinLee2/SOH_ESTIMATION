@@ -116,6 +116,18 @@ class SCRModel(nn.Module):
             # nan_mask가 probe_x(분류기 입력)에도 공유돼 분류기 정확도가 붕괴하는 버그였다
             # — 이 게이트 레벨 마스크 하나만으로 scen_x 쪽 정확성은 이미 충분히 보장되므로
             # 입력 레벨 이중 마스킹은 제거했다. None(기본)이면 기존과 100% 동일.
+        probe_redundancy_mask: Optional[torch.Tensor] = None,  # 2026-10-09: bool (2, N_HI) —
+            # 분류기(Stage A) 전용 다중공선성 배제 마스크, 외부(train.py)에서 직접 계산해
+            # 넘긴다. 2026-10-07엔 redundancy_mask(회귀용)를 방향별로 union해서 내부에서
+            # 자동 유도했었는데, 2026-10-09부터 분류기는 회귀와 다른 2순위 기준(분산,
+            # kernel.py::k6_build_combined_redundancy의 removed_raw_idx_classifier)으로
+            # 독립 계산되므로 더는 redundancy_mask에서 파생시키지 않는다 — 호출자가
+            # (2, N_HI) 모양으로 직접 구성해서 넘겨야 한다. None(기본)이면 비활성.
+        with_probe_kernel: bool = False,  # 2026-10-09: 분류기용 커널 HI 블록
+            # (probe_kernel_gates) 생성 여부. 실측 결과 효과가 없어(58개 중 2개만
+            # 사용, 회귀 성능도 무변화, docs/261008_REPORT.md) 기본값을 False로
+            # 되돌렸다 — True로 주면 2026-10-07 동작(분류기도 커널 후보 사용)을
+            # 재현할 수 있다(완전 삭제가 아니라 토글).
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -149,23 +161,23 @@ class SCRModel(nn.Module):
                 f"(n_scenarios={self.n_scenarios}, N_HI={N_HI})와 다릅니다."
             )
             self.register_buffer("redundancy_mask", redundancy_mask.float(), persistent=False)
-            # 2026-10-07: 분류기(Stage A)용 합집합 마스크 — redundancy_mask는
-            # (n_scenarios, N_HI)라 시나리오를 알아야 행을 고를 수 있는데, 분류기는
-            # direction만 알고 시나리오는 모른다(그걸 맞추는 게 분류기의 일). 그래서
-            # 그 방향에 속한 시나리오들의 마스크를 "합집합"(하나라도 허용하면 허용)으로
-            # 합쳐 (2, N_HI) 텐서를 만든다 — 사용자 확정(교집합 대신 합집합: 정보 보존
-            # 우선, §결론 및 향후 방향 1번).
-            ch_mask  = redundancy_mask[spec.charge_scenario_ids].any(dim=0)
-            dis_mask = redundancy_mask[spec.discharge_scenario_ids].any(dim=0)
-            probe_redundancy_mask = torch.stack([ch_mask, dis_mask], dim=0)  # (2, N_HI)
-            self.register_buffer("probe_redundancy_mask", probe_redundancy_mask.float(), persistent=False)
         else:
             self.redundancy_mask = None
+
+        if probe_redundancy_mask is not None:
+            assert probe_redundancy_mask.shape == (2, N_HI), (
+                f"probe_redundancy_mask shape {tuple(probe_redundancy_mask.shape)}가 "
+                f"(2, N_HI={N_HI})와 다릅니다 — 호출자(train.py)가 방향별로 union해서 "
+                "넘겨야 합니다(2026-10-09부터 redundancy_mask에서 자동 유도하지 않음)."
+            )
+            self.register_buffer("probe_redundancy_mask", probe_redundancy_mask.float(), persistent=False)
+        else:
             self.probe_redundancy_mask = None
 
         self._build_probe_gates(charge_probe_mask, discharge_probe_mask)  # Stage A
         self._build_scen_gates(scen_masks, scen_group_ids, shared_hi_mask, _gate_bank_size)  # Stage B
-        self._build_kernel_gates(n_kernel_hi, kernel_hi_counts, kernel_hi_costs, _gate_bank_size)  # Stage B'
+        self._build_kernel_gates(n_kernel_hi, kernel_hi_counts, kernel_hi_costs, _gate_bank_size,
+                                  with_probe_kernel)  # Stage B'
 
         # Capacity head — input: probe_x (N_HI) || scen_x (N_HI) [|| kernel_x (n_kernel_hi)]
         # || direction (1) || cap_init (1). Phase 1: 항상 MLP(model_cfg=None). Phase 2:
@@ -229,6 +241,7 @@ class SCRModel(nn.Module):
     def _build_kernel_gates(
         self, n_kernel_hi: int, kernel_hi_counts: Optional[list[int]],
         kernel_hi_costs: Optional[dict[int, list[float]]], gate_bank_size: int,
+        with_probe_kernel: bool = False,
     ) -> None:
         """Stage B' — 커널 융합 HI 블록(선택) — raw HI(scen_gates)를 대체하지 않고 별도
         폭(n_kernel_hi)의 독립 게이트로 "추가"한다. kernel.py가 그룹당 1개씩 만든 RBF
@@ -236,14 +249,13 @@ class SCRModel(nn.Module):
         kernel_hi_costs가 주어지면 scr_loss.py의 커널 L0 페널티 비용 가중치로 쓸
         self.kernel_hi_costs를 검증 후 채운다.
 
-        2026-10-07: 분류기(Stage A)용 probe_kernel_gates도 여기서 함께 만든다 —
+        2026-10-07: 분류기(Stage A)용 probe_kernel_gates도 여기서 함께 만들었었다 —
         scen_kernel_gates와 완전히 같은 모양(시나리오별 K_s 폭)이지만 독립된
-        파라미터다. scen_kernel_gates는 "진짜 시나리오" 행만 보고
-        (_apply_gate_list가 scen_idx로 라우팅), probe_kernel_gates는 forward()에서
-        "그 방향의 후보 시나리오 전부"에 적용된다(진짜 시나리오를 모르는 분류기가
-        회귀와 동일한 커널 HI+다중공선성 배제 로직을 쓰되, 라우팅 기준만 scen_idx
-        대신 direction으로 바뀐 것) — 입력 행 선택 기준이 달라 파라미터를 공유하지
-        않는다."""
+        파라미터. 2026-10-09: 실측 결과(58개 커널 후보 중 2개만 사용, 회귀 성능도
+        무변화) 분류기 쪽은 효과가 없다고 판단해 **기본 비활성(with_probe_kernel=
+        False)**으로 되돌렸다 — probe_kernel_gates는 None, probe_mlp 입력 폭도
+        커널 블록 없이 계산된다. with_probe_kernel=True로 주면 재현 가능(완전
+        삭제가 아니라 토글, docs/261008_REPORT.md §3 향후과제)."""
         if kernel_hi_counts is not None:
             assert len(kernel_hi_counts) == self.n_scenarios, (
                 f"kernel_hi_counts 길이({len(kernel_hi_counts)})가 n_scenarios"
@@ -259,7 +271,7 @@ class SCRModel(nn.Module):
             )
             self.probe_kernel_gates = nn.ModuleList(
                 [HardConcreteGate(max(k, 1)) for k in kernel_hi_counts]
-            )
+            ) if with_probe_kernel else None
         else:
             self.kernel_hi_counts = None
             self.n_kernel_hi = n_kernel_hi
@@ -269,7 +281,7 @@ class SCRModel(nn.Module):
                 )
                 self.probe_kernel_gates = nn.ModuleList(
                     [HardConcreteGate(n_kernel_hi) for _ in range(gate_bank_size)]
-                )
+                ) if with_probe_kernel else None
             else:
                 self.scen_kernel_gates = None
                 self.probe_kernel_gates = None
