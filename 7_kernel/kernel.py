@@ -29,15 +29,19 @@ docs/260820_RESULTS.md 참고).
                  "removed_kernel_names": [...], "n_total_checked": int,
                  "n_edges": int,
                  "removed_raw_idx_classifier": [...],
-                 "removed_raw_names_classifier": [...]}, ...
+                 "removed_raw_names_classifier": [...],
+                 "n_total_checked_classifier": int, "n_edges_classifier": int}, ...
     },
   }
-  removed_raw_idx_classifier(2026-10-09 신설): 분류기는 더 이상 커널 HI를 쓰지
-  않기로 결정됐고(probe_kernel_gates 폐기), raw HI 다중공선성 배제 기준도 회귀와
-  다르게 가져간다 — degree(1순위)는 동일하게 쓰되, 2순위를 "SOH 상관"이 아니라
-  "분산"으로 바꿔 판정한 결과(분류 과제에는 SOH 상관보다 분산이 더 적절한 기준
-  이라는 판단, k6_build_combined_redundancy 참고). edges/degree 계산은 회귀용과
-  공유하고 2순위 배열만 다르다.
+  removed_raw_idx_classifier(2026-10-09 신설, 2026-10-09 두 차례 수정): 분류기는
+  더 이상 커널 HI를 쓰지 않기로 결정됐고(probe_kernel_gates 폐기), raw HI
+  다중공선성 배제도 회귀와 다른 **독립 그래프**로 계산한다 — raw+kernel 결합
+  상관행렬이 아니라 **raw HI만의 상관행렬**로 |r|>=threshold 쌍을 다시 찾는다
+  (n_edges_classifier, 분류기가 안 쓰는 커널 HI와의 상관만으로 raw HI가 제거되는
+  걸 막기 위함). 2순위 판정 기준은 "그 시나리오 안에서의 raw 값 분산"이 아니라
+  **"시나리오 간 SOH-상관계수의 분산"**(interaction.py의 cell_level_std_r_mean을
+  재사용, k2_load_data가 로드) — degree(1순위) 동률일 때 이 값이 더 낮은(= 시나리오
+  변별력이 더 낮은) 쪽을 제거한다. k6_build_combined_redundancy 참고.
 
 2026-10-02: --out-dir를 제외한 모든 CLI 인자를 제거했다
 실행은 그냥:
@@ -231,19 +235,25 @@ def k1_resolve_params_and_paths() -> SimpleNamespace:
     # 곧 이번 실행의 입력이다(오버라이드하고 싶으면 FIXED_KERNEL_SYNERGY_GROUPS_JSON).
     synergy_tag = P.FIXED_SYNERGY_TAG or f"{P.ACTIVE_P1_TAG}_groups"
     synergy_groups_json = P.FIXED_KERNEL_SYNERGY_GROUPS_JSON or str(out_dir / f"synergy_groups_{synergy_tag}.json")
+    # 2026-10-09: 분류기용 다중공선성 tiebreak(시나리오 간 SOH상관의 분산)을 위해
+    # interaction.py(Step 5) 산출물도 읽는다 — synergy_groups_json과 동일한 패턴
+    # (out_dir 기준 자동 경로, interaction.py::main()의 태그 규칙과 동일하게 파생).
+    interaction_tag = P.FIXED_INTERACTION_TAG or f"{P.ACTIVE_P1_TAG}_interaction"
+    interaction_json = str(out_dir / f"hi_scenario_interaction_{interaction_tag}.json")
 
     return SimpleNamespace(
         out_dir=out_dir, split_seed=split_seed, alpha=alpha, gamma=gamma,
         n_components=n_components,
         max_features=max_features, min_raw_partial_corr=min_raw_partial_corr,
         combined_redundancy_threshold=combined_redundancy_threshold,
-        tag=tag, synergy_groups_json=synergy_groups_json,
+        tag=tag, synergy_groups_json=synergy_groups_json, interaction_json=interaction_json,
     )
 
 
 def k2_load_data(params: SimpleNamespace) -> SimpleNamespace:
     """2) 데이터 로드 — train split(x_all/y_all/scen_idx_all/spec/names_by_seg) + raw HI 비용
-    + synergy.py(Step 6) 산출물(groups_data)을 읽는다."""
+    + synergy.py(Step 6) 산출물(groups_data) + interaction.py(Step 5) 산출물
+    (cross_scen_std_r, 분류기용 다중공선성 tiebreak)을 읽는다."""
     # _load_train_split은 SimpleNamespace를 인자로 받는다(interaction.py/synergy.py의
     # _load_all_scenarios 호출과 동일 패턴) — CLI가 사라졌으므로 필요한 필드만 구성.
     _loader_args = SimpleNamespace(
@@ -258,9 +268,27 @@ def k2_load_data(params: SimpleNamespace) -> SimpleNamespace:
     raw_hi_costs = get_hi_cost_vector("dis_hi")
     groups_data = json.loads(Path(params.synergy_groups_json).read_text(encoding="utf-8"))
 
+    # 2026-10-09: interaction.py의 per_hi[concept]["cell_level_std_r_mean"](시나리오 간
+    # SOH상관의 셀단위 표준편차, 2026-07-23부터 pooled보다 편향 없는 정식 지표)를
+    # raw HI 로컬 인덱스 순서(scen 0 기준, train.py::t3_build_tensor_masks의
+    # concepts_in_order와 동일한 접미사 제거 방식)로 재배열한다 — 모든 시나리오가 같은
+    # 순서의 64/66개 concept 카탈로그를 공유하므로 scen 0 하나로 충분하다(쌍별로
+    # 이름 매칭을 다시 할 필요 없음).
+    interaction_data = json.loads(Path(params.interaction_json).read_text(encoding="utf-8"))
+    per_hi = interaction_data["per_hi"]
+    ref_seg_name = spec.scenario_names[0]
+    suffix = f"_{ref_seg_name}"
+    concepts_in_order = [
+        c[: -len(suffix)] if c.endswith(suffix) else c for c in names_by_seg[0]
+    ]
+    cross_scen_std_r = np.array([
+        per_hi.get(c, {}).get("cell_level_std_r_mean", 0.0) for c in concepts_in_order
+    ])
+
     return SimpleNamespace(
         x_all=x_all, y_all=y_all, scen_idx_all=scen_idx_all, spec=spec,
         names_by_seg=names_by_seg, raw_hi_costs=raw_hi_costs, groups_data=groups_data,
+        cross_scen_std_r=cross_scen_std_r,
     )
 
 
@@ -412,16 +440,29 @@ def k6_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace,
     (2026-10-02: 이 역할을 따로 하던 구 2차 pooled dedup 단계는 삭제됨 — 모듈 docstring 참고).
 
     2026-10-09: 분류기용 배제 목록(removed_raw_idx_classifier)도 같은 루프에서 함께
-    계산한다 — edges/degree(구조적, 라벨 무관)는 동일하게 재사용하고 2순위 tiebreak만
-    분산으로 바꾼다(회귀는 SOH 상관, 분류기는 SOH라는 타깃 자체가 없고 "분산이 큰 쪽이
-    더 변별력 있다"는 판단 — 사용자 결정, docs/261008_REPORT.md §3 향후과제 연장선)."""
+    계산한다. **raw+kernel 결합 그래프(combined)가 아니라 raw만의 독립 그래프**를
+    새로 만들어 쓴다 — 분류기는 with_probe_kernel=False(기본)라 커널 HI를 아예 입력
+    으로 안 받으므로, "raw HI가 어떤 커널 HI와 중복이다"라는 이유로 그 raw HI를
+    제거하면 분류기 입장에선 대체재(그 커널 HI) 없이 정보만 사라진다(2026-10-09
+    1차 수정 — 최초 구현은 combined 그래프의 edges/degree를 그대로 재사용하고
+    tiebreak만 바꿨었는데, 그러면 커널과만 중복인 raw HI까지 분류기에서 잘못 빠졌다).
+    그래서 raw HI(n_raw개)만으로 상관행렬·edges·degree를 다시 계산한다.
+
+    2026-10-09 2차 수정(사용자 지정): 분류기용 2순위 tiebreak을 "그 시나리오 안에서의
+    raw 값 분산"이 아니라 **"시나리오 간 SOH-상관계수의 분산"**(data.cross_scen_std_r,
+    interaction.py의 cell_level_std_r_mean — 셀단위로 계산해 pooled 편향이 없는 정식
+    지표, 2026-07-23부터 채택된 방식)으로 바꿨다. 분류기의 일은 "시나리오 구분"이라,
+    raw 값 자체의 분산보다 "이 HI가 시나리오마다 SOH와 얼마나 다르게 움직이는가"가
+    더 적절한 변별력 기준이라는 판단 — 이 값은 시나리오 전체에 걸친 concept 단위
+    전역 통계라 시나리오별로 다시 계산할 필요 없이 한 번 로드해 재사용한다(k2_load_data)."""
     # 2026-09-18, 요구사항2. |r|>=0.95인 각 쌍에 대해 "패자"를 정해 제거한다(사용자 피드백,
     # 2026-09-18 정정 — 처음엔 "쌍이 있으면 둘 다 제거"였는데, 그러면 서로 얽힌 쌍이 많을수록
     # 무차별로 다 날아가 버려서 아래 규칙으로 변경):
     #   1) 다른 HI와도 |r|>=0.95인 관계 개수(= 이 컴포넌트 안에서의 degree)가 더 많은 쪽을
     #      제거(더 많이 겹치는 쪽이 더 중복도가 높다고 보고 우선 정리).
     #   2) degree가 같으면, 타깃(SOH)과의 단순상관 |target_corr|가 더 낮은 쪽을 제거
-    #      ("자체 상관계수가 더 높은 HI를 살려") — 분류기용은 분산이 더 낮은 쪽을 제거.
+    #      ("자체 상관계수가 더 높은 HI를 살려") — 분류기용은 시나리오 간 SOH상관의
+    #      분산(cross_scen_std_r)이 더 낮은 쪽을 제거("시나리오 변별력이 더 낮은 HI를 버려").
     #   3) 그래도 같으면(초저확률) 인덱스가 더 큰 쪽을 제거(결정성 확보용 임의 규칙).
     COMBINED_REDUNDANCY_THRESHOLD = params.combined_redundancy_threshold  # 기본 0.95,
         # fig3(hi_design_rationale)/redundancy_gate_resolution.py와 동일 관례 —
@@ -465,10 +506,21 @@ def k6_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace,
         removed_raw_idx = [i for i in removed if i < n_raw]
         removed_kernel_names = [combined_names[i] for i in removed if i >= n_raw]
 
-        # 2026-10-09: 분류기용 — 같은 edges/degree, 2순위만 분산으로.
-        variance = np.var(combined, axis=0)
-        removed_clf = sorted(_resolve_redundancy_losers(edges, degree, variance))
-        removed_raw_idx_clf = [i for i in removed_clf if i < n_raw]
+        # 2026-10-09: 분류기용 — raw HI만의 독립 그래프(커널 HI는 애초에 포함 안 함,
+        # 분류기가 안 쓰는 피처와의 상관으로 raw HI가 억울하게 빠지는 일을 막기 위함).
+        corr_raw = np.corrcoef(x_raw_scen, rowvar=False)
+        corr_raw = np.nan_to_num(corr_raw, nan=0.0)
+        np.fill_diagonal(corr_raw, 0.0)
+        edges_raw = [(i, j) for i in range(n_raw) for j in range(i + 1, n_raw)
+                     if abs(corr_raw[i, j]) >= COMBINED_REDUNDANCY_THRESHOLD]
+        degree_raw = np.zeros(n_raw, dtype=int)
+        for i, j in edges_raw:
+            degree_raw[i] += 1
+            degree_raw[j] += 1
+        # 시나리오 간 SOH상관 분산(cell_level_std_r_mean, k2_load_data에서 미리 로드) —
+        # concept 순서가 모든 시나리오에서 동일해 data.cross_scen_std_r를 그대로 쓴다.
+        removed_raw_idx_clf = sorted(
+            _resolve_redundancy_losers(edges_raw, degree_raw, data.cross_scen_std_r))
 
         combined_redundancy[seg_name] = {
             "removed_raw_idx": removed_raw_idx,
@@ -478,6 +530,9 @@ def k6_build_combined_redundancy(params: SimpleNamespace, data: SimpleNamespace,
             "n_edges": len(edges),
             "removed_raw_idx_classifier": removed_raw_idx_clf,
             "removed_raw_names_classifier": [combined_names[i] for i in removed_raw_idx_clf],
+            "n_total_checked_classifier": n_raw,  # raw-only(커널 제외) — n_total_checked과
+                # 다른 의미이니 혼동 주의(저건 raw+kernel 전체 폭)
+            "n_edges_classifier": len(edges_raw),
         }
 
     return combined_redundancy

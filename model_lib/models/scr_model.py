@@ -128,6 +128,24 @@ class SCRModel(nn.Module):
             # 사용, 회귀 성능도 무변화, docs/261008_REPORT.md) 기본값을 False로
             # 되돌렸다 — True로 주면 2026-10-07 동작(분류기도 커널 후보 사용)을
             # 재현할 수 있다(완전 삭제가 아니라 토글).
+        n_gate_groups: Optional[int] = None,  # 2026-10-10: 리팩토링 전 phase1_trainer_v2.py의
+            # --warmstart-branch-epoch 커리큘럼을 복원 — scen_gates의 실제 게이트 뱅크
+            # 크기를 n_scenarios 대신 이 값으로 줄이고, 모든 시나리오를 그 뱅크로
+            # 라우팅한다(_gate_group_map, _gate_group_assignment()). "공유 게이트로 먼저
+            # 학습 후 branch_scen_gates()로 n_scenarios개로 분기"하는 웜스타트 커리큘럼
+            # 전용(8_train/train.py의 ACTIVE_WARMSTART_BRANCH_EPOCH).
+            #   1: 전체 시나리오가 단일 공유 게이트 1개
+            #   2: 방향(충전/방전)별로 공유 게이트 2개(2026-10-10 추가 — 각 방향 안의
+            #      시나리오 3개가 그 방향 게이트 하나를 공유, spec.charge_scenario_ids/
+            #      discharge_scenario_ids 기준)
+            # shared_hi_mask(v4, interaction.py)/kernel_hi_counts(kernel.py)와 **함께 쓸
+            # 수 있다**(2026-10-10부터) — 이 축소는 raw HI의 "시나리오 전용(specific)"
+            # 몫에만 적용되고, shared_gate(v4, HI 축 공유)와 scen_kernel_gates/
+            # probe_kernel_gates(항상 시나리오별 n_scenarios 폭 고정, 커널 HI는 시나리오
+            # 마다 식별 자체가 달라 "공유"가 의미 없음)는 이 축소와 무관하게 그대로
+            # 동작한다. scen_group_ids(시너지 그룹 계층 게이팅)와는 아직 동시 사용 불가
+            # (branch_scen_gates()가 일반 HardConcreteGate를 가정 — 현재 파이프라인은
+            # scen_group_ids를 애초에 안 씀). None(기본)이면 기존과 100% 동일.
     ):
         super().__init__()
         self.d_probe = d_probe
@@ -139,6 +157,23 @@ class SCRModel(nn.Module):
         self.spec = spec
         self.n_scenarios = spec.n_scenarios
         self.n_classes   = spec.n_classes
+
+        # n_gate_groups(웜스타트 전용, §위 docstring) — scen_gates 뱅크 크기를 줄이고
+        # 전체/방향별로 라우팅한다. kernel 게이트는 이 축소와 **무관하게** 항상
+        # n_scenarios 폭을 쓴다(커널 HI는 시나리오마다 식별 자체가 달라 "공유" 개념이
+        # 성립하지 않음 — 그래서 _gate_bank_size를 별도 변수로 분리해서 하나를
+        # 줄여도 다른 쪽까지 조용히 줄어들지 않게 한다).
+        self.n_gate_groups = n_gate_groups
+        if n_gate_groups is not None:
+            assert n_gate_groups in (1, 2), f"n_gate_groups는 1 또는 2만 지원합니다(받은 값: {n_gate_groups})."
+            assert not scen_group_ids, "n_gate_groups(웜스타트)는 scen_group_ids(시너지 그룹)와 동시 사용 불가합니다."
+            group_of = self._gate_group_assignment(n_gate_groups, spec)
+            self.register_buffer("_gate_group_map",
+                                  torch.tensor(group_of, dtype=torch.long), persistent=False)
+            _scen_gate_bank_size = n_gate_groups
+        else:
+            self._gate_group_map = None
+            _scen_gate_bank_size = self.n_scenarios
 
         _gate_bank_size = self.n_scenarios
 
@@ -175,7 +210,7 @@ class SCRModel(nn.Module):
             self.probe_redundancy_mask = None
 
         self._build_probe_gates(charge_probe_mask, discharge_probe_mask)  # Stage A
-        self._build_scen_gates(scen_masks, scen_group_ids, shared_hi_mask, _gate_bank_size)  # Stage B
+        self._build_scen_gates(scen_masks, scen_group_ids, shared_hi_mask, _scen_gate_bank_size)  # Stage B
         self._build_kernel_gates(n_kernel_hi, kernel_hi_counts, kernel_hi_costs, _gate_bank_size,
                                   with_probe_kernel)  # Stage B'
 
@@ -419,7 +454,16 @@ class SCRModel(nn.Module):
         redundancy_mask(2026-09-18, 요구사항2를 raw HI에도 게이트 구조로 강제)가 있으면,
         위 세 분기 중 무엇을 타든 상관없이 마지막에 한 번만 적용한다. False인 자리는
         masked/z_out 둘 다 무조건 0이 된다 — log_alpha가 뭐라고 하든 "고른 결과 자체가
-        0"이라 커널 쪽(kernel_hi_counts로 슬롯을 아예 없앤 것)과 동일한 강도의 보장이다."""
+        0"이라 커널 쪽(kernel_hi_counts로 슬롯을 아예 없앤 것)과 동일한 강도의 보장이다.
+
+        2026-10-10: n_gate_groups(웜스타트 커리큘럼)가 설정돼 있으면, 아래 분기를 타기
+        전에 scen_idx를 먼저 그룹 인덱스로 치환한다(_gate_group_map, 지금은 전부 0 —
+        전체 시나리오가 scen_gates[0] 하나로). redundancy_mask는 **원본** scen_idx로
+        인덱싱해야 하므로 치환 전 값을 별도로 들고 있는다(지금은 n_gate_groups와
+        redundancy_mask를 함께 쓰는 조합을 쓰지 않지만, 나중에 섞어도 안전하도록)."""
+        orig_scen_idx = scen_idx
+        if self._gate_group_map is not None:
+            scen_idx = self._gate_group_map[scen_idx]
         if self.shared_gate is not None:
             masked = torch.zeros_like(x)
             z_out = torch.zeros_like(x)
@@ -446,7 +490,7 @@ class SCRModel(nn.Module):
             masked, z_out = self._apply_gate_list(self.scen_gates, x, scen_idx)
 
         if self.redundancy_mask is not None:
-            row_mask = self.redundancy_mask[scen_idx]  # (B, N_HI)
+            row_mask = self.redundancy_mask[orig_scen_idx]  # (B, N_HI) — 원본(그룹 치환 전) 기준
             masked = masked * row_mask
             z_out = z_out * row_mask
         return masked, z_out
@@ -625,6 +669,53 @@ class SCRModel(nn.Module):
             return None
         x_k, _ = self._apply_probe_kernel_gate(x_kernel_probe, direction)
         return x_k
+
+    @staticmethod
+    def _gate_group_assignment(n_gate_groups: int, spec) -> list[int]:
+        """n_gate_groups=1(전체 공유)/2(방향별 공유)에서 시나리오 s가 어느 게이트
+        뱅크 인덱스로 라우팅되는지 반환(길이 n_scenarios). __init__(그룹 맵 구성)과
+        branch_scen_gates(분기 시 어느 공유 게이트에서 복제할지)가 같은 로직을
+        쓰려고 분리(2026-10-10) — 방향 소속은 spec.charge_scenario_ids/
+        discharge_scenario_ids 기준(이 파일 다른 곳(_n_dir_scenarios 등)과 동일 소스)."""
+        if n_gate_groups == 1:
+            return [0] * spec.n_scenarios
+        charge_ids = set(spec.charge_scenario_ids)
+        return [0 if s in charge_ids else 1 for s in range(spec.n_scenarios)]
+
+    def branch_scen_gates(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+        """2026-10-10 복원(리팩토링 전 phase1_trainer_v2.py `--warmstart-branch-epoch` T
+        전용, git b5ae262) + 같은 날 방향별 공유(n_gate_groups=2)로 일반화: n_gate_groups
+        개(1 또는 2)의 공유 scen_gates를 n_scenarios개의 독립 HardConcreteGate로
+        복제해 분기한다. 각 새 게이트의 log_alpha는 **자기가 속한 그룹의** 공유
+        게이트(_gate_group_assignment로 판정)의 log_alpha를 detach().clone()해
+        초기화하고(그 시점 이후로는 완전히 독립적으로, 자기 시나리오 데이터만으로
+        학습됨), 호출 이후 이 모델은 n_gate_groups=None인 평범한 n_scenarios-게이트
+        SCRModel과 동일하게 동작한다. shared_gate(v4 HI축 공유)/scen_kernel_gates/
+        probe_kernel_gates는 이 메서드가 건드리지 않는다(애초에 n_gate_groups 축소와
+        무관하게 항상 자기 폭대로 동작 — §__init__ n_gate_groups docstring 참고).
+
+        Returns (old_params, new_params) — 호출자(train.py)가 옵티마이저 상태를 old는
+        제거(모멘텀 폐기)하고 new는 새로 추가(모멘텀 0부터 재시작)하는 데 쓴다."""
+        assert self.n_gate_groups in (1, 2), (
+            "branch_scen_gates()는 n_gate_groups=1 또는 2로 만든 모델에서만 호출할 수 "
+            f"있습니다(현재 n_gate_groups={self.n_gate_groups})."
+        )
+        group_of = self._gate_group_assignment(self.n_gate_groups, self.spec)
+        old_gates = list(self.scen_gates)  # 길이 n_gate_groups
+        old_params = [p for g in old_gates for p in g.parameters()]
+        width = old_gates[0].log_alpha.numel()
+        device = old_gates[0].log_alpha.device
+
+        new_gates = nn.ModuleList([HardConcreteGate(width) for _ in range(self.n_scenarios)]).to(device)
+        with torch.no_grad():
+            for s, g in enumerate(new_gates):
+                g.log_alpha.copy_(old_gates[group_of[s]].log_alpha)
+
+        self.scen_gates = new_gates
+        self.n_gate_groups = None
+        self._gate_group_map = None
+        new_params = list(self.scen_gates.parameters())
+        return old_params, new_params
 
     @torch.no_grad()
     def get_selected_probe_his(self) -> dict[str, list[int]]:

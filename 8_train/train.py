@@ -309,18 +309,24 @@ def _mean_off_hi_count(model: SCRModel) -> float:
     같이 보여주기 위한 헬퍼 — 시나리오별로 전체 폭(N_HI=64) gate_prob 벡터를
     복원(_save_scen_masks_with_shared와 동일한 shared+specific 재조립 로직)한 뒤
     gate_prob<=0.5인 개수를 세고, 6개 시나리오 평균을 반환한다. 체크포인트 없이도
-    현재 게이트 파라미터만으로 즉시 계산 가능(데이터 forward 불필요)."""
+    현재 게이트 파라미터만으로 즉시 계산 가능(데이터 forward 불필요).
+
+    2026-10-10: ACTIVE_WARMSTART_BRANCH_EPOCH로 model.scen_gates 뱅크가 축소돼 있는
+    동안(branch_scen_gates() 호출 전, model._gate_group_map is not None)은 시나리오
+    s가 아니라 그 그룹(model._gate_group_map[s])의 게이트를 읽어야 한다 — 안 그러면
+    scen_gates[s]가 뱅크 폭(1 또는 2)을 넘어서 IndexError가 난다."""
     n_hi = model.scen_gates[0].gate_prob().numel() if model.shared_gate is None else (
         model._shared_idx.numel() + model._specific_idx.numel())
     off_counts = []
     for s in range(model.n_scenarios):
+        gate_idx = int(model._gate_group_map[s]) if model._gate_group_map is not None else s
         if model.shared_gate is not None:
             full_prob = torch.zeros(n_hi)
             full_prob[model._shared_idx.detach().cpu()] = model.shared_gate.gate_prob().detach().cpu()
             if model._specific_idx.numel() > 0:
-                full_prob[model._specific_idx.detach().cpu()] = model.scen_gates[s].gate_prob().detach().cpu()
+                full_prob[model._specific_idx.detach().cpu()] = model.scen_gates[gate_idx].gate_prob().detach().cpu()
         else:
-            full_prob = model.scen_gates[s].gate_prob().detach().cpu()
+            full_prob = model.scen_gates[gate_idx].gate_prob().detach().cpu()
         off_counts.append(int((full_prob <= 0.5).sum().item()))
     return float(sum(off_counts) / len(off_counts))
 
@@ -379,6 +385,10 @@ def t1_set_params_and_config() -> SimpleNamespace:
     hi_cost_weighted_l0 = P.ACTIVE_HI_COST_WEIGHTED_L0
     val_rmse_epsilon = P.FIXED_VAL_RMSE_EPSILON
     use_probe_kernel = getattr(P, "ACTIVE_USE_PROBE_KERNEL", False)
+    warmstart_branch_epoch = getattr(P, "ACTIVE_WARMSTART_BRANCH_EPOCH", None)
+    if warmstart_branch_epoch is not None and warmstart_branch_epoch <= 0:
+        raise RuntimeError("ACTIVE_WARMSTART_BRANCH_EPOCH은 1 이상이어야 합니다 "
+                            f"(받은 값: {warmstart_branch_epoch}).")
 
     device = _resolve_device(device_str)
     torch.manual_seed(seed)
@@ -410,7 +420,7 @@ def t1_set_params_and_config() -> SimpleNamespace:
         batch_size_override=batch_size_override, lambda_l0_override=lambda_l0_override,
         l0_warmup_epochs_override=l0_warmup_epochs_override, l0_norm_constant=l0_norm_constant,
         hi_cost_weighted_l0=hi_cost_weighted_l0, val_rmse_epsilon=val_rmse_epsilon,
-        use_probe_kernel=use_probe_kernel,
+        use_probe_kernel=use_probe_kernel, warmstart_branch_epoch=warmstart_branch_epoch,
     )
 
 
@@ -447,6 +457,10 @@ def t2_load_pkl_json(args: argparse.Namespace, params: SimpleNamespace) -> Simpl
             "커널 features pkl을 만든 뒤 이어서 생성되는 후속 산출물이라) — parameters.py: "
             "ACTIVE_KERNEL_FEATURES_PKL/ACTIVE_COMBINED_REDUNDANCY_JSON을 확인하세요."
         )
+    # 2026-10-10: ACTIVE_WARMSTART_BRANCH_EPOCH은 이제 kernel_features_pkl/interaction_json과
+    # 함께 쓸 수 있다 — n_gate_groups 축소는 raw HI의 시나리오-전용(specific) 몫에만 적용되고,
+    # shared_gate(v4)/커널 게이트는 이 축소와 무관하게 항상 자기 폭대로 동작한다
+    # (model_lib/models/scr_model.py::SCRModel.__init__ n_gate_groups docstring 참고).
 
     # 데이터 로딩(수 분 소요 가능) 전에 바로 찍는다 — 3단 우선순위(명시값/자동탐색/legacy
     # fallback) 중 어디서 왔는지도 같이 보여줘서, 뭘 쓰는지 학습이 끝날 때까지 안 기다리고
@@ -560,7 +574,13 @@ def t4_build_model_and_hparams(params: SimpleNamespace, data: SimpleNamespace, m
         redundancy_mask=masks.redundancy_mask,
         probe_redundancy_mask=masks.probe_redundancy_mask,
         with_probe_kernel=params.use_probe_kernel,
+        n_gate_groups=(2 if params.warmstart_branch_epoch is not None else None),
     ).to(params.device)
+    if params.warmstart_branch_epoch is not None:
+        print(f"[p1v2] warmstart-branch-epoch 적용: epoch<{params.warmstart_branch_epoch}까지 "
+              f"scen_gates 뱅크 폭 2(방향별 공유 — 충전/방전 각 3개 시나리오가 게이트 1개씩 공유, "
+              f"L0=0/BETA=default) -> epoch {params.warmstart_branch_epoch}에 {model.n_scenarios}개로 "
+              f"분기(각자 자기 방향의 공유 게이트 값으로 초기화) 후 L0/BETA 스케줄 재시작")
 
     loss_cfg = cfg["loss"]
     loss_fn = SCRLoss(lambda_scen=lambda_scen, lambda_l0=loss_cfg["lambda_l0"],
@@ -650,6 +670,7 @@ def t5_define_output_paths(params: SimpleNamespace, data: SimpleNamespace, hyper
         "interaction_json": data.interaction_json,
         "l0_norm_constant": params.l0_norm_constant,
         "hi_cost_weighted_l0": params.hi_cost_weighted_l0,
+        "warmstart_branch_epoch": params.warmstart_branch_epoch,
         "status": "in_progress",  # 최종 write에서는 이 키가 아예 빠짐(=완료) -- get()으로만 읽는
             # 기존 소비자(test.py 등)에는 영향 없음
     }
@@ -680,6 +701,7 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
     epochs = hyperparams.epochs
     ckpt_path = paths.ckpt_path
     log_path = paths.log_path
+    warmstart_T = params.warmstart_branch_epoch  # None(기본)이면 아래 로직이 전부 기존과 동일
 
     best_sat = float("inf")  # 2026-09-18부터 1순위 아님 — val_rmse가 epsilon 이내 동률일 때만 tie-break
     best_val_rmse = float("inf")  # 2026-09-18부터 체크포인트 선택 1순위(--val-rmse-epsilon)
@@ -692,14 +714,40 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
-        eff_l0 = l0_scheduler.get(epoch)
-        if epoch < l0_warmup_ep:
+        # 웜스타트 후 분기(2026-10-10 복원, ACTIVE_WARMSTART_BRANCH_EPOCH): epoch==T에
+        # 공유 게이트(방향별 공유면 2개, n_gate_groups=1이면 1개)를 n_scenarios개로
+        # 복제해 분기하고, 그 파라미터만 옵티마이저 모멘텀을 리셋한다(다른 모든 파라미터의
+        # 옵티마이저 상태는 그대로 이어짐).
+        if warmstart_T is not None and epoch == warmstart_T:
+            _n_groups_before = model.n_gate_groups  # branch_scen_gates()가 이걸 None으로 바꾸므로 미리 기록
+            old_gate_params, new_gate_params = model.branch_scen_gates()
+            old_ids = {id(p) for p in old_gate_params}
+            for group in optimizer.param_groups:
+                group["params"] = [p for p in group["params"] if id(p) not in old_ids]
+            for p in list(optimizer.state.keys()):
+                if id(p) in old_ids:
+                    del optimizer.state[p]
+            optimizer.param_groups[0]["params"].extend(new_gate_params)
+            tqdm_write(f"[p1v2] warmstart-branch: epoch {epoch}에 scen_gates {_n_groups_before} -> "
+                       f"{model.n_scenarios}개로 분기, 옵티마이저 모멘텀 리셋")
+
+        # 웜스타트가 켜져 있으면 epoch<T 동안은 L0=0/BETA=beta_default로 고정(이산화 압력
+        # 없이 공유 게이트 하나만 전체 데이터로 학습)하고, epoch>=T부터는 T를 새 0으로
+        # 삼아 L0 warmup/ramp와 BETA anneal을 처음부터 재시작한다. warmstart_T=None이면
+        # eff_epoch=epoch라 아래 로직 전부 기존과 100% 동일.
+        if warmstart_T is not None and epoch < warmstart_T:
+            eff_l0 = 0.0
             beta_now = beta_default
-        elif epoch < l0_fully_ramped_ep:
-            frac = (epoch - l0_warmup_ep) / max(l0_ramp_ep, 1)
-            beta_now = beta_default + (beta_min - beta_default) * frac
         else:
-            beta_now = beta_min
+            eff_epoch = epoch - warmstart_T if warmstart_T is not None else epoch
+            eff_l0 = l0_scheduler.get(eff_epoch)
+            if eff_epoch < l0_warmup_ep:
+                beta_now = beta_default
+            elif eff_epoch < l0_fully_ramped_ep:
+                frac = (eff_epoch - l0_warmup_ep) / max(l0_ramp_ep, 1)
+                beta_now = beta_default + (beta_min - beta_default) * frac
+            else:
+                beta_now = beta_min
         loss_fn.lambda_l0 = eff_l0
         for gate in [model.charge_probe_gate, model.discharge_probe_gate, *model.scen_gates]:
             gate.BETA = beta_now
@@ -762,7 +810,8 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
         # 걸 막으면서도, sat이 실제로 더 낮아진(게이트가 더 이산화된) epoch은 val_rmse가
         # 다소 나빠도 놓치지 않기 위함.
         is_selected = False
-        if epoch >= l0_fully_ramped_ep:
+        _l0_fully_ramped_ep_eff = (warmstart_T or 0) + l0_fully_ramped_ep
+        if epoch >= _l0_fully_ramped_ep_eff:
             rmse_diff = val_rmse_v - best_val_rmse
             is_better = (rmse_diff <= -params.val_rmse_epsilon) or (sat < best_sat)
             if is_better:
@@ -874,6 +923,7 @@ def t7_save_results(params: SimpleNamespace, data: SimpleNamespace, hyperparams:
         "interaction_json": data.interaction_json,
         "l0_norm_constant": params.l0_norm_constant,
         "hi_cost_weighted_l0": params.hi_cost_weighted_l0,
+        "warmstart_branch_epoch": params.warmstart_branch_epoch,
     }
     (output_dir / "p1v2_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[p1v2] 선택된 epoch={loop.best_epoch} (gate_saturation={loop.best_sat:.4f})")
