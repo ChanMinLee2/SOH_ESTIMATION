@@ -153,10 +153,10 @@ def panel_vq_overlay(ax):
                                  shrinkA=0, shrinkB=0), annotation_clip=False)
 
     bot_y = vmin - 0.10 * rng
-    for label, cx in zip(["dis_hi", "dis_mid", "dis_lo"], (0.825, 0.5, 0.175)):
+    for label, cx in zip(["dis_hi", "dis_mid", "dis_lo"], (0.175, 0.5, 0.825)):
         ax.text(cx, bot_y, label, ha="center", va="top", fontsize=6.7,
                 color=SUBINK, fontweight="bold")
-    ax.annotate("", xy=(0.05, bot_y - 0.07 * rng), xytext=(0.97, bot_y - 0.07 * rng),
+    ax.annotate("", xy=(0.97, bot_y - 0.07 * rng), xytext=(0.05, bot_y - 0.07 * rng),
                 arrowprops=dict(arrowstyle="-|>", color=SUBINK, lw=0.85,
                                  shrinkA=0, shrinkB=0), annotation_clip=False)
 

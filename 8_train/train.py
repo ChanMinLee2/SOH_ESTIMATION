@@ -371,8 +371,12 @@ def t1_set_params_and_config() -> SimpleNamespace:
     seg_axis = P.FIXED_SEG_AXIS
     axis_cfg = dict(P.ACTIVE_AXIS_CONFIG)
     train_cycle_frac = P.FIXED_TRAIN_CYCLE_FRAC if P.FIXED_TRAIN_CYCLE_FRAC is not None else 1.0
-    data_dir = P.FIXED_CANONICAL_DATA_DIR
-    seg_data_dir = P.FIXED_CANONICAL_SEG_DATA_DIR
+    data_dir = P.ACTIVE_DATA_DIR if P.ACTIVE_DATA_DIR is not None else P.FIXED_CANONICAL_DATA_DIR
+    seg_data_dir = P.ACTIVE_SEG_DATA_DIR if P.ACTIVE_SEG_DATA_DIR is not None else P.FIXED_CANONICAL_SEG_DATA_DIR
+    if P.ACTIVE_DATA_DIR is not None:
+        print(f"[train] data_dir 오버라이드: {P.ACTIVE_DATA_DIR}")
+    if P.ACTIVE_SEG_DATA_DIR is not None:
+        print(f"[train] seg_data_dir 오버라이드: {P.ACTIVE_SEG_DATA_DIR}")
     beta_min = P.FIXED_BETA_MIN if P.FIXED_BETA_MIN is not None else 0.1
     device_str = P.FIXED_DEVICE or "auto"
     max_epochs_override = P.ACTIVE_MAX_EPOCHS
@@ -579,8 +583,9 @@ def t4_build_model_and_hparams(params: SimpleNamespace, data: SimpleNamespace, m
     if params.warmstart_branch_epoch is not None:
         print(f"[p1v2] warmstart-branch-epoch 적용: epoch<{params.warmstart_branch_epoch}까지 "
               f"scen_gates 뱅크 폭 2(방향별 공유 — 충전/방전 각 3개 시나리오가 게이트 1개씩 공유, "
-              f"L0=0/BETA=default) -> epoch {params.warmstart_branch_epoch}에 {model.n_scenarios}개로 "
-              f"분기(각자 자기 방향의 공유 게이트 값으로 초기화) 후 L0/BETA 스케줄 재시작")
+              f"L0/BETA는 절대 epoch 기준 스케줄 그대로 적용) -> epoch "
+              f"{params.warmstart_branch_epoch}에 {model.n_scenarios}개로 분기(각자 자기 방향의 "
+              f"압력받은 공유 게이트 값으로 초기화, L0/BETA 스케줄은 리셋 없이 계속 이어짐)")
 
     loss_cfg = cfg["loss"]
     loss_fn = SCRLoss(lambda_scen=lambda_scen, lambda_l0=loss_cfg["lambda_l0"],
@@ -731,23 +736,24 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
             tqdm_write(f"[p1v2] warmstart-branch: epoch {epoch}에 scen_gates {_n_groups_before} -> "
                        f"{model.n_scenarios}개로 분기, 옵티마이저 모멘텀 리셋")
 
-        # 웜스타트가 켜져 있으면 epoch<T 동안은 L0=0/BETA=beta_default로 고정(이산화 압력
-        # 없이 공유 게이트 하나만 전체 데이터로 학습)하고, epoch>=T부터는 T를 새 0으로
-        # 삼아 L0 warmup/ramp와 BETA anneal을 처음부터 재시작한다. warmstart_T=None이면
-        # eff_epoch=epoch라 아래 로직 전부 기존과 100% 동일.
-        if warmstart_T is not None and epoch < warmstart_T:
-            eff_l0 = 0.0
+        # 2026-10-11: L0 warmup/ramp·BETA anneal은 warmstart_T와 무관하게 항상 절대
+        # epoch 기준 단일 스케줄을 따른다(브랜치 시점에 리셋하지 않음) — 원래는 epoch<T
+        # 동안 L0=0 고정, epoch>=T부터 T를 새 0으로 삼아 warmup/ramp를 처음부터
+        # 재시작했으나, 분기(branch_scen_gates) 자체가 이미 옵티마이저 모멘텀 리셋이라는
+        # 불연속을 주는데 거기에 "압력 0에서 재시작"까지 겹치면 분기 직후 시나리오별
+        # 게이트가 사실상 콜드 스타트로 다시 스스로를 솎아내야 했다(실측: warmstart=150이
+        # warmstart 없는 즉시분기보다도 noscen 대비 더 나빴음). 이 변경으로 공유 게이트
+        # 구간(epoch<T)도 절대 epoch 기준 압력을 그대로 받고, branch_scen_gates()가 이미
+        # 압력받은 공유 게이트 값을 시나리오별 게이트로 복제하므로 분기 직후에도 압력
+        # 수준이 끊기지 않는다. warmstart_T=None이면 기존과 100% 동일(eff_epoch=epoch).
+        eff_l0 = l0_scheduler.get(epoch)
+        if epoch < l0_warmup_ep:
             beta_now = beta_default
+        elif epoch < l0_fully_ramped_ep:
+            frac = (epoch - l0_warmup_ep) / max(l0_ramp_ep, 1)
+            beta_now = beta_default + (beta_min - beta_default) * frac
         else:
-            eff_epoch = epoch - warmstart_T if warmstart_T is not None else epoch
-            eff_l0 = l0_scheduler.get(eff_epoch)
-            if eff_epoch < l0_warmup_ep:
-                beta_now = beta_default
-            elif eff_epoch < l0_fully_ramped_ep:
-                frac = (eff_epoch - l0_warmup_ep) / max(l0_ramp_ep, 1)
-                beta_now = beta_default + (beta_min - beta_default) * frac
-            else:
-                beta_now = beta_min
+            beta_now = beta_min
         loss_fn.lambda_l0 = eff_l0
         for gate in [model.charge_probe_gate, model.discharge_probe_gate, *model.scen_gates]:
             gate.BETA = beta_now
@@ -810,7 +816,11 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
         # 걸 막으면서도, sat이 실제로 더 낮아진(게이트가 더 이산화된) epoch은 val_rmse가
         # 다소 나빠도 놓치지 않기 위함.
         is_selected = False
-        _l0_fully_ramped_ep_eff = (warmstart_T or 0) + l0_fully_ramped_ep
+        # 2026-10-11: L0 스케줄이 더 이상 branch 시점에 리셋되지 않으므로(위 변경 참고)
+        # "완전히 램프된 에폭"은 절대 l0_fully_ramped_ep 그대로. 다만 branch가 그보다
+        # 늦게 일어나는 경우(T > l0_fully_ramped_ep)까지 대비해, 분기 이전(아직 공유
+        # 게이트 상태) 체크포인트는 후보에서 제외하도록 T와 max를 취한다.
+        _l0_fully_ramped_ep_eff = max(warmstart_T or 0, l0_fully_ramped_ep)
         if epoch >= _l0_fully_ramped_ep_eff:
             rmse_diff = val_rmse_v - best_val_rmse
             is_better = (rmse_diff <= -params.val_rmse_epsilon) or (sat < best_sat)

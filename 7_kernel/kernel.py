@@ -256,8 +256,13 @@ def k2_load_data(params: SimpleNamespace) -> SimpleNamespace:
     (cross_scen_std_r, 분류기용 다중공선성 tiebreak)을 읽는다."""
     # _load_train_split은 SimpleNamespace를 인자로 받는다(interaction.py/synergy.py의
     # _load_all_scenarios 호출과 동일 패턴) — CLI가 사라졌으므로 필요한 필드만 구성.
+    if P.ACTIVE_DATA_DIR is not None:
+        print(f"[kernel] data_dir 오버라이드: {P.ACTIVE_DATA_DIR}")
+    if P.ACTIVE_SEG_DATA_DIR is not None:
+        print(f"[kernel] seg_data_dir 오버라이드: {P.ACTIVE_SEG_DATA_DIR}")
     _loader_args = SimpleNamespace(
-        data_dir=P.FIXED_CANONICAL_DATA_DIR, seg_data_dir=P.FIXED_CANONICAL_SEG_DATA_DIR,
+        data_dir=P.ACTIVE_DATA_DIR if P.ACTIVE_DATA_DIR is not None else P.FIXED_CANONICAL_DATA_DIR,
+        seg_data_dir=P.ACTIVE_SEG_DATA_DIR if P.ACTIVE_SEG_DATA_DIR is not None else P.FIXED_CANONICAL_SEG_DATA_DIR,
         datasets=P.FIXED_CANONICAL_DATASETS, split_seed=params.split_seed,
         axis_config=json.dumps(P.ACTIVE_AXIS_CONFIG), seg_axis=P.FIXED_SEG_AXIS,
     )

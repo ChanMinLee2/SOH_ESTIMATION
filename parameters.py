@@ -9,6 +9,11 @@ from __future__ import annotations
 
 # 대용량 중간 산출물 드라이브 루트(실제 경로는 data_directories.py가 관리)
 from data_directories import DATA_4_HI_ROOT
+# q_frac_ref 경로 태그 조각(n2/calib/offset) — 4_hi_analysis/logics.py의 _qfw_tag/
+# _qfref_tag와 공유하는 단일 소스(common/scenario/q_frac_ref.py 쪽 docstring 참고).
+# logics.py 자체(pandas/scipy 등 무거운 의존성)는 모든 스텝이 읽는 이 파일에서
+# import하지 않고, 이 세 조각 + 아래 _qfref_axis_tag()로 같은 공식만 재구성한다.
+from common.scenario.q_frac_ref import calib_path_tag, n2_path_tag, offset_path_tag
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 자주 바꿔가며 쓰는 파라미터 — run_pipeline.py의 CLI 플래그로 노출됨
@@ -60,12 +65,8 @@ N_HI_TO_ENV = {
 }
 
 # ── 태그/경로 ────────────────────────────────────────────────────────────
-ACTIVE_P1_TAG = "refact"                # 산출물 파일명에 붙는 실행 태그
+ACTIVE_P1_TAG = "base_invertedtransformer"                # 산출물 파일명에 붙는 실행 태그
 ACTIVE_REP_CELLS = None                 # 대표 셀 목록. None=데이터셋별 5개 자동 선정
-ACTIVE_DATA_DIR = None                  # Step 4 산출 데이터 경로. None=아래
-                                         # FIXED_CANONICAL_DATA_DIR로 폴백
-ACTIVE_SEG_DATA_DIR = None              # 세그먼트 데이터 경로. None=아래
-                                         # FIXED_CANONICAL_SEG_DATA_DIR로 폴백
 
 # ── 축 설정(Step 4~9 공통, q_frac_ref) — 이 딕셔너리가 유일한 소스 ──────────
 # 바꾸려면 이 딕셔너리를 직접 수정하거나 run_pipeline.py --axis-config로 통째로
@@ -81,7 +82,48 @@ ACTIVE_AXIS_CONFIG: dict = {
     "min_pts": 5,                # 세그먼트 최소 포인트 수(미만이면 병합/제외)
     "calibration_period": 100,  # 센서 재보정 주기(사이클). None=재보정 없음
     "offset_amp": 0.005,        # 센서 오프셋 노이즈 진폭
+    # "tile_scope": "full",        # 세그먼트 타일링 범위: zone(존 3개 안에서만 배치, 기본) |
+    #                              # full(전체 구간에 고르게 배치). assign(라벨)과 독립 축
+    # "assign": "none",           # 시나리오 라벨링: position_bin(6시나리오, 기본) |
+                                 # none(라벨 없음, 방향만 2개) | mid_nmid(4시나리오)
 }
+
+
+def _qfref_axis_tag(axis_cfg: dict) -> str:
+    """ACTIVE_AXIS_CONFIG → Step 4가 실제 쓰는 디렉터리 태그. 4_hi_analysis/logics.py의
+    _qfw_tag/_qfref_tag와 정확히 같은 공식(그 두 함수를 import하면 pandas/scipy 등
+    무거운 의존성이 모든 스텝이 읽는 이 파일에 묶이므로, 공식만 재구성 — n2/calib/
+    offset 조각은 common/scenario/q_frac_ref.py의 공유 헬퍼를 그대로 재사용해 거기서는
+    중복이 없게 함). logics.py 쪽 공식이 바뀌면 이 함수도 같이 고쳐야 함."""
+    n1 = int(round(axis_cfg.get("n1", 0.4) * 100))
+    n2_frag = n2_path_tag(axis_cfg)
+    ns = int(axis_cfg.get("n_samples", 4))
+    min_pts = int(axis_cfg.get("min_pts", 10))
+    minpts_sfx = f"_minpts{min_pts}" if min_pts != 10 else ""
+    assign = axis_cfg.get("assign", "position_bin")
+    assign_sfx = {"position_bin": "", "none": "_noscen", "mid_nmid": "_midnmid"}.get(assign, f"_{assign}")
+    tile_scope = axis_cfg.get("tile_scope")
+    tile_scope_sfx = f"_tile{tile_scope}" if tile_scope is not None else ""
+    rand_sfx = (f"_random-L{int(axis_cfg.get('seg_len_pts', 20))}"
+                if axis_cfg.get("random_segment", False) else "")
+    base = f"n1-{n1}%_{n2_frag}_N-{ns}{rand_sfx}{minpts_sfx}{assign_sfx}{tile_scope_sfx}"
+    lag = int(axis_cfg.get("ref_lag", 0))
+    noise_pct = int(round(axis_cfg.get("noise_amp", 0.03) * 100))
+    mode = str(axis_cfg.get("noise_mode", "ou"))
+    period = int(round(axis_cfg.get("noise_period_cycles", 200.0)))
+    return (f"{base}_lag-{lag}_noise-{noise_pct}%_{mode}-{period}"
+            f"{calib_path_tag(axis_cfg)}{offset_path_tag(axis_cfg)}")
+
+
+# ACTIVE_DATA_DIR/ACTIVE_SEG_DATA_DIR — Step 4가 ACTIVE_AXIS_CONFIG로 실제 추출한 데이터
+# 경로. 하드코딩 문자열이 아니라 위 ACTIVE_AXIS_CONFIG 자체에서 계산 — 축을 바꿀 때마다
+# 손으로 태그를 다시 조립할 필요 없음(ACTIVE_AXIS_CONFIG가 캐노니컬 조합이면 자동으로
+# FIXED_CANONICAL_DATA_DIR/FIXED_CANONICAL_SEG_DATA_DIR과 동일한 경로가 나옴).
+# Step 5~9(interaction/synergy/kernel/train/test) 전부 이 값을 공통으로 읽어서 같은
+# 데이터를 보도록 맞춰져 있음(2026-10-10).
+_ACTIVE_AXIS_DIR = DATA_4_HI_ROOT / "q_frac_ref" / _qfref_axis_tag(ACTIVE_AXIS_CONFIG)
+ACTIVE_DATA_DIR = str(_ACTIVE_AXIS_DIR / "cycle").replace("\\", "/")
+ACTIVE_SEG_DATA_DIR = str(_ACTIVE_AXIS_DIR / "seg").replace("\\", "/")
 
 # ── 모델/재현성 ──────────────────────────────────────────────────────────
 FIXED_DEFAULT_SEED = 42                 # ACTIVE_SEED/ACTIVE_SPLIT_SEED가 None일 때의
@@ -100,7 +142,11 @@ FIXED_SEG_AXIS = "q_frac_ref"           # 세그멘테이션 축 종류(다른 �
                                          # 이 상수 자체를 변경해야 함 — axis_config만
                                          # 바꿔서는 축 종류를 못 바꿈)
 
-# ── ACTIVE_AXIS_CONFIG로 Step 4가 실제 추출한 데이터의 저장 경로 ──────────
+# ── ACTIVE_AXIS_CONFIG의 캐노니컬 조합(assign=position_bin, tile_scope=zone)으로
+# Step 4가 실제 추출한 데이터의 저장 경로. ACTIVE_AXIS_CONFIG를 이 조합에서 벗어나게
+# 바꾸면(예: tile_scope="full") Step 4는 다른 디렉터리(_qfref_tag가 자동으로 접미사를
+# 붙임)에 저장하므로, 이 상수를 손으로 고치는 대신 위 ACTIVE_DATA_DIR/
+# ACTIVE_SEG_DATA_DIR에 그 새 디렉터리를 지정할 것 — Step 5~9가 전부 그걸 읽는다.
 _CANONICAL_AXIS_DIR = (
     DATA_4_HI_ROOT / "q_frac_ref"
     / "n1-35%_n2-20%_N-2_minpts5_lag-1_noise-3%_ou-200_calib-100_offA-5mA"
@@ -216,7 +262,7 @@ P1_MODEL_CONFIG: dict = {
         "tr_d_ff": 512,
         "resnet_n_blocks": 4,            # resnet_tab 전용
         "resnet_d_hidden_factor": 2.0,
-        "regression_model": "mlp",       # 회귀 헤드 종류: mlp|transformer|i_transformer|resnet_tab|ft_transformer
+        "regression_model": "i_transformer",       # 회귀 헤드 종류: mlp|transformer|i_transformer|resnet_tab|ft_transformer
         "mlp_hidden_dims": [128, 64],
     },
     "loss": {

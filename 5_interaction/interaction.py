@@ -287,8 +287,12 @@ def main() -> None:
     # (main() 위 docstring 참고).
     seg_axis = P.FIXED_SEG_AXIS
     axis_config = json.dumps(P.ACTIVE_AXIS_CONFIG)
-    data_dir = P.FIXED_CANONICAL_DATA_DIR
-    seg_data_dir = P.FIXED_CANONICAL_SEG_DATA_DIR
+    data_dir = P.ACTIVE_DATA_DIR if P.ACTIVE_DATA_DIR is not None else P.FIXED_CANONICAL_DATA_DIR
+    seg_data_dir = P.ACTIVE_SEG_DATA_DIR if P.ACTIVE_SEG_DATA_DIR is not None else P.FIXED_CANONICAL_SEG_DATA_DIR
+    if P.ACTIVE_DATA_DIR is not None:
+        print(f"[interaction] data_dir 오버라이드: {P.ACTIVE_DATA_DIR}")
+    if P.ACTIVE_SEG_DATA_DIR is not None:
+        print(f"[interaction] seg_data_dir 오버라이드: {P.ACTIVE_SEG_DATA_DIR}")
     datasets = P.FIXED_CANONICAL_DATASETS
     split_seed = P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED
     min_segs_per_cell = P.FIXED_INTERACTION_MIN_SEGS_PER_CELL

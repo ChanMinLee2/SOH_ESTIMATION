@@ -6,10 +6,14 @@ the look across the whole set.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 
 from data_directories import DATA_4_HI_ROOT  # noqa: F401 — pip install -e . 로 import 가능
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # docs/figures/_style.py -> repo root
 
 # ---------------------------------------------------------------- palette --
 #

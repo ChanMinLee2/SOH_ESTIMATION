@@ -354,12 +354,17 @@ def s1_load_params_and_config() -> SimpleNamespace:
     args = _parse_args()
     out_dir = Path(args.out_dir) if args.out_dir else RESULTS_DIR
 
+    if P.ACTIVE_DATA_DIR is not None:
+        print(f"[synergy] data_dir 오버라이드: {P.ACTIVE_DATA_DIR}")
+    if P.ACTIVE_SEG_DATA_DIR is not None:
+        print(f"[synergy] seg_data_dir 오버라이드: {P.ACTIVE_SEG_DATA_DIR}")
+
     return SimpleNamespace(
         out_dir=out_dir,
         seg_axis=P.FIXED_SEG_AXIS,
         axis_config=json.dumps(P.ACTIVE_AXIS_CONFIG),
-        data_dir=P.FIXED_CANONICAL_DATA_DIR,
-        seg_data_dir=P.FIXED_CANONICAL_SEG_DATA_DIR,
+        data_dir=P.ACTIVE_DATA_DIR if P.ACTIVE_DATA_DIR is not None else P.FIXED_CANONICAL_DATA_DIR,
+        seg_data_dir=P.ACTIVE_SEG_DATA_DIR if P.ACTIVE_SEG_DATA_DIR is not None else P.FIXED_CANONICAL_SEG_DATA_DIR,
         datasets=P.FIXED_CANONICAL_DATASETS,
         split_seed=P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED,
         max_group_size=P.ACTIVE_MAX_GROUP_SIZE,

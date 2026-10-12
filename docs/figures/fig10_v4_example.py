@@ -9,13 +9,15 @@ comparison with a visualization suited to independently-trained per-chemistry
 models -- folding TJU into this pooled-LFP figure would contradict its own
 caption/scope).
 
-Representative cells: MIT b1c5, HUST 1-7 (both in this run's held-out test
-split), hard routing (realistic/deployment condition). Two cells instead of
-one strengthens the "representative behavior" claim (not a single-cell
-cherry-pick) while staying inside the figure's stated pooled-MIT+HUST scope.
+Representative cell: HUST 1-7 (in this run's held-out test split), hard
+routing (realistic/deployment condition). 2026-10-12: dropped the MIT b1c5
+rows (was (a)-(d)) to halve the figure's page footprint per page-budget
+pressure -- single representative cell, both directions, is enough to make
+the "trajectory tracks true capacity, error grows near end-of-life" point;
+the two-cell version is kept in fig10_v4_example.py's git history if the
+stronger "not a single-cell cherry-pick" framing is needed again.
 
-Layout: 4 rows (MIT charge / MIT discharge / HUST charge / HUST discharge)
-x 2 columns:
+Layout: 2 rows (charge / discharge) x 2 columns:
   col 1: capacity curve, true vs per-scenario-level predicted
   col 2: relative error (%) per scenario level, vs cycle
 (columns 2 and 3 of the original 2x3 diagnostic layout --
@@ -26,7 +28,7 @@ Real data: predictions/test_predictions_hard.csv from the v4 canonical run
 (2026-09-13: test.py extended to export hard/soft mode
 predictions, not just oracle).
 
-Run: python docs/figures/fig6_v4_example.py
+Run: python docs/figures/fig10_v4_example.py
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from _style import INK, SUBINK, setup_rcparams, label_panel, PROJECT_ROOT
 setup_rcparams()
 
 RUN_DIR = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs/0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42"
-EXAMPLE_CELLS = ["b1c5", "1-7"]   # (MIT, HUST) -- both confirmed present in this run's test split
+EXAMPLE_CELLS = ["1-7"]   # HUST -- confirmed present in this run's test split
 
 CHG_LEVELS = [("chg_lo", "lo"), ("chg_mid", "mid"), ("chg_hi", "hi")]
 DIS_LEVELS = [("dis_hi", "hi"), ("dis_mid", "mid"), ("dis_lo", "lo")]
@@ -101,11 +103,11 @@ def panel_rel_error(ax, df, seg_levels, cycles, true_line, title):
 
 
 def build_figure():
-    fig = plt.figure(figsize=(8.0, 13.0))
-    gs = fig.add_gridspec(4, 2, hspace=0.55, wspace=0.34,
-                           top=0.96, bottom=0.045, left=0.10, right=0.97)
+    fig = plt.figure(figsize=(8.0, 6.8))
+    gs = fig.add_gridspec(2, 2, hspace=0.55, wspace=0.34,
+                           top=0.93, bottom=0.085, left=0.10, right=0.97)
 
-    letters = iter(["(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "(g)", "(h)"])
+    letters = iter(["(a)", "(b)", "(c)", "(d)"])
     for row_pair, cell in enumerate(EXAMPLE_CELLS):
         df = load_cell(RUN_DIR, cell)
         cycles = np.sort(df.cycle.unique())

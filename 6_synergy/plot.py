@@ -268,7 +268,8 @@ def _plot_cluster_structure(report: dict, seg_ids: list[int], seg_names: list[st
 
     split_seed = P.ACTIVE_SPLIT_SEED if P.ACTIVE_SPLIT_SEED is not None else P.FIXED_DEFAULT_SEED
     _loader_args = SimpleNamespace(
-        data_dir=P.FIXED_CANONICAL_DATA_DIR, seg_data_dir=P.FIXED_CANONICAL_SEG_DATA_DIR,
+        data_dir=P.ACTIVE_DATA_DIR if P.ACTIVE_DATA_DIR is not None else P.FIXED_CANONICAL_DATA_DIR,
+        seg_data_dir=P.ACTIVE_SEG_DATA_DIR if P.ACTIVE_SEG_DATA_DIR is not None else P.FIXED_CANONICAL_SEG_DATA_DIR,
         datasets=P.FIXED_CANONICAL_DATASETS, split_seed=split_seed,
         axis_config=json.dumps(P.ACTIVE_AXIS_CONFIG), seg_axis=P.FIXED_SEG_AXIS,
     )
