@@ -43,6 +43,10 @@ COMPARISON_DIR = ROOT / "model_lib" / "results" / "comparison"
 SEG_COLORS = {
     "chg_lo": "#1f77b4", "chg_mid": "#2ca02c", "chg_hi": "#9467bd",
     "dis_hi": "#d62728", "dis_mid": "#ff7f0e", "dis_lo": "#8c564b",
+    # noscen(assign="none") 축은 seg_name이 "chg"/"dis" 2개뿐 — 6존 전용 팔레트와
+    # 겹치지 않는 색을 따로 둔다(2026-10-19, 안 그러면 noscen run의 곡선이 전혀
+    # 안 그려지고 실측선만 남는다 — SEG_COLORS 키로만 필터링했었기 때문).
+    "chg": "#17becf", "dis": "#e377c2",
 }
 COLOR_A = "#9e9e9e"
 COLOR_B = "#1f5fa8"
@@ -144,7 +148,8 @@ def plot_curve_one(run_a: Path, run_b: Path, label_a: str, label_b: str,
         true_by_cycle = data.groupby("cycle")["cap_true_Ah"].mean().sort_index()
         ax.plot(true_by_cycle.index, true_by_cycle.values, color="black",
                 linewidth=2.0, label="실측", zorder=10)
-        for seg_name, color in SEG_COLORS.items():
+        for seg_name in sorted(data["seg_name"].unique()):
+            color = SEG_COLORS.get(seg_name, "#777777")
             seg_df = data[data["seg_name"] == seg_name]
             if len(seg_df) == 0:
                 continue

@@ -1,4 +1,7 @@
-"""Figure 1 -- Problem framing: chemistry-dependent V-Q shape (A1 + A2).
+"""Figure 1 -- Problem framing: chemistry-dependent V-Q shape, single panel
+(2026-10-16: dropped the dV/dq panel (b) -- the chemistry-dependent curve
+shape point is made entirely through this V-q_frac overlay now; the dV/dq
+peak-shape claim is made in the text without a dedicated plot).
 
 Camera-ready draft for Journal of Power Sources. All curves are real cell
 data (MIT b1c0, HUST 1-7 -- both LFP, different manufacturer; TJU
@@ -10,10 +13,10 @@ q_frac_wide formula (n1=0.35, n2=0.20):
     right bucket [1-n1, 1.00]      -> chg_hi / dis_lo
 (see common/scenario/q_frac_wide.py::_zone_bounds + scenario_spec.json routing)
 
-The SOC-zone schematic itself (old panel d) now lives in its own figure,
+The SOC-zone schematic itself (old panel d) lives in its own figure,
 fig2_scenario_spec.py -- this figure stays focused on the physical problem
-statement: three real cells, three distinct dV/dq peak shapes, one shared
-SOC axis.
+statement: three real cells' charge/discharge voltage curves on one shared
+SOC axis, with the six scenario zones marked directly on it.
 
 Run: python docs/figures/fig1_problem_scenario_definition.py
 """
@@ -25,14 +28,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import scipy.signal as sig
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # _style import(형제 모듈)용
 from data_directories import DATA_4_HI_ROOT  # pip install -e . 로 import 가능
 from _style import (INK, SUBINK, GRID, Z_LEFT, Z_MID, Z_RIGHT, ZONE_COLOR,  # noqa: E402
                      DATASET_COLOR, ZONE_BOUNDS, OVERLAPS, N1,
-                     setup_rcparams, label_panel, strip_top_right)
+                     setup_rcparams, strip_top_right)
 
 setup_rcparams()
 
@@ -60,13 +62,14 @@ def build_curve(part: pd.DataFrame, sign: int, i_thresh: float = 0.05, gap_facto
     """q_frac (cumulative-capacity fraction) vs voltage, with rest steps handled.
 
     Rest steps (|I|~0) are dropped (i_thresh), but MIT/HUST's multi-step
-    fast-charge protocols leave a large time GAP across each dropped rest.
-    Naively trapz-integrating current*dt straight across that gap attributes
-    a spurious charge to it, and stretches the subsequent relaxation-voltage
-    drop across many q_frac points -- a wide multi-lobe glitch once
-    differentiated (dV/dq). We zero the increment across any such gap (real
-    charge transferred during a rest is ~0) and NaN-break the curve there so
-    no line is drawn across a q_frac interval with no defined dV/dQ.
+    fast-charge protocols (e.g. the CC-CV transition near chg_hi) leave a
+    large time GAP across each dropped rest. Naively trapz-integrating
+    current*dt straight across that gap attributes a spurious charge to it,
+    so we zero the increment across any such gap (real charge transferred
+    during a rest is ~0). The voltage curve is drawn continuously straight
+    through the gap (connecting the pre-rest and post-rest voltage directly)
+    rather than broken -- this panel only plots V vs q_frac, not dV/dQ, so
+    there's no differentiation glitch to protect against.
     """
     i_signed = part.current_A.values * sign
     keep = i_signed > i_thresh
@@ -80,10 +83,7 @@ def build_curve(part: pd.DataFrame, sign: int, i_thresh: float = 0.05, gap_facto
     inc[gap_mask] = 0.0
     dq = np.concatenate([[0.0], np.cumsum(inc)]) / 3600.0
     q = dq / dq[-1]
-    gap_idx = np.where(gap_mask)[0]
-    for gi in gap_idx:
-        v[gi + 1] = np.nan
-    return q, v, q[gap_idx]
+    return q, v
 
 
 class CellCycle:
@@ -94,25 +94,8 @@ class CellCycle:
         self.chem = chem
         self.cycle = cycle
         self.color = DATASET_COLOR[name]
-        self.q_chg, self.v_chg, self.gaps_chg = build_curve(chg, 1)
-        self.q_dis, self.v_dis, self.gaps_dis = build_curve(dis, -1)
-
-    def dvdq(self, q0: float = 0.0, q1: float = 1.0, n: int = 500, smooth_win: int = 21,
-              src_guard: float = 0.02, out_guard: float = 0.05):
-        ok = ~np.isnan(self.v_chg)
-        for g in self.gaps_chg:
-            ok &= np.abs(self.q_chg - g) > src_guard
-        q_src, v_src = self.q_chg[ok], self.v_chg[ok]
-        grid = np.linspace(q0, q1, n)
-        vg = np.interp(grid, q_src, v_src)
-        vg = sig.savgol_filter(vg, smooth_win, 3)
-        dv = np.gradient(vg, grid)
-        edge = int(n * 0.02)
-        dv[:edge] = np.nan
-        dv[-edge:] = np.nan
-        for g in self.gaps_chg:
-            dv[np.abs(grid - g) < out_guard] = np.nan
-        return grid, dv
+        self.q_chg, self.v_chg = build_curve(chg, 1)
+        self.q_dis, self.v_dis = build_curve(dis, -1)
 
 
 CELLS = {k: CellCycle(k, v["csv"], v["cycle"], v["chem"]) for k, v in CELLS.items()}
@@ -174,64 +157,15 @@ def panel_vq_overlay(ax):
     ax.set_title("Charge/discharge V-$q_{frac}$ across three real cells", loc="left", pad=6, fontsize=8.0)
 
 
-# ------------------------------------------------------------- panel (b) ---
-
-Q_START = 0.08  # skip the shared initial-activation transient (all 3 cells spike
-                 # here regardless of chemistry -- not the feature of interest)
-
-
-def panel_dva_overlay(ax):
-    for name, (s, e) in ZONE_BOUNDS.items():
-        ax.axvspan(s, e, color=ZONE_COLOR[name], alpha=0.07, lw=0, zorder=0)
-
-    peaks = {}
-    for name in ORDER:
-        cell = CELLS[name]
-        q, dv = cell.dvdq()
-        keep = q >= Q_START
-        q, dv = q[keep], dv[keep]
-        ax.plot(q, dv, color=cell.color, lw=1.5, zorder=5, label=f"{name} ({cell.chem})")
-        i = np.nanargmax(dv)
-        peaks[name] = (q[i], dv[i])
-
-    ymax = max(v for _, v in peaks.values())
-    y_targets = {"MIT": 0.94, "HUST": 0.76, "TJU": 0.56}
-    for name in ORDER:
-        qx, vy = peaks[name]
-        cell = CELLS[name]
-        ax.annotate(f"{name} peak $\\approx${vy:.1f} @ $q$={qx:.2f}", xy=(qx, vy),
-                    xytext=(0.30, ymax * y_targets[name]), fontsize=6.5, color=cell.color,
-                    ha="left", va="center",
-                    arrowprops=dict(arrowstyle="-", color=cell.color, lw=0.7, alpha=0.6))
-
-    ax.set_xlim(Q_START, 1)
-    ax.set_ylim(-0.3, ymax * 1.12)
-    ax.set_xlabel(f"$q_{{frac}}$  (initial activation transient, $q<${Q_START:.2f}, omitted)")
-    ax.set_ylabel("dV/dq  (V / unit $q_{frac}$)")
-    ax.set_title("Three distinct dV/dq peak shapes, one shared SOC axis", loc="left", pad=6, fontsize=8.0)
-    leg = ax.legend(loc="upper right", frameon=True, facecolor="white", edgecolor="none",
-                     framealpha=0.82, fontsize=7.0, handlelength=1.9, borderaxespad=0.25)
-    for t in leg.get_texts():
-        t.set_color(SUBINK)
-
-
 # ------------------------------------------------------------------ main ---
 
 def build_figure():
-    fig = plt.figure(figsize=(7.6, 3.9))
-    gs = fig.add_gridspec(1, 2, wspace=0.30,
-                           top=0.90, bottom=0.155, left=0.085, right=0.975)
+    fig = plt.figure(figsize=(5.0, 4.0))
+    gs = fig.add_gridspec(1, 1, top=0.90, bottom=0.14, left=0.13, right=0.97)
     ax_a = fig.add_subplot(gs[0, 0])
-    ax_b = fig.add_subplot(gs[0, 1])
 
     panel_vq_overlay(ax_a)
-    panel_dva_overlay(ax_b)
-
-    for ax in (ax_a, ax_b):
-        strip_top_right(ax)
-
-    for ax, letter in ((ax_a, "(a)"), (ax_b, "(b)")):
-        label_panel(fig, ax, letter)
+    strip_top_right(ax_a)
 
     return fig
 

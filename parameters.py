@@ -20,7 +20,10 @@ from common.scenario.q_frac_ref import calib_path_tag, n2_path_tag, offset_path_
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ── 스텝 범위 ────────────────────────────────────────────────────────────
-ACTIVE_FROM_STEP = 1                    # 파이프라인 시작 스텝 번호(1~9)
+ACTIVE_FROM_STEP = 5                    # 파이프라인 시작 스텝 번호(1~9) — Step 4 데이터는
+                                         # 이미 추출돼 있어(ACTIVE_DATA_DIR/ACTIVE_SEG_DATA_DIR
+                                         # 경로 존재 확인) 5부터 시작, interaction/synergy/
+                                         # kernel은 중복이더라도 이번 run_dir에 새로 생성
 
 # ── 실행 환경 ────────────────────────────────────────────────────────────
 ACTIVE_WORKERS = 8                      # Step 1~5 데이터 처리 병렬 프로세스 수 상한
@@ -43,7 +46,7 @@ ACTIVE_BATCH_SIZE = None                # 배치 크기. None=yaml 기본값(204
 ACTIVE_HI_COST_WEIGHTED_L0 = False      # L0 페널티에 HI 카테고리별 비용 가중 적용 여부
 ACTIVE_USE_PROBE_KERNEL = False         # 분류기(Stage A)에 커널 HI 후보 사용 여부.
                                          # True면 커널 HI 다중공선성도 함께 적용됨
-ACTIVE_WARMSTART_BRANCH_EPOCH = None     # 웜스타트 분기 커리큘럼 — None=비활성(기본,
+ACTIVE_WARMSTART_BRANCH_EPOCH = 100     # 웜스타트 분기 커리큘럼 — None=비활성(기본,
                                          # scen_gates=시나리오별 n개로 바로 학습). 정수
                                          # T를 주면 epoch<T 동안 scen_gates가 방향별
                                          # 공유 게이트 2개(충전 3개 시나리오가 1개,
@@ -52,6 +55,15 @@ ACTIVE_WARMSTART_BRANCH_EPOCH = None     # 웜스타트 분기 커리큘럼 — 
                                          # kernel_features_pkl/interaction_json과
                                          # 함께 사용 가능.
 ACTIVE_LAMBDA_L0_OVERRIDE = 0.000237    # L0 페널티 가중치 고정값. None=yaml/auto 계산
+ACTIVE_SOC_REF_TO_REGRESSION = False    # True면 cap_head(회귀) 입력에 q_ref(참조용량,
+                                         # q_frac 분모로 쓰인 z-scored 값) 스칼라 1칸을
+                                         # 추가 — "회귀기가 SOC 참조값을 직접 보면 어떻게
+                                         # 되는가" 실험용 토글. mlp/resnet_tab만 지원
+                                         # (model_lib/models/cap_heads.py 가드 참고).
+                                         # q_ref는 Step4 산출물에 새로 추가된 컬럼이라
+                                         # True로 켜서 처음 돌릴 땐 그 axis가 q_ref를
+                                         # 포함해 추출됐는지 확인할 것(구 pkl은 0.0 폴백 —
+                                         # 조용히 무의미한 상수를 넣고 도는 것 방지).
 
 # ── N_HI 토글(raw HI leakage 제외 범위) ──────────────────────────────────
 ACTIVE_N_HI = 64                        # raw HI 개수 — 63(leak 전부 제외) |
@@ -65,7 +77,7 @@ N_HI_TO_ENV = {
 }
 
 # ── 태그/경로 ────────────────────────────────────────────────────────────
-ACTIVE_P1_TAG = "base_invertedtransformer"                # 산출물 파일명에 붙는 실행 태그
+ACTIVE_P1_TAG = "reghead_transformer_noscen"                # 산출물 파일명에 붙는 실행 태그
 ACTIVE_REP_CELLS = None                 # 대표 셀 목록. None=데이터셋별 5개 자동 선정
 
 # ── 축 설정(Step 4~9 공통, q_frac_ref) — 이 딕셔너리가 유일한 소스 ──────────
@@ -84,7 +96,7 @@ ACTIVE_AXIS_CONFIG: dict = {
     "offset_amp": 0.005,        # 센서 오프셋 노이즈 진폭
     # "tile_scope": "full",        # 세그먼트 타일링 범위: zone(존 3개 안에서만 배치, 기본) |
     #                              # full(전체 구간에 고르게 배치). assign(라벨)과 독립 축
-    # "assign": "none",           # 시나리오 라벨링: position_bin(6시나리오, 기본) |
+    "assign": "none",           # 시나리오 라벨링: position_bin(6시나리오, 기본) |
                                  # none(라벨 없음, 방향만 2개) | mid_nmid(4시나리오)
 }
 
@@ -190,7 +202,11 @@ FIXED_BETA_MIN = None                   # L0 게이트 온도(temperature) 최�
                                          # None=train.py 기본 0.1
 FIXED_L0_WARMUP_EPOCHS_OVERRIDE = None  # L0 페널티 warmup 에폭 수 오버라이드.
                                          # None=yaml 값 사용
-FIXED_L0_NORM_CONSTANT = None           # L0 페널티 정규화 상수. None=n_scenarios로 나눔
+FIXED_L0_NORM_CONSTANT = 6              # L0 페널티 정규화 상수. None=n_scenarios로 나눔
+                                         # (scen=6, noscen=2 — 같은 lambda_l0라도 게이트당
+                                         # 실효 압력이 3배 차이남). 지금 noscen 대조군을
+                                         # scen(n_scenarios=6)과 동일 압력으로 맞추려고 6
+                                         # 고정 — 비교 끝나면 None으로 되돌릴 것.
 FIXED_VAL_RMSE_EPSILON = 0.00005        # 체크포인트 선택 시 val_rmse 개선 판정 최소폭
 FIXED_DEVICE = None                     # 연산 장치. None=auto(cuda 우선) — Step 8/9 공용
 FIXED_CHARGE_PROBE_M = None             # 충전 probe 게이트 top-m 오버라이드(수동
@@ -262,13 +278,15 @@ P1_MODEL_CONFIG: dict = {
         "tr_d_ff": 512,
         "resnet_n_blocks": 4,            # resnet_tab 전용
         "resnet_d_hidden_factor": 2.0,
-        "regression_model": "i_transformer",       # 회귀 헤드 종류: mlp|transformer|i_transformer|resnet_tab|ft_transformer
+        "regression_model": "transformer",       # 회귀 헤드 종류: mlp|transformer|i_transformer|resnet_tab|ft_transformer
         "mlp_hidden_dims": [128, 64],
+        "drop_probe_from_regression": True,  # True면 cap_head 입력에서 probe_x 제외(mlp/resnet_tab/transformer/i_transformer 지원, ft_transformer만 미지원)
+        "soc_ref_to_regression": ACTIVE_SOC_REF_TO_REGRESSION,  # True면 cap_head 입력에 q_ref 1칸 추가(mlp/resnet_tab만 지원)
     },
     "loss": {
         "lambda_scen": 0.01,             # 분류 CE 손실 가중치
-        "lambda_l0": 0.01,               # L0 희소화 페널티 가중치(기본값 — 보통 ACTIVE_LAMBDA_L0_OVERRIDE로 덮어씀)
-        "lambda_l0_auto": True,          # lambda_l0 자동 계산 여부
+        "lambda_l0": 0,               # L0 희소화 페널티 가중치(기본값 — 보통 ACTIVE_LAMBDA_L0_OVERRIDE로 덮어씀)
+        "lambda_l0_auto": False,          # lambda_l0 자동 계산 여부
         "lambda_l0_schedule": "delayed_warmup",  # none|delayed_warmup|exp_ramp|cyclic
         "lambda_l0_warmup_epochs": 50,
         "lambda_l0_ramp_epochs": 100,

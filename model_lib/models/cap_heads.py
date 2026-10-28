@@ -72,8 +72,9 @@ class MLPHead(nn.Module):
 class TransformerHead(nn.Module):
     """
     130-dim(with_raw_cnn=True면 133-dim) 입력을
-    semantic 토큰으로 분할해 Transformer Encoder에 입력한다.
-      Token 0: probe_x  (64-dim)  — 방향별 probe gate 출력
+    semantic 토큰으로 분할해 Transformer Encoder에 입력한다(drop_probe=True면 probe_x
+    토큰이 통째로 빠져 N_HI만큼 더 좁은 입력을 받는다, 2026-10-21).
+      Token 0: probe_x  (64-dim)  — 방향별 probe gate 출력(drop_probe=True면 없음)
       Token 1: scen_x   (64-dim)  — 시나리오 gate 출력
       Token 2: (n_kernel_hi>0) kernel_x (n_kernel_hi-dim) — kernel.py
                산출물(그룹당 RBF 커널 융합값), probe/scen과 동일하게 통째로 한 토큰으로
@@ -94,11 +95,15 @@ class TransformerHead(nn.Module):
         dropout: float = 0.1,
         with_raw_cnn: bool = False,
         n_kernel_hi: int = 0,
+        drop_probe: bool = False,
     ):
         super().__init__()
         self.with_raw_cnn = with_raw_cnn
         self.n_kernel_hi = n_kernel_hi
-        self.probe_embed = nn.Linear(N_HI, d_model)
+        self.drop_probe = drop_probe
+        # drop_probe=True(2026-10-21): probe_x 토큰 자체를 안 만든다 — 입력에 probe_x
+        # 블록이 없으므로(scr_model.py forward() 참고) probe_embed가 필요 없다.
+        self.probe_embed = nn.Linear(N_HI, d_model) if not drop_probe else None
         self.scen_embed  = nn.Linear(N_HI, d_model)
         self.meta_embed  = nn.Linear(2, d_model)
         # 커널 융합 HI 블록(kernel.py 산출물) — probe/scen과 마찬가지로
@@ -119,14 +124,19 @@ class TransformerHead(nn.Module):
         self.output  = nn.Linear(d_model, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 130) 또는 (B, 133) — with_raw_cnn 여부에 따라
-        probe_x = x[:, :N_HI]                                # (B, 64)
-        scen_x  = x[:, N_HI: 2 * N_HI]                       # (B, 64)
-
-        t0 = self.probe_embed(probe_x).unsqueeze(1)          # (B, 1, d)
-        t1 = self.scen_embed(scen_x).unsqueeze(1)            # (B, 1, d)
-        tokens = [t0, t1]
-        offset = 2 * N_HI
+        # x: (B, 130) 또는 (B, 133) — with_raw_cnn 여부에 따라(drop_probe=True면 N_HI만큼 더 좁음)
+        if self.drop_probe:
+            scen_x = x[:, :N_HI]                              # (B, 64) — probe_x 블록 자체가 없음
+            t1 = self.scen_embed(scen_x).unsqueeze(1)         # (B, 1, d)
+            tokens = [t1]
+            offset = N_HI
+        else:
+            probe_x = x[:, :N_HI]                             # (B, 64)
+            scen_x  = x[:, N_HI: 2 * N_HI]                    # (B, 64)
+            t0 = self.probe_embed(probe_x).unsqueeze(1)       # (B, 1, d)
+            t1 = self.scen_embed(scen_x).unsqueeze(1)         # (B, 1, d)
+            tokens = [t0, t1]
+            offset = 2 * N_HI
 
         if self.kernel_embed is not None:
             kernel_x = x[:, offset: offset + self.n_kernel_hi]   # (B, n_kernel_hi)
@@ -175,6 +185,7 @@ class ITransformerHead(nn.Module):
         dropout: float = 0.1,
         with_raw_cnn: bool = False,
         n_kernel_hi: int = 0,
+        drop_probe: bool = False,
     ):
         super().__init__()
         if with_raw_cnn:
@@ -184,7 +195,10 @@ class ITransformerHead(nn.Module):
                 "(REGRESSION_UPGRADE.md §5 표 참조). 현재는 mlp/transformer/resnet_tab만 "
                 "with_raw_cnn을 지원합니다."
             )
-        self.n_feat     = _HEAD_IN + n_kernel_hi            # 130 (+커널 있으면 n_kernel_hi)
+        # drop_probe=True(2026-10-21): forward()는 컬럼 위치만으로 토큰화하므로(의미 구분
+        # 없음) probe_x 블록이 입력에서 통째로 빠지면 n_feat만 N_HI만큼 줄이면 끝 —
+        # TransformerHead처럼 별도 분기가 필요 없다.
+        self.n_feat = _HEAD_IN + n_kernel_hi - (N_HI if drop_probe else 0)  # 130(-64) (+커널)
         self.value_proj = nn.Linear(1, d_model)             # scalar → d_model
         self.feat_emb   = nn.Embedding(self.n_feat, d_model)  # 피처 ID positional emb
 
@@ -396,7 +410,39 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
             "다루는 구조라(feature-wise attention) 커널 블록을 같은 방식(n_kernel_hi개 토큰 "
             "추가 vs 1개 토큰으로 뭉치기)으로 넣을지 설계가 더 필요합니다."
         )
+
+    # drop_probe_from_regression(2026-10-14 추가, 2026-10-21 transformer/i_transformer
+    # 지원 확장) — cap_head 입력에서 probe_x(N_HI칸)를 제외. MLPHead/ResNetTabHead는
+    # head_in을 그냥 생성자 인자로 받아 쓰므로 차원만 줄이면 되고, TransformerHead/
+    # ITransformerHead도 이제 drop_probe 인자를 받아 probe 토큰을 아예 안 만든다(아래
+    # 생성자 호출 참고). FTTransformerHead는 probe+scen을 하나의 연속 128-dim sparse-mask
+    # 블록으로 전제(self.n_hi = N_HI*2 고정, hi_pad 슬라이싱)하는 구조라 아직 미지원.
+    drop_probe = bool(model_cfg.get("drop_probe_from_regression", False))
+    if drop_probe and rtype not in ("mlp", "resnet_tab", "transformer",
+                                     "i_transformer", "itransformer"):
+        raise NotImplementedError(
+            f"drop_probe_from_regression=True는 아직 mlp/resnet_tab/transformer/"
+            f"i_transformer만 지원합니다 (rtype={rtype}). ft_transformer는 probe_x를 "
+            "scen_x와 함께 하나의 연속 sparse-mask 블록으로 구조에 박아뒀어서(self.n_hi) "
+            "probe_x 제거 시 함께 수정이 필요합니다."
+        )
+    # soc_ref_to_regression(ACTIVE_SOC_REF_TO_REGRESSION, 2026-10-20) — cap_head 입력에
+    # q_ref(참조용량, z-scored) 스칼라 1칸을 추가. drop_probe와 같은 이유로 토큰/임베딩
+    # 폭이 하드코딩된 Transformer류는 아직 미지원 — mlp/resnet_tab만 (head_in을 생성자
+    # 인자로 그냥 받아 쓰는 구조라 +1만 하면 끝).
+    soc_ref = bool(model_cfg.get("soc_ref_to_regression", False))
+    if soc_ref and rtype not in ("mlp", "resnet_tab"):
+        raise NotImplementedError(
+            f"soc_ref_to_regression=True는 아직 mlp/resnet_tab만 지원합니다 (rtype={rtype}). "
+            "다른 헤드는 입력 폭이 구조에 하드코딩돼 있어(TransformerHead 등) 스칼라 1칸을 "
+            "추가하려면 함께 수정이 필요합니다."
+        )
+
     head_in = (_HEAD_IN_WITH_CNN if with_raw_cnn else _HEAD_IN) + n_kernel_hi
+    if drop_probe:
+        head_in -= N_HI
+    if soc_ref:
+        head_in += 1
 
     if rtype == "mlp":
         return MLPHead(d_head=d_head, dropout=dropout,
@@ -409,6 +455,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
             with_raw_cnn=with_raw_cnn,
             n_kernel_hi=n_kernel_hi,
+            drop_probe=drop_probe,
         )
 
     if rtype in ("i_transformer", "itransformer"):
@@ -416,6 +463,7 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
             d_model=d_head, n_heads=n_heads,
             n_layers=n_layers, d_ff=d_ff, dropout=dropout,
             with_raw_cnn=with_raw_cnn, n_kernel_hi=n_kernel_hi,
+            drop_probe=drop_probe,
         )
 
     if rtype == "resnet_tab":

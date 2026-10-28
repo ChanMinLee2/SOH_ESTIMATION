@@ -87,7 +87,7 @@ from evaluation.scr_evaluator import SCREvaluator  # noqa: E402
 from common.scenario import get_segmenter  # noqa: E402
 
 from train import (  # noqa: E402 (중복 구현 금지)
-    _apply_kernel_features, _build_redundancy_mask,
+    _apply_kernel_features, _build_redundancy_mask, _build_probe_redundancy_mask,
 )
 
 
@@ -196,15 +196,21 @@ def _resolve_run_and_config(run_dir_arg: str) -> SimpleNamespace:
             f"{cfg_path} 없음 — train.py가 만든 run 디렉터리가 맞는지 확인하세요"
         )
     cfg = load_config(str(cfg_path))
-    if P.ACTIVE_DATA_DIR is not None:
-        cfg["data"]["data_dir"] = P.ACTIVE_DATA_DIR
-        print(f"[test_p1] data_dir 오버라이드: {P.ACTIVE_DATA_DIR}")
-    if P.ACTIVE_SEG_DATA_DIR is not None:
-        cfg["data"]["seg_data_dir"] = P.ACTIVE_SEG_DATA_DIR
-        print(f"[test_p1] seg_data_dir 오버라이드: {P.ACTIVE_SEG_DATA_DIR}")
+    # 데이터 경로는 이 run의 config.yaml 값을 그대로 쓴다. P.ACTIVE_DATA_DIR은 현재
+    # ACTIVE_AXIS_CONFIG에서 항상 계산돼 None이 될 수 없어서, 덮어쓰면 다른 축으로 학습된
+    # run을 지금 parameters.py의 축 데이터로 평가해버린다(파이프라인 안에서는 둘이 같음).
+    print(f"[test_p1] data_dir(config.yaml): {cfg['data']['data_dir']}")
+    print(f"[test_p1] seg_data_dir(config.yaml): {cfg['data']['seg_data_dir']}")
 
     summary_path = run_dir / "p1v2_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    # run 폴더 이름이 학습 후 바뀌면 summary에 박힌 절대경로가 깨진다 — 같은 파일명이
+    # 이 run 폴더 안에 있으면 그쪽으로 고쳐 쓴다.
+    for key in ("kernel_features_pkl", "combined_redundancy_json", "interaction_json", "synergy_groups_json"):
+        v = summary.get(key)
+        if v and not _resolve_summary_path(v).exists() and (run_dir / Path(v).name).exists():
+            summary[key] = str(run_dir / Path(v).name)
+            print(f"[test_p1] {key}: summary 경로 없음 — run 폴더의 {Path(v).name} 사용")
 
     return SimpleNamespace(device=device, run_dir=run_dir, cfg=cfg, summary=summary)
 
@@ -242,6 +248,7 @@ def _build_dataset_and_kernel(cfg: dict, summary: dict) -> SimpleNamespace:
     kernel_costs_by_scen = None
     combined_redundancy = None
     redundancy_mask = None
+    probe_redundancy_mask = None
     if combined_redundancy_json:
         combined_redundancy = json.loads(Path(combined_redundancy_json).read_text(encoding="utf-8"))
     if kernel_features_pkl:
@@ -257,11 +264,15 @@ def _build_dataset_and_kernel(cfg: dict, summary: dict) -> SimpleNamespace:
         redundancy_mask = _build_redundancy_mask(combined_redundancy, spec)
         print(f"[test_p1] combined-redundancy-json 자동 적용(p1v2_summary.json): {combined_redundancy_json} "
               f"(게이트 출력 0-강제만 적용, {int((~redundancy_mask).sum().item())}개 (시나리오,HI) 조합 배제)")
+        # persistent=False 버퍼라 체크포인트에 안 들어가므로 학습 때와 똑같이 다시 만들어야 한다 —
+        # 빠뜨리면 학습 중 0으로 강제됐던 probe HI가 평가 때 살아나 probe_x(회귀 입력)가 오염된다.
+        probe_redundancy_mask = _build_probe_redundancy_mask(combined_redundancy, spec)
+        print(f"[test_p1] probe_redundancy_mask 적용: {int((~probe_redundancy_mask).sum().item())}개 (방향,HI) 조합 배제")
 
     return SimpleNamespace(
         spec=spec, train_ds=train_ds, val_ds=val_ds, test_ds=test_ds, norm=norm,
         kernel_hi_counts=kernel_hi_counts, kernel_costs_by_scen=kernel_costs_by_scen,
-        redundancy_mask=redundancy_mask,
+        redundancy_mask=redundancy_mask, probe_redundancy_mask=probe_redundancy_mask,
     )
 
 
@@ -307,6 +318,7 @@ def _build_and_load_model(cfg: dict, data: SimpleNamespace, shared_hi_mask,
         kernel_hi_counts=data.kernel_hi_counts,
         kernel_hi_costs=data.kernel_costs_by_scen,
         redundancy_mask=data.redundancy_mask,
+        probe_redundancy_mask=data.probe_redundancy_mask,
     ).to(device)
     model.load_state_dict(ckpt["model_state"], strict=True)
     model.eval()

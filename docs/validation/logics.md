@@ -142,6 +142,9 @@ Nystroem+Ridge로 비선형 결합한 값이라 특정 raw 멤버 하나와 거�
   일관된지는 추가 run으로 더 봐야 함.
 - §6에서 제기된 "probe_redundancy_mask 단독 효과"를 깔끔히 분리하는 대조군
   run — 아직 미착수(필요성 논의 중).
+- §7에서 제안한 `drop_probe_from_regression` 플래그 구현 + 재학습 비교 —
+  아직 미착수. probe_x/scen_x 겹침이 다른 시드/run에서도 일관되는지 먼저
+  확인 필요.
 
 ## 6. 성능 비교 — `1002_1531`(마스크 없음) vs `1009_1342`(분류기용 마스크 적용)
 
@@ -187,3 +190,233 @@ oracle R² 기준 **+0.7%p** — §4.1(a vs c, 0.16%p 차이)보다 훨씬 큰 �
   있어, 0.7%p 전부를 이 메커니즘 하나로 단정하긴 이르다. **"probe_redundancy_mask만
   끄고 나머지는 1009_1342와 동일"한 대조군 run**이 있어야 인과관계를 깔끔하게
   분리할 수 있음(§5 남은 일).
+
+## 7. `probe_x`/`scen_x` 중복도 분석 — probe_x를 회귀기에서 분리하는 근거(2026-10-14)
+
+§6.2가 지적한 "`probe_x`가 분류기 전용이 아니라 회귀기(`cap_head`) 입력에도
+공용으로 들어간다"는 구조적 문제를, 마스크 유무가 아니라 **애초에 `probe_x`를
+`feat_parts = [probe_x, scen_x]`(`scr_model.py` forward())에서 빼야 하는 것
+아니냐**는 더 근본적인 질문으로 이어서 조사한 기록.
+
+### 7.1 배경 — 왜 이게 문제가 될 수 있는가
+
+- `probe_gate`(Stage A, `charge_probe_gate`/`discharge_probe_gate`)는 MSE(회귀)
+  와 CE(분류) 양쪽 그래디언트를 동시에 받는 구조다(`scr_model.py` 상단
+  docstring: "probe_gate receives gradients from BOTH MSE (regression) and
+  CE (classification)").
+- `noscen`(시나리오 라벨 없음, `assign="none"`) 조건에서는 분류 과제가
+  충전/방전 2-클래스로 퇴화하고 `direction`이 `probe_mlp`에 별도 피처로
+  직접 들어가므로, CE가 `probe_x`에 거의 의존하지 않고 0에 가깝게
+  떨어진다 — 실제로 `1011_1710_p1v2_noscen_full_seed42`의
+  `train_log_v2.csv`에서 `tr_ce`가 **전 에폭에 걸쳐 0.000000**으로 찍혀
+  있음을 확인(반면 `1009_1342_p1v2_baseline_seed42`는 ep1=1.008→
+  late=0.00068로 정상적으로 학습됨).
+- 즉 `scen`(정식 6-시나리오) run에서만 `probe_gate`가 CE로부터 실질적
+  그래디언트를 받고, 이게 같은 파라미터를 통해 회귀 입력(`probe_x`)에도
+  반영된다 — `scen` vs `noscen` 비교가 "시나리오 조건화 자체의 효과"뿐
+  아니라 이 공유-게이트 간섭까지 섞여 있을 가능성.
+
+### 7.2 실측 — probe_x와 scen_x가 고르는 HI가 얼마나 겹치는가
+
+`1009_1342_p1v2_baseline_seed42`의 `gates/classification_HIs.json`
+(probe_x, Stage A)과 `gates/regression_HIs.json`(scen_x, Stage B)을
+`gate_prob≥0.9`(기존 `docs/figures/fig5_hi_selection_trimmed.py`와 동일
+threshold) 기준으로 "선택됨" 판정 후, **HI 인덱스(0~63, `hi_cols_ref`
+라벨이 아니라 `_ranked_indices()`가 반환하는 실제 인덱스)** 기준으로 교집합 계산.
+(`hi_cols_ref`는 probe/scen이 공유하는 라벨용 이름표일 뿐이라 이름 문자열
+매칭은 부정확 — 인덱스 비교가 맞는 방법.)
+
+**활성 HI 개수**(threshold≥0.9):
+
+| | 활성 개수 |
+|---|---|
+| probe_charge | 16/64 |
+| probe_discharge | 17/64 |
+| chg_lo / chg_mid / chg_hi | 15 / 12 / 15 |
+| dis_hi / dis_mid / dis_lo | 13 / 13 / 13 |
+
+**probe(방향) ∩ scen(그 방향 소속 시나리오) 겹침**:
+
+| | 겹침/전체 |
+|---|---|
+| probe_charge(16) ∩ chg_lo(15) | 14 |
+| probe_charge(16) ∩ chg_mid(12) | 11 |
+| probe_charge(16) ∩ chg_hi(15) | 14 |
+| probe_discharge(17) ∩ dis_hi(13) | **13 (100%)** |
+| probe_discharge(17) ∩ dis_mid(13) | **13 (100%)** |
+| probe_discharge(17) ∩ dis_lo(13) | 11 |
+
+discharge 쪽은 `dis_hi`/`dis_mid`에서 scen_x가 고른 HI가 **전부** probe_x에도
+들어있고, charge 쪽도 87~93% 수준으로 거의 포개진다.
+
+### 7.3 해석 — probe_x 분리 제안의 근거
+
+- `probe_x`와 `scen_x`가 거의 같은 HI 조합을 고르고 있다면, 지금
+  `cap_head` 입력 `[probe_x, scen_x, ...]`은 새 정보를 더하기보다 **거의
+  같은 정보를 두 번 중복 투입**하고 있을 가능성이 높다.
+- 겹침이 이렇게 크면 **probe_x를 회귀 입력에서 빼도 정보 손실은 적을
+  것으로 예상**되는 반면, `probe_gate`는 CE 전용 그래디언트만 받게 되어
+  §7.1의 "공유 게이트 간섭" 경로가 구조적으로 차단된다.
+- **제안하는 변경**(2026-10-14 구현 완료): `SCRModel`에 `drop_probe_from_regression`
+  플래그를 추가해 `feat_parts = [scen_x, ...]`(probe_x 제외)로 cap_head
+  입력을 구성 — `probe_mlp`(분류기)는 그대로 `probe_x`를 받으므로 CE
+  학습 자체엔 영향 없음. Phase 1 기본 헤드(`MLPHead`)/`resnet_tab`만 지원
+  (`cap_heads.py`의 `_HEAD_IN` 상수 및 Transformer/i_transformer 헤드의
+  `x[:, :N_HI]`/`x[:, N_HI:2*N_HI]` 슬라이싱은 다른 헤드 타입 전용이라
+  이 ablation 범위 밖 — 조합 시 `NotImplementedError`). 합성 데이터
+  smoke test로 forward+backward 정상 동작 확인(`cap_head` 입력 차원이
+  의도대로 `N_HI`만큼 줄어듦, `probe_gate`는 여전히 0 아닌 그래디언트
+  받음 — CE 경로는 살아있고 MSE 경로만 끊김).
+- **유보**: 겹침 분석은 `1009_1342` run(seed42) 하나에 대한 스냅샷이다 —
+  다른 시드/run에서도 겹침 정도가 일관되는지, 그리고 실제로
+  `drop_probe_from_regression=True`로 재학습했을 때 oracle/hard 성능이
+  어떻게 변하는지는 아직 미검증(§5 "남은 일"에 추가할 항목, §7.4도 참고).
+
+### 7.4 결론 — probe_x는 회귀기에서 빼는 게 맞다(2026-10-16)
+
+§7.2/7.3의 겹침 분석과 §6.2의 0.7%p 성능 이동 관찰을 종합한 최종 판단.
+
+- **구조적 근거**: `probe_x`/`scen_x` 겹침이 방향에 따라 65~100%에 달해,
+  `probe_x`를 회귀 입력에 추가해도 **새 정보가 거의 없다** — 거의 같은
+  정보를 두 번 넣는 것에 가깝다.
+- **실측 근거**: §6.2에서 "분류기 전용"으로 설계한 `probe_redundancy_mask`
+  변경이 **oracle 회귀 성능(분류기 예측과 무관한 지표)을 0.7%p 움직였다**
+  — 분류기와 회귀기가 의도와 달리 결합돼 있다는 직접 증거.
+- **리뷰어 방어 관점**: `probe_x`를 유지하면 논문이 (1) 공유 구조의
+  정당성, (2) 중복 선택의 의미, (3) §7.1의 그래디언트 간섭 가능성까지
+  **세 가지를 동시에 방어**해야 한다. 제거하면 (1)(2)가 질문 대상에서
+  사라지고, "분류기=배포 라우팅 전용, 회귀기=순수 회귀 목적 게이트"라는
+  더 간결한 설명으로 대체된다.
+- **아직 확정 아님**: 위 근거는 모두 간접적(인덱스 겹침, 성능 이동의
+  상관관계)이다. `drop_probe_from_regression=True`로 실제 수렴까지
+  학습해 RMSE/R²가 유지되는지 확인해야 이 권고가 "결과로 뒷받침된
+  설계 변경"이 된다 — 확인되면 ablation이 아니라 **메인 아키텍처**로
+  승격하는 것을 권고.
+
+## 8. q_ref(SOC reference)가 분류기/회귀기 입력에 안 들어가는지 검증 (2026-10-21)
+
+`docs/writing/#2_METHODOLOGY.md` 2.2절의 주장("이 노이즈 모델은 시나리오 축[라벨]을
+정의하는 데만 쓰이고, 분류기나 회귀기(§2.6)의 입력으로는 절대 들어가지 않는다")을
+코드로 직접 추적 검증한 기록.
+
+### 8.1 결론 — 기본 설정에서는 참, 단 명시적 예외(토글) 하나 존재
+
+**부분 확인(PARTIALLY CONFIRMED WITH CAVEAT)**: 기본 파이프라인
+(`ACTIVE_SOC_REF_TO_REGRESSION=False`)에서는 claim이 정확하다. 그런데
+`model_lib/models/scr_model.py`에 **`soc_ref_to_regression` 토글이 있어 켜면
+q_ref 값 자체가 회귀기(`cap_head`) 입력에 직접 추가**된다 — 죽은 코드가 아니라
+`run_socref_sweep.py`가 실제로 스윕하는 활성 ablation 경로다(마침 지금 진행 중인
+`1020_1220_p1v2_socref_scen_seed42` run이 바로 이 토글을 켠 실행으로 보임).
+"never"라는 절대적 표현은 코드 전체 기준으로는 부정확 — 본문에서는 "기본
+설정에서는"이라는 조건을 달아야 한다.
+
+### 8.2 세부 검증(파일:라인)
+
+- **Step 4 — 존 경계는 고정 상수, noisy q_ref는 멤버십 판정에만 사용**:
+  `common/scenario/q_frac_ref.py:511-534`(`_normalizer()`)이 OU 노이즈를 주입한
+  `q_ref`(`q_ref_raw * (1+noise_frac)`)를 반환하고, `q_frac_wide.py:398-416`
+  (`_extract()`)이 이 값을 분모로 세그먼트가 어느 존에 속하는지만 판정한다.
+  저장되는 `q_frac_lo`/`q_frac_hi` 컬럼(`q_frac_wide.py:412-413`)은 0.0/0.4/0.7/1.0
+  같은 **고정 경계 상수**이고, noisy 분모로 나눈 값이 아니다. 노이즈가 섞인
+  분모 자체는 `q_ref`라는 별도 컬럼으로 메타데이터에만 남는다
+  (`q_frac_wide.py:415`, `4_hi_analysis/logics.py:208`).
+- **raw HI 값 자체는 q_ref 노이즈와 무관**: `lfp_inflect_q_frac`/
+  `lfp_plateau_q_onset`(`4_hi_analysis/tools/hi_compute.py:643`/`702`)처럼
+  이름에 "q_frac"이 들어간 HI도, 전부 그 세그먼트 **자신의** raw v/|i|/dt
+  배열로 만든 `_build_vq_curve`(같은 파일 220행) 기반이라 q_frac_ref의
+  전역 noisy 분모와는 독립적이다. (`stat_q_abs`/`stat_energy_seg`는 별개의
+  누수 우려 — 현재/과거 용량 비교 문제이고 q_ref 노이즈와는 무관.)
+- **`segment_dataset.py` — x_hi에서 q_frac_lo/q_ref 제외**: `_NATIVE_HI_COLS`
+  (119행)는 stat_/diff_/lfp_/morph_ 접두사만 포함(`hi_schema.py:145-149`
+  `get_native_hi_cols()`). `q_frac_lo`/`q_ref`는 184-194행에서 `_hi_cols`가
+  아니라 205행의 `meta_cols`로 분리돼 애초에 텐서에 안 들어간다.
+  `scen_idx`/`direction`/`level`도 `q_frac_lo`가 아니라 `segment_id` →
+  `spec.scenario_to_dir_class`(179-182행)로 역산된다.
+- **`scr_model.py::forward()` — 기본은 제외, 토글로 포함 가능**: 기본
+  `feat_parts = [probe_x, scen_x, (kernel_x,) direction, cap_init]`
+  (616-631행)에 q_ref는 없다. `cap_init`은 셀의 실측 첫 사이클 용량(또는
+  고정 공칭용량)으로, q_ref의 lag/노이즈 메커니즘과 무관하다. 다만
+  625-626행: `if self.soc_ref_to_regression: feat_parts.append(batch["q_ref"].unsqueeze(1))`
+  — 플래그가 켜지면 z-score된 q_ref를 그대로 추가한다.
+- **토글 배선**: `parameters.py:58` `ACTIVE_SOC_REF_TO_REGRESSION = False`(기본)
+  → `model_cfg["soc_ref_to_regression"]`(`parameters.py:280`,
+  `cap_heads.py:429-436`) → `segment_dataset.py`가 `q_ref_mean_`/`q_ref_std_`로
+  z-score해 `SegmentDataset.__getitem__`(475행)에서 배치에 포함
+  (`"q_ref": self.q_ref[idx]`). `run_socref_sweep.py:60-64,88`이 이 플래그를
+  `True`로 놓고 실제로 스윕한다.
+
+### 8.3 논문 서술 수정 권고
+
+"it is never an input to the classifier or the regressor"는 **기본 설정 한정**으로
+완화해야 한다 — 예: "...it is never an input to the classifier or the regressor
+**in the default configuration reported here**; §3.x reports a controlled ablation
+(`soc_ref_to_regression`) that instead gives the regressor direct access to $q_\text{ref}$ and
+causes [결과]." 지금 문장 뒤에 이미 "an ablation that instead gave the regressor
+direct access to $q_\text{ref}$ caused severe validation overfitting..."라는 절이
+붙어 있어 이 ablation 자체는 이미 언급돼 있다 — 다만 앞 절의 "never"가 그
+ablation과 모순되는 절대적 표현이라는 점만 손보면 된다.
+
+## 9. 평가 코드(`9_eval/test.py`)가 `probe_redundancy_mask`를 빠뜨린 버그 (2026-10-25)
+
+### 9.1 증상
+`drop_probe_from_regression=False`(probe_x를 회귀 입력에도 사용)인 noscen run들이 test에서
+R²가 음수까지 붕괴(`1022_0416` -5.2, `1024_0347` -3.4). 그런데 학습 로그의 val은 정상(R²≈0.94)이고,
+같은 체크포인트를 `test.py` 경로로 train/val split에 돌려도 똑같이 붕괴 — test 셀 분포 문제가 아니라
+"평가 때 재구성한 모델이 학습된 모델과 다름"이 원인.
+
+### 9.2 원인
+- `train.py::t3_build_tensor_masks`는 §2.5의 분류기용 마스크(`probe_redundancy_mask`, (2, N_HI))를
+  만들어 `SCRModel`에 넘기는데, `test.py::_build_and_load_model`은 이를 넘기지 않았다.
+- `SCRModel`은 이 마스크를 `register_buffer(..., persistent=False)`로 등록 → 체크포인트에 저장되지 않고,
+  `load_state_dict(strict=True)`도 이 누락을 잡지 못한다.
+
+### 9.3 왜 일부 run만 망가지나 — 마스크된 칸의 게이트가 열려 있을 때만
+`probe_x[i] = x[i] × z[i](게이트) × m[i](마스크)`, 마스크된 HI는 학습 내내 `m[i]=0`:
+1. 출력이 항상 0이라 손실이 게이트 `z[i]`에 그래디언트를 주지 않는다 — 닫는 힘은 L0 패널티뿐이라
+   학습이 끝나도 열린 채(`log_alpha > ln(1/11)`, 평가 시 z=1) 남을 수 있다.
+2. 이 칸을 받는 다음 층 가중치도 입력이 늘 0이라 그래디언트가 0 → 초기 랜덤값 그대로
+   (AdamW lr 2e-4·wd 1e-3로는 수십만 step 동안 약 3%만 줄어듦).
+
+평가 때 마스크가 빠지면 게이트가 닫힌 칸은 여전히 0이라 무해하지만, 열린 칸에는 학습 때 한 번도 본
+적 없는 실제 HI 값이 랜덤 가중치를 거쳐 들어가 예측이 체계적으로 밀린다. scen은 마스크가 방향 내
+시나리오 3개 **교집합**이라 2~6개뿐이고 게이트도 전부 닫혀 있어 영향이 0, noscen은 방향당
+13/12개가 마스크되고 그중 일부 게이트가 열린 채 남아 누수가 생겼다. `drop_probe_from_regression=True`
+run에서는 probe_x가 분류기에만 들어가므로 hard/soft만 영향(noscen은 hard=oracle이라 무영향).
+
+### 9.4 조치
+- `test.py`가 `train.py::_build_probe_redundancy_mask`를 그대로 import해 모델에 넘기도록 수정.
+  `9_eval/scenario_attribution.py`, `docs/figures/_extract_embedding.py`는 `test.py` 로더를 재사용하므로
+  함께 고쳐짐. `model_lib/tools/visualize_results.py`는 별도 구현이라 두 마스크 모두 여전히 누락(미수정).
+- 검증(`1024_0347`): 마스크 복원 시 train/val/test RMSE 0.1725/0.1616/0.1595 → 0.0140/0.0198/0.0217
+  (test R² -3.43 → 0.9238).
+- 체크포인트에서 "마스크된 HI 중 평가 시 게이트가 열리는 수"를 전 run 스캔 → 0이 아닌 8개 run만
+  재평가 대상(재학습 불필요, Step 9만): 회귀까지 오염 `1010_1118`, `1011_1035`, `1022_0416`,
+  `1022_1626`, `1024_0347`, `1024_1522` / 분류기만 오염 `1016_1211`, `1018_0755`.
+  기존 산출물은 각 run의 `_backup_pre_probe_mask_fix/`에 백업.
+
+### 9.5 재평가 중 발견한 두 번째 문제 — 평가 데이터 경로
+- `test.py`는 `P.ACTIVE_DATA_DIR`/`P.ACTIVE_SEG_DATA_DIR`이 None이 아니면 run의 `config.yaml` 데이터
+  경로를 덮어썼는데, 이 값은 현재 `ACTIVE_AXIS_CONFIG`에서 항상 계산돼 None이 될 수 없다. 파이프라인
+  안(학습 직후 Step 9)에서는 둘이 같아 무해하지만, 단독 재평가에서는 **지금 parameters.py의 축**으로
+  평가된다. 1차 재평가 때 scen run(`1011_1035`, `1016_1211`, `1018_0755`)이 noscen·n2=20% 캐시로 평가돼
+  oracle까지 붕괴(예: `1018_0755` 0.843 → -10.35)한 것이 이 때문 — 마스크 수정과 무관.
+- 조치: `test.py`가 데이터 경로는 항상 run의 `config.yaml` 값을 쓰도록 수정. 같은 함수에서, 학습 후 run
+  폴더 이름이 바뀌어 `p1v2_summary.json`의 절대경로가 깨진 경우(`1010_1118`) 같은 파일명을 run 폴더
+  안에서 찾도록 보강.
+
+### 9.6 재평가 결과 (oracle R² / hard R² / hard 분류정확도, 수정 전 → 후)
+
+| run | 수정 전 | 수정 후 |
+|---|---|---|
+| `1010_1118` warmstart150 (probe 회귀 포함) | 0.9429 / 0.9429 / 100% | 0.9453 / 0.9453 / 100% |
+| `1011_1035` warmstart200 (probe 회귀 포함) | 0.9115 / 0.9074 / 98.25% | **0.9474 / 0.9474 / 99.98%** |
+| `1016_1211` no_gate (probe 회귀 제외) | 0.9455 / 0.8009 / 94.72% | 0.9455 / **0.9455** / 100% |
+| `1018_0755` n2=5% scen (probe 회귀 제외) | 0.8430 / 0.7383 / 82.25% | 0.8430 / **0.8419** / 99.33% |
+| `1022_0416` noscen mlp probe ws100 | -5.2152 | **0.9288** |
+| `1022_1626` noscen transformer probe ws100 | 0.7711 | **0.9392** |
+| `1024_0347` noscen mlp probe nowarm | -3.4323 | **0.9278** |
+| `1024_1522` noscen transformer probe nowarm | 0.9388 | 0.9388 (변화 없음) |
+
+probe 회귀 제외 run(`1016_1211`, `1018_0755`)은 oracle이 그대로이고 hard만 바뀌어 9.3의 메커니즘과 일치.
+이 결과로 뒤집히는 기존 해석: warmstart=200 "붕괴"(분기 시점 이후 그래디언트 소실 가설)와 n2=5%의
+"분류기 정확도 붕괴/`dis_mid` 30.9%"는 둘 다 이 버그의 산물이었다.

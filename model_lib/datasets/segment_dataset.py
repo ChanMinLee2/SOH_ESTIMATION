@@ -199,7 +199,10 @@ def load_dataset_native_seg(
             # 있을 때(예: q_frac_wide n_samples=2) 이 값으로 시간순 정렬해 세그먼트별 궤적
             # 플랏(capacity_curve_*.png)에서 n_samples를 뭉개지 않고 개별 라인으로 그릴 수
             # 있게 한다(2026-09-18, scr_evaluator.py._plot_capacity_curves).
-            meta_cols = [c for c in ("q_frac_lo",) if c in df.columns]
+            # q_ref: ACTIVE_SOC_REF_TO_REGRESSION 실험용(2026-10-20) — q_frac의 분모로
+            # 쓰인 참조용량 절대값(Ah, q_frac_ref 축이면 노이즈/재보정 반영). 없는(구) pkl은
+            # 아래 SegmentDataset에서 0.0 폴백.
+            meta_cols = [c for c in ("q_frac_lo", "q_ref") if c in df.columns]
             df = df[keep + raw_cols + meta_cols].dropna(subset=["capacity_Ah"])
             # HI 66개가 전부 NaN인 세그먼트 제외 — hi_correlation.py가 계산 자체를
             # 못한 경우(예: 충전 데이터 부족으로 q_tc < cap*0.6, _chg_incomplete)로,
@@ -230,6 +233,8 @@ class SegmentNormalizer:
         self.std_: np.ndarray | None = None   # (N_HI,)
         self.cap_init_mean_: float = 0.0   # cap_init z-score 전용 (SOH target과 무관)
         self.cap_init_std_: float = 1.0
+        self.q_ref_mean_: float = 0.0      # q_ref(ACTIVE_SOC_REF_TO_REGRESSION) z-score 전용
+        self.q_ref_std_: float = 1.0
 
     @property
     def hi_cols(self) -> list[str]:
@@ -257,6 +262,20 @@ class SegmentNormalizer:
         self.cap_init_std_ = float(np.nanstd(cap))
         if self.cap_init_std_ < 1e-8:
             self.cap_init_std_ = 1.0
+
+        # q_ref_mean_/q_ref_std_: ACTIVE_SOC_REF_TO_REGRESSION용. 구 pkl(컬럼 없음)이면
+        # 0.0/1.0 no-op로 둔다 — 그 경우 SegmentDataset.q_ref 자체가 전부 0.0 폴백이라
+        # 정규화 통계가 의미 없으므로 상수로 둬도 문제없다.
+        if "q_ref" in df.columns:
+            qref = df["q_ref"].values.astype(np.float64)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                self.q_ref_mean_ = float(np.nanmean(qref))
+                self.q_ref_std_ = float(np.nanstd(qref))
+            if not np.isfinite(self.q_ref_mean_):
+                self.q_ref_mean_ = 0.0
+            if not np.isfinite(self.q_ref_std_) or self.q_ref_std_ < 1e-8:
+                self.q_ref_std_ = 1.0
         return self
 
     def transform_x(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -272,6 +291,10 @@ class SegmentNormalizer:
     def transform_cap_init(self, cap: np.ndarray) -> np.ndarray:
         """cap_init Ah → z-scored (모델 conditioning 입력용)."""
         return ((cap - self.cap_init_mean_) / self.cap_init_std_).astype(np.float32)
+
+    def transform_q_ref(self, q_ref: np.ndarray) -> np.ndarray:
+        """q_ref(참조용량 Ah) → z-scored (ACTIVE_SOC_REF_TO_REGRESSION 모델 입력용)."""
+        return ((q_ref - self.q_ref_mean_) / self.q_ref_std_).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +390,8 @@ class SegmentDataset(Dataset):
       target     : 스칼라     SOH 비율 = capacity_Ah / cap_init_Ah ∈ (0, 1] [float32]
       dataset_id : 스칼라     데이터셋 인덱스(datasets 리스트 순서, 0-based) [float32]
       cap_init   : 스칼라     z-scored 초기/정격 용량 Ah(모델 conditioning용) [float32]
+      q_ref      : 스칼라     z-scored 참조용량 Ah(ACTIVE_SOC_REF_TO_REGRESSION 입력용,
+                              컬럼 없는 구 pkl은 0.0 폴백) [float32]
 
     속성(__getitem__에는 안 들어감):
       cap_init_raw  : (N,) float32 numpy — 초기/정격 용량 Ah(평가 시 SOH→Ah 변환용)
@@ -421,6 +446,17 @@ class SegmentDataset(Dataset):
                           else [0.0] * len(df))
         self.capacity_raw = cap_raw
 
+        # q_ref 모델 입력(ACTIVE_SOC_REF_TO_REGRESSION, 2026-10-20) — q_frac 분모로 쓰인
+        # 참조용량(Ah)을 z-score해 cap_init과 같은 스케일로 맞춘다. 컬럼 없는 구 pkl은
+        # 0.0 폴백(정규화 통계도 fit()에서 0.0/1.0 no-op이라 일관됨) — 플래그를 꺼두면
+        # 이 텐서는 forward()에서 아예 안 읽히므로 폴백값이라도 안전하다.
+        if "q_ref" in df.columns:
+            q_ref_raw = df["q_ref"].values.astype(np.float32)
+            q_ref_norm = normalizer.transform_q_ref(q_ref_raw)
+        else:
+            q_ref_norm = np.zeros(len(df), dtype=np.float32)
+        self.q_ref = torch.tensor(q_ref_norm, dtype=torch.float32)
+
     def __len__(self) -> int:
         """전체 세그먼트(샘플) 개수."""
         return len(self.target)
@@ -436,6 +472,7 @@ class SegmentDataset(Dataset):
             "scen_idx":   self.scen_idx[idx],
             "target":    self.target[idx],
             "cap_init":  self.cap_init[idx],
+            "q_ref":     self.q_ref[idx],
         }
 
 
@@ -455,7 +492,7 @@ class FastTensorLoader:
     """
 
     _MODEL_KEYS = ["x_hi", "nan_mask", "direction", "level",
-                   "scen_idx", "target", "cap_init"]
+                   "scen_idx", "target", "cap_init", "q_ref"]
 
     def __init__(
         self,

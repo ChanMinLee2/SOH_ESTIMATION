@@ -222,6 +222,13 @@ def run_step(
     print(f"{'='*60}")
 
     env = os.environ.copy()
+    # 2026-10-17: 출력이 콘솔이 아니라 파일/파이프로 리다이렉트되면(예: run_n2_sweep.py
+    # 같은 스윕 드라이버) Windows Python은 stdout 인코딩을 콘솔 코드페이지(cp949)로
+    # 잡는다 — 일부 스텝 스크립트의 로그 문구에 em dash(—) 등 cp949로 표현 안 되는
+    # 문자가 있으면 UnicodeEncodeError로 그 스텝이 "실패" 처리된다(실제 연산/저장은
+    # 끝난 뒤 마지막 print에서만 죽는 경우도 있음). UTF-8을 강제해서 이 클래스의
+    # 거짓 실패를 막는다.
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     if extra_env:
         env.update(extra_env)
 

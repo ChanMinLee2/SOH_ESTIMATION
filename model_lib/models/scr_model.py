@@ -8,6 +8,9 @@ Stage A — direction-aware probe gate (dual objective)
      Phase 1 (with_probe_mlp=True):
        probe_gate receives gradients from BOTH MSE (regression) and CE (classification)
        → selects HIs useful for both tasks simultaneously
+       (drop_probe_from_regression=True면 MSE 경로가 끊겨 CE 전용이 됨 — 2026-10-14
+       추가, probe_x/scen_x 선택 중복이 큰 것(docs/validation/logics.md §7)에 대한
+       실험용 토글)
      Phase 2 / inference: probe_gate frozen from Phase 1 JSON (regression utility only)
 
 Stage B — scenario-conditioned regression
@@ -218,6 +221,16 @@ class SCRModel(nn.Module):
         # || direction (1) || cap_init (1). Phase 1: 항상 MLP(model_cfg=None). Phase 2:
         # model_cfg["regression_model"]에 따라 mlp/transformer/i_transformer/resnet_tab/
         # ft_transformer.
+        # drop_probe_from_regression(2026-10-14): probe_x가 scen_x와 거의 같은 HI를
+        # 고르면서도(docs/validation/logics.md §7) MSE+CE 양쪽 그래디언트를 받아
+        # probe_gate를 간섭할 수 있다는 가설 검증용 — True면 probe_x를 cap_head
+        # 입력에서 빼고(forward() 참고) probe_gate는 CE 전용이 된다.
+        self.drop_probe_from_regression = bool((model_cfg or {}).get("drop_probe_from_regression", False))
+        # soc_ref_to_regression(ACTIVE_SOC_REF_TO_REGRESSION, 2026-10-20): q_frac의 분모로
+        # 쓰인 참조용량(q_ref, z-scored)을 cap_head 입력에 스칼라 1칸 추가 — "회귀기가
+        # SOC 참조값을 직접 보면 어떻게 되는가"를 재는 실험용 토글(docs/validation/logics.md
+        # §7 연장 논의). True면 forward()에서 feat_parts에 batch["q_ref"]를 덧붙인다.
+        self.soc_ref_to_regression = bool((model_cfg or {}).get("soc_ref_to_regression", False))
         self.cap_head = build_cap_head(model_cfg or {}, d_head=d_head, dropout=dropout,
                                         n_kernel_hi=self.n_kernel_hi)
 
@@ -590,15 +603,18 @@ class SCRModel(nn.Module):
         x = x * nan_mask  # NaN positions → 0
 
         # Stage A: direction-aware probe gate
-        # MSE gradient → probe_gate (regression signal)
+        # MSE gradient → probe_gate (regression signal, drop_probe_from_regression=False일 때만)
         # CE gradient  → probe_gate via probe_mlp (classification signal, Phase 1 only)
+        # drop_probe_from_regression=True면 probe_x는 probe_mlp(분류기)에만 쓰이고
+        # cap_head(회귀)에는 안 들어가 — probe_gate가 CE 전용이 된다(§scr_model.py
+        # __init__ 주석, docs/validation/logics.md §7 참고).
         probe_x, probe_z = self._apply_probe_gate(x, direction, scen_idx)
 
         # Stage B: scenario-conditioned gate (MSE gradient only)
         scen_x, scen_z = self._apply_scen_gate(x, scen_idx) # (B, N_HI)
 
-        # Capacity head: probe_x + scen_x [+ 커널 융합 HI] + direction + cap_init
-        feat_parts = [probe_x, scen_x]
+        # Capacity head: [probe_x +] scen_x [+ 커널 융합 HI] + direction + cap_init
+        feat_parts = [scen_x] if self.drop_probe_from_regression else [probe_x, scen_x]
         if self.scen_kernel_gates is not None:
             x_kernel = batch["x_kernel"]                     # (B, n_kernel_hi), 이미 정규화됨
             kernel_x, kernel_z = self._apply_scen_kernel_gate(x_kernel, scen_idx)
@@ -606,7 +622,12 @@ class SCRModel(nn.Module):
         else:
             kernel_z = None
         feat_parts += [direction.unsqueeze(1), batch["cap_init"].unsqueeze(1)]
-        feat = torch.cat(feat_parts, dim=1)                  # (B, 2*N_HI+2) 또는 (B, 2*N_HI+n_kernel_hi+2)
+        if self.soc_ref_to_regression:
+            feat_parts.append(batch["q_ref"].unsqueeze(1))
+        feat = torch.cat(feat_parts, dim=1)                  # drop_probe_from_regression=False(기본):
+                                                              # (B, 2*N_HI+2) 또는 (B, 2*N_HI+n_kernel_hi+2)
+                                                              # drop_probe=True: 위에서 N_HI만큼 뺌
+                                                              # soc_ref_to_regression=True: +1(q_ref)
         cap_pred = self.cap_head(feat)                       # (B,)
 
         # CE head: [probe_x || direction [|| 커널 후보]] → class logits

@@ -10,6 +10,11 @@
 *.pth
 *.pt
 *.yaml
+*.tex
+*.cls
+*.zip
+*.bst
+*.sty
 ./docs/date_results/*
 *_RESULTS.md
 *.log
@@ -17,3 +22,4 @@
 /1_convert/TJU/*
 *.egg-info/
 build/
+docs/writing/*

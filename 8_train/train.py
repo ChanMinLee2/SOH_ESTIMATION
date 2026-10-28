@@ -661,6 +661,17 @@ def t5_define_output_paths(params: SimpleNamespace, data: SimpleNamespace, hyper
     cfg.setdefault("data", {})["exclude_stat_leak"] = EXCLUDE_STAT_LEAK
     cfg["data"]["exclude_dqdv_leak"] = EXCLUDE_DQDV_LEAK
     save_config(cfg, output_dir / "config.yaml")
+    # 2026-10-20: config.yaml은 "해석된" 설정(P1_MODEL_CONFIG 병합 결과)만 담고,
+    # ACTIVE_FROM_STEP/ACTIVE_FORCE_EXTRACT/ACTIVE_WARMSTART_BRANCH_EPOCH처럼 config.yaml에
+    # 안 들어가는 parameters.py 최상위 값들은 run 산출물만 보고는 복원이 안 됐다 — 이 run을
+    # 만든 parameters.py 원문 전체를 그대로 텍스트 스냅샷으로 남겨서, 나중에 "이 결과가 정확히
+    # 어떤 설정에서 나왔는지"를 항상 재구성할 수 있게 한다.
+    try:
+        (output_dir / "parameters_snapshot.txt").write_text(
+            Path(P.__file__).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    except OSError as e:
+        print(f"[p1v2] [경고] parameters_snapshot.txt 저장 실패(학습은 계속 진행): {e}")
     _early_summary = {
         "tag": params.tag, "seed": params.seed, "split_seed": params.split_seed,
         "lambda_l0_used": hyperparams.loss_cfg["lambda_l0"],

@@ -202,6 +202,10 @@ def _extract_segment_rows(rec_iter, spec_names: list, dataset: str, cell_id: str
             "zone": _rec.meta.get("zone"),
             "q_frac_lo": _rec.meta.get("q_frac_lo"),
             "q_frac_hi": _rec.meta.get("q_frac_hi"),
+            # 2026-10-20: ACTIVE_SOC_REF_TO_REGRESSION 실험용 — q_frac의 분모로 쓰인
+            # (노이즈 낀) 참조용량 절대값(Ah). q_frac_wide.py::_extract의 q_tot
+            # 그대로(q_frac_ref 축이면 ref_lag/노이즈/재보정까지 반영된 값).
+            "q_ref": _rec.meta.get("q_ref"),
         }
         _srow.update(_strip_seg_suffix(_seg_stat(vs, ims, dts, qcs, seg), seg))
         _srow.update(_strip_seg_suffix(_seg_diff(vs, ims, dts, qcs, seg), seg))

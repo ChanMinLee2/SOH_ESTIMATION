@@ -360,7 +360,7 @@ class QFracWideSegmenter(Segmenter):
                         scenario_id=scenario_id, latent_class=_latent,
                         direction=direction,
                         v=v[w], i=i[w], dt=dt[w], q=q[w],
-                        meta={"zone": zone_name, "random": True,
+                        meta={"zone": zone_name, "random": True, "q_ref": q_tot,
                               "q_frac_lo": float(q[w[0]] / q_tot),
                               "q_frac_hi": float(q[w[-1]] / q_tot)},
                     ))
@@ -412,6 +412,7 @@ class QFracWideSegmenter(Segmenter):
                     "q_frac_lo": start_qf,
                     "q_frac_hi": end_qf,
                     "seg_len":   float(end_qf - start_qf),
+                    "q_ref":     q_tot,
                 }
                 if extra_meta:
                     _meta.update(extra_meta)
