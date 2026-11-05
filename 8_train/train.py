@@ -62,7 +62,7 @@ from common.scenario import get_segmenter  # noqa: E402
 # 게이트 확률 JSON 저장/로드는 model_lib/utils/gate_io.py 단일 소스(2026-09-24 —
 # model_lib/legacy/train_scr.py(Stage0)에서 v4가 실제 쓰는 부분만 옮기고 파일은 삭제).
 from utils.gate_io import (  # noqa: E402
-    _save_probe_masks_to_json, _save_scen_masks_to_json,
+    _save_probe_masks_to_json, _save_scen_masks_to_json, _save_effective_regression_his,
 )
 # 시각화는 전부 8_train/plot.py(이 폴더 로컬, 2026-10-02에 _plot_gate_probs를
 # gate_io.py에서 이쪽으로 이동 — 6_synergy/plot.py·7_kernel/plot.py와 동일 관례).
@@ -416,6 +416,15 @@ def t1_set_params_and_config() -> SimpleNamespace:
     scen_k = reg_cfg.get("scen_k_count", 5)
 
     spec = get_segmenter(seg_axis, {seg_axis: axis_cfg}).get_spec()
+
+    # 2026-11-03: 분기 전 공유 게이트 수(방향별 2개, t5의 n_gate_groups)가 시나리오 수 이상이면
+    # (noscen = chg/dis 2개) 분기는 같은 게이트를 그대로 복제하는 no-op인데, 분기 시점의 옵티마이저
+    # 모멘텀 리셋만 남아 nowarm과 결과가 달라졌다(1022_0416 vs 1024_0347: epoch 99까지 로그 동일,
+    # epoch 100부터 갈라짐). 이 경우 warmstart를 끄고 nowarm과 완전히 같은 경로로 학습한다.
+    if warmstart_branch_epoch is not None and spec.n_scenarios <= 2:
+        print(f"[p1v2] warmstart-branch-epoch={warmstart_branch_epoch} 무시: 시나리오 {spec.n_scenarios}개는 "
+              f"방향별 공유 게이트 2개와 같아 분기가 no-op이므로 nowarm과 동일하게 학습")
+        warmstart_branch_epoch = None
 
     return SimpleNamespace(
         seed=seed, split_seed=split_seed, tag=tag, device=device, cfg=cfg, spec=spec,
@@ -896,6 +905,7 @@ def t7_save_results(params: SimpleNamespace, data: SimpleNamespace, hyperparams:
     hi_cols_by_seg = {s: get_hi_cols_for_seg(spec.scenario_names[s]) for s in range(spec.n_scenarios)}
     _save_probe_masks_to_json(model, output_dir / "gates" / "classification_HIs.json", hi_cols_ref)
     _save_scen_masks_with_shared(model, output_dir / "gates" / "regression_HIs.json", hi_cols_by_seg)
+    _save_effective_regression_his(model, output_dir / "gates" / "regression_effective_HIs.json", hi_cols_by_seg)
 
     if data.kernel_names_by_scen is not None:
         # 2026-09-18부터 커널 피처는 시나리오별 로컬 인덱스 공간(폭 K_s, own 커널만) —

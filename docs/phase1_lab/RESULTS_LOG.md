@@ -2465,3 +2465,525 @@
 - **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
 
 ---
+
+### 2026-10-28 18:16 — synergy_groups_hi63_scen_mlp_union_nowarm_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1028_1813_p1v2_hi63_scen_mlp_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1028_1813_p1v2_hi63_scen_mlp_union_nowarm_seed42\synergy_groups_hi63_scen_mlp_union_nowarm_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-28 18:19 — kernel_group_features_hi63_scen_mlp_union_nowarm_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1028_1813_p1v2_hi63_scen_mlp_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1028_1813_p1v2_hi63_scen_mlp_union_nowarm_seed42\kernel_group_features_hi63_scen_mlp_union_nowarm_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1028_1813_p1v2_hi63_scen_mlp_union_nowarm_seed42\kernel_group_features_hi63_scen_mlp_union_nowarm_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-29 00:18 — synergy_groups_hi63_noscen_mlp_union_nowarm_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0015_p1v2_hi63_noscen_mlp_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0015_p1v2_hi63_noscen_mlp_union_nowarm_seed42\synergy_groups_hi63_noscen_mlp_union_nowarm_groups.json`
+- **핵심 수치**: 전체 HI 29개 -> 그룹 29개, 평균 그룹 크기 2.97
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-29 00:22 — kernel_group_features_hi63_noscen_mlp_union_nowarm_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0015_p1v2_hi63_noscen_mlp_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0015_p1v2_hi63_noscen_mlp_union_nowarm_seed42\kernel_group_features_hi63_noscen_mlp_union_nowarm_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0015_p1v2_hi63_noscen_mlp_union_nowarm_seed42\kernel_group_features_hi63_noscen_mlp_union_nowarm_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 20개 -> 최종 20개, 평균 train R^2=0.2199, 시나리오별 개수={'chg': 10, 'dis': 10}, 결합 다중공선성 배제: raw 25개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-29 03:49 — synergy_groups_hi63_scen_transformer_union_nowarm_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0347_p1v2_hi63_scen_transformer_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0347_p1v2_hi63_scen_transformer_union_nowarm_seed42\synergy_groups_hi63_scen_transformer_union_nowarm_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-29 03:52 — kernel_group_features_hi63_scen_transformer_union_nowarm_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0347_p1v2_hi63_scen_transformer_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0347_p1v2_hi63_scen_transformer_union_nowarm_seed42\kernel_group_features_hi63_scen_transformer_union_nowarm_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_0347_p1v2_hi63_scen_transformer_union_nowarm_seed42\kernel_group_features_hi63_scen_transformer_union_nowarm_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-29 11:21 — synergy_groups_hi63_noscen_transformer_union_nowarm_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_1119_p1v2_hi63_noscen_transformer_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_1119_p1v2_hi63_noscen_transformer_union_nowarm_seed42\synergy_groups_hi63_noscen_transformer_union_nowarm_groups.json`
+- **핵심 수치**: 전체 HI 29개 -> 그룹 29개, 평균 그룹 크기 2.97
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-29 11:26 — kernel_group_features_hi63_noscen_transformer_union_nowarm_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_1119_p1v2_hi63_noscen_transformer_union_nowarm_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_1119_p1v2_hi63_noscen_transformer_union_nowarm_seed42\kernel_group_features_hi63_noscen_transformer_union_nowarm_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1029_1119_p1v2_hi63_noscen_transformer_union_nowarm_seed42\kernel_group_features_hi63_noscen_transformer_union_nowarm_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 20개 -> 최종 20개, 평균 train R^2=0.2199, 시나리오별 개수={'chg': 10, 'dis': 10}, 결합 다중공선성 배제: raw 25개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-31 01:18 — synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0117_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0117_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_groups.json`
+- **핵심 수치**: 전체 HI 73개 -> 그룹 73개, 평균 그룹 크기 2.92
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-31 01:19 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0117_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0117_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0117_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_mit_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 48개 -> 최종 48개, 평균 train R^2=0.4204, 시나리오별 개수={'chg_lo': 7, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 6, 'dis_mid': 6, 'dis_lo': 6}, 결합 다중공선성 배제: raw 118개/kernel 1개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-31 04:32 — synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0431_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0431_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_groups.json`
+- **핵심 수치**: 전체 HI 72개 -> 그룹 72개, 평균 그룹 크기 2.85
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-31 04:34 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0431_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0431_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0431_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_hust_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 47개 -> 최종 47개, 평균 train R^2=0.4597, 시나리오별 개수={'chg_lo': 5, 'chg_mid': 6, 'chg_hi': 11, 'dis_hi': 6, 'dis_mid': 11, 'dis_lo': 8}, 결합 다중공선성 배제: raw 116개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-31 09:54 — synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0938_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0938_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_groups.json`
+- **핵심 수치**: 전체 HI 57개 -> 그룹 57개, 평균 그룹 크기 2.77
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-31 09:54 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0938_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0938_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_0938_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_tju_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 33개 -> 최종 33개, 평균 train R^2=0.4824, 시나리오별 개수={'chg_lo': 5, 'chg_mid': 7, 'chg_hi': 7, 'dis_hi': 6, 'dis_mid': 5, 'dis_lo': 3}, 결합 다중공선성 배제: raw 154개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-31 11:11 — synergy_groups_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1109_p1v2_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1109_p1v2_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-31 11:14 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1109_p1v2_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1109_p1v2_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1109_p1v2_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-2_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-31 15:20 — synergy_groups_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1518_p1v2_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1518_p1v2_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-31 15:23 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1518_p1v2_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1518_p1v2_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_1518_p1v2_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-3_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-10-31 20:07 — synergy_groups_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_2005_p1v2_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_2005_p1v2_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-10-31 20:10 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_2005_p1v2_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_2005_p1v2_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1031_2005_p1v2_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-1e-4_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-01 04:41 — synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_0418_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_0418_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_groups.json`
+- **핵심 수치**: 전체 HI 84개 -> 그룹 84개, 평균 그룹 크기 2.90
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-01 04:46 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_0418_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_0418_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_0418_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-10_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 55개 -> 최종 55개, 평균 train R^2=0.2029, 시나리오별 개수={'chg_lo': 7, 'chg_mid': 10, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 9}, 결합 다중공선성 배제: raw 83개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-01 22:29 — synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_2107_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_2107_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_groups.json`
+- **핵심 수치**: 전체 HI 72개 -> 그룹 72개, 평균 그룹 크기 3.49
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-01 22:32 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_2107_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_2107_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1101_2107_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-30_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 62개 -> 최종 62개, 평균 train R^2=0.4019, 시나리오별 개수={'chg_lo': 8, 'chg_mid': 11, 'chg_hi': 14, 'dis_hi': 7, 'dis_mid': 12, 'dis_lo': 10}, 결합 다중공선성 배제: raw 75개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-02 04:02 — synergy_groups_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_0359_p1v2_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_0359_p1v2_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_seed42\synergy_groups_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-02 04:05 — kernel_group_features_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_0359_p1v2_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_0359_p1v2_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_0359_p1v2_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trs_union_nowarm_l0-2e-4_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-02 11:56 — synergy_groups_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_1153_p1v2_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_1153_p1v2_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_seed42\synergy_groups_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-02 11:59 — kernel_group_features_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_1153_p1v2_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_1153_p1v2_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1102_1153_p1v2_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trl_union_nowarm_l0-2e-4_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-03 01:04 — synergy_groups_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0102_p1v2_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0102_p1v2_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_seed42\synergy_groups_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-03 01:07 — kernel_group_features_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0102_p1v2_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0102_p1v2_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0102_p1v2_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_warm100_l0-2e-4_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-03 08:45 — synergy_groups_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0843_p1v2_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0843_p1v2_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_seed42\synergy_groups_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 29개 -> 그룹 29개, 평균 그룹 크기 2.97
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-03 08:49 — kernel_group_features_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0843_p1v2_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0843_p1v2_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_0843_p1v2_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_noscen_trm_union_warm100_l0-2e-4_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 20개 -> 최종 20개, 평균 train R^2=0.2199, 시나리오별 개수={'chg': 10, 'dis': 10}, 결합 다중공선성 배제: raw 25개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-03 17:21 — synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_1718_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_1718_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_seed42\synergy_groups_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 76개 -> 그룹 76개, 평균 그룹 크기 3.21
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-03 17:24 — kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_1718_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_1718_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1103_1718_p1v2_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_scen_trm_union_nowarm_l0-2e-4_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 59개 -> 최종 59개, 평균 train R^2=0.3291, 시나리오별 개수={'chg_lo': 9, 'chg_mid': 11, 'chg_hi': 12, 'dis_hi': 7, 'dis_mid': 10, 'dis_lo': 10}, 결합 다중공선성 배제: raw 78개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---
+
+### 2026-11-04 01:22 — synergy_groups_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_groups
+
+- **목적**: Phase1 이전 HI 시너지 그룹 사전 구성 (편상관계수 필터 = 다중공선성 배제 + 시너지 발굴 통합)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\6_synergy\synergy.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1104_0119_p1v2_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1104_0119_p1v2_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_seed42\synergy_groups_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_groups.json`
+- **핵심 수치**: 전체 HI 29개 -> 그룹 29개, 평균 그룹 크기 2.97
+- **해석 / 다음 액션**: 평균 그룹 크기가 1에 가까우면 대부분 HI가 독립적(다중공선성/시너지 둘 다 약함), 4에 가까우면 대부분 HI가 큰 시너지 그룹으로 묶임 — Stage4 클러스터 개수(39~55/64)와 함께 보면 이 그룹 구조가 타당한지 교차검증 가능.
+
+---
+
+### 2026-11-04 01:26 — kernel_group_features_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_kernel
+
+- **목적**: 시너지 그룹(크기2+)을 RBF 커널로 그룹당 1개 HI로 융합(raw HI는 유지, 추가) + 정규화 통계 저장 + 결합(raw+kernel) 다중공선성 배제(시나리오별)
+- **명령어**:
+  ```powershell
+  C:\Users\ksshin\.conda\envs\LFP_SOH_ESTIMATION\python.exe C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\7_kernel\kernel.py --out-dir C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1104_0119_p1v2_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_seed42
+  ```
+- **결과 파일**:
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1104_0119_p1v2_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_kernel.pkl`
+  - `C:\Users\ksshin\Desktop\ChanminLee\SOH_ESTIMATION\model_lib\results\p1v2_runs\1104_0119_p1v2_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_seed42\kernel_group_features_hi63_noscen_trm_union_nowarm_l0-2e-4_n2-20_kernel_combined_redundancy.json`
+- **핵심 수치**: 후보 20개 -> 최종 20개, 평균 train R^2=0.2199, 시나리오별 개수={'chg': 10, 'dis': 10}, 결합 다중공선성 배제: raw 25개/kernel 0개
+- **해석 / 다음 액션**: 이 pkl은 train.py --kernel-features-pkl로 넘기면 x_hi(raw HI)는 그대로 두고 x_kernel(정규화된 커널 융합값)을 별도 게이트(scen_kernel_gates)로 추가한다 — raw HI와 커널 HI를 동시에 쓰는 게 목적. 평균 train R^2가 각 그룹 멤버 HI 개별 상관보다 뚜렷이 높다면 비선형 시너지가 실제로 존재한다는 신호. _combined_redundancy.json은 train.py --combined-redundancy-json으로 넘기면 시나리오별로 raw+kernel 통틀어 |r|>=0.95인 HI를 전부 그 시나리오에서 배제한다.
+
+---

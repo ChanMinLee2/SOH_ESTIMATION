@@ -417,11 +417,14 @@ def build_cap_head(model_cfg: dict, d_head: int = 128, dropout: float = 0.1,
     # ITransformerHead도 이제 drop_probe 인자를 받아 probe 토큰을 아예 안 만든다(아래
     # 생성자 호출 참고). FTTransformerHead는 probe+scen을 하나의 연속 128-dim sparse-mask
     # 블록으로 전제(self.n_hi = N_HI*2 고정, hi_pad 슬라이싱)하는 구조라 아직 미지원.
-    drop_probe = bool(model_cfg.get("drop_probe_from_regression", False))
+    # probe_union_into_scen(2026-10-28)도 회귀 입력의 raw HI 블록이 N_HI칸 하나라 같은 경로를 쓴다
+    # (scr_model.py forward()가 x·OR(z_probe, z_scen)을 그 한 블록에 넣음).
+    drop_probe = bool(model_cfg.get("drop_probe_from_regression", False)) or \
+        bool(model_cfg.get("probe_union_into_scen", False))
     if drop_probe and rtype not in ("mlp", "resnet_tab", "transformer",
                                      "i_transformer", "itransformer"):
         raise NotImplementedError(
-            f"drop_probe_from_regression=True는 아직 mlp/resnet_tab/transformer/"
+            f"drop_probe_from_regression/probe_union_into_scen=True는 아직 mlp/resnet_tab/transformer/"
             f"i_transformer만 지원합니다 (rtype={rtype}). ft_transformer는 probe_x를 "
             "scen_x와 함께 하나의 연속 sparse-mask 블록으로 구조에 박아뒀어서(self.n_hi) "
             "probe_x 제거 시 함께 수정이 필요합니다."

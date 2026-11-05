@@ -34,7 +34,8 @@ from plot_hi_selection_matrix import (  # noqa: E402
     _load_matrix, _strip_seg_suffix, _category_of, _sort_rows, _draw_panel, _CATEGORY_COLORS,
 )
 
-RUN_DIR = PROJECT_ROOT / "model_lib/results/p1v2_runs/1009_1342_p1v2_baseline_seed42"
+# 2026-10-30: main 63-HI run (was 1009_1342_p1v2_baseline_seed42)
+RUN_DIR = PROJECT_ROOT / "model_lib/results/p1v2_runs/1024_0643_p1v2_hi63_scen_transformer_probe_nowarm_seed42"
 THRESHOLD = 0.9
 _CATEGORY_ORDER = ["stat", "diff", "lfp", "morph"]
 _KERNEL_COLOR = "#555555"

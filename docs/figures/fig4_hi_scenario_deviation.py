@@ -103,8 +103,13 @@ def panel_band(ax, df, cat, rep, width, row_label):
     ax.tick_params(direction="out", length=2.6, labelsize=5.8)
 
 
+LEAK_HIS = {"stat_q_abs", "stat_energy_seg", "diff_dqdv_area"}  # 2026-10-29: segment-charge proxies, excluded (N_HI=63)
+
+
 def build_figure():
     order, cats = base_names_and_categories()
+    keep = [(n, c) for n, c in zip(order, cats) if n not in LEAK_HIS]
+    order, cats = [n for n, _ in keep], [c for _, c in keep]
     df = load_hi_frame(order)
     extremes = pick_extremes_within_category(df, order, cats)
 

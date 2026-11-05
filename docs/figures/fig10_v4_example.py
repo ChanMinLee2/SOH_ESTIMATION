@@ -35,7 +35,9 @@ from _style import INK, SUBINK, setup_rcparams, label_panel, PROJECT_ROOT
 
 setup_rcparams()
 
-_LFP_RUN_DIR = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs/0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42"
+# 2026-10-30: LFP side switched to the main 63-HI run (was legacy 0904_1708_p1v2_p1v4_minpts5_calib100_offA5mA_seed42).
+# TJU side is still the legacy TJU-only run until a 63-HI TJU run exists.
+_LFP_RUN_DIR = PROJECT_ROOT / "model_lib/results/p1v2_runs/1024_0643_p1v2_hi63_scen_transformer_probe_nowarm_seed42"
 _TJU_RUN_DIR = PROJECT_ROOT / "legacy_results/experiments/phase1_lab/results/p1v2_runs/0910_1533_p1v2_p1v4_tju_only_seed42"
 
 # (run_dir, cell_id, chemistry label) -- 각 셀이 자기 체크포인트의 run_dir을 따로 가짐

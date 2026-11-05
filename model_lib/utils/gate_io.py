@@ -106,3 +106,25 @@ def _save_scen_masks_to_json(
     json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
     n_hi_out = len(next(iter(hi_cols_by_seg.values())))
     print(f"[train] Saved scen HI ranking → {json_path}  (시나리오별 {n_hi_out}개 랭킹)")
+
+
+def _save_effective_regression_his(
+    model: SCRModel,
+    json_path: Path,
+    hi_cols_by_seg: dict[int, list[str]],
+) -> None:
+    """시나리오별로 회귀 입력에 실제로 들어가는 raw HI(probe/scen/union 모드 반영)를 저장.
+    regression_HIs.json은 scen 게이트만 보므로, probe가 회귀에 섞이는 모드에선 이 파일이 실제 부분집합이다."""
+    eff = model.regression_effective_masks().detach().cpu()
+    mode = ("union" if model.probe_union_into_scen
+            else "scen_only" if model.drop_probe_from_regression else "concat")
+    out = {"mode": mode}
+    for s in range(model.n_scenarios):
+        idx = eff[s].nonzero(as_tuple=False).squeeze(1).tolist()
+        out[f"seg_{s}_seg_name"] = model.spec.scenario_names[s]
+        out[f"seg_{s}_active"] = idx
+        out[f"seg_{s}_names"] = [hi_cols_by_seg[s][i] for i in idx]
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    counts = [int(eff[s].sum().item()) for s in range(model.n_scenarios)]
+    print(f"[train] Saved effective regression HIs → {json_path}  (mode={mode}, 시나리오별 {counts}개)")

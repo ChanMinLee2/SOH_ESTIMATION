@@ -7,14 +7,18 @@ compare_1007_vs_1008_*.py)을 하나로 합치고 일반화했다 — run 경로
 않고 CLI 인자로 받으며, 실행 시각(MMDD_HHMM)으로 출력 폴더를 자동 생성한다(실행마다
 새 비교 케이스 폴더가 생겨 섞이지 않음, p1v2_runs의 run 폴더 네이밍 관례와 동일).
 
+2026-11-04: run을 2개 이상(N개) 받도록 일반화 — 패밀리별 4-run(scen/noscen x MLP/Transformer)
+비교용. 2-run 호출(--label-a/--label-b)은 그대로 동작한다.
+
 실행:
-    python model_lib/results/comparison/compare_runs.py <run_a> <run_b> \
-        [--label-a LABEL] [--label-b LABEL] [--cells b1c0,1-7]
+    python model_lib/results/comparison/compare_runs.py <run_1> <run_2> [<run_3> ...] \
+        [--labels L1,L2,...] [--label-a LABEL] [--label-b LABEL] [--cells b1c0,1-7] [--tag NAME]
 
-<run_a>/<run_b>는 전체 경로 또는 model_lib/results/p1v2_runs/ 밑의 폴더명만 줘도 된다.
+각 run은 전체 경로 또는 model_lib/results/p1v2_runs/ 밑의 폴더명만 줘도 된다.
 
-출력: model_lib/results/comparison/{MMDD_HHMM}/ 밑에
+출력: model_lib/results/comparison/{MMDD_HHMM}[_{tag}]/ 밑에
     perf_compare.png                — oracle/hard RMSE·R² 2x2 막대비교
+    perf_compare.csv                — 위 막대의 수치(+ 충/방전 RMSE, 데이터셋별 RMSE)
     curve_{cell}_{mode}.png         — 셀별(기본 b1c0, 1-7) oracle/hard 시나리오별 용량 예측 추이
 """
 
@@ -50,6 +54,7 @@ SEG_COLORS = {
 }
 COLOR_A = "#9e9e9e"
 COLOR_B = "#1f5fa8"
+RUN_COLORS = [COLOR_A, COLOR_B, "#c98a2b", "#3a7d44", "#8e5ba8", "#b0413e"]
 
 
 def _resolve_run_dir(run: str) -> Path:
@@ -89,33 +94,34 @@ def _bar_labels(ax, bars, fmt="{:.4f}"):
                     ha="center", va="bottom", fontsize=9, fontweight="bold")
 
 
-def plot_perf(run_a: Path, run_b: Path, label_a: str, label_b: str, out_dir: Path) -> Path:
-    before = _load_metrics(run_a)
-    after = _load_metrics(run_b)
+def plot_perf(runs: list[Path], labels: list[str], out_dir: Path) -> Path:
+    mets = [_load_metrics(r) for r in runs]
+    colors = RUN_COLORS[:len(runs)] if len(runs) <= len(RUN_COLORS) else None
 
-    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    fig, axes = plt.subplots(2, 2, figsize=(max(11, 2.6 * len(runs) + 2), 9))
     for col, mode in enumerate(("oracle", "hard")):
-        b_cap, a_cap = before[mode]["capacity"], after[mode]["capacity"]
+        caps = [m[mode]["capacity"] for m in mets]
 
         ax_rmse = axes[0, col]
-        bars = ax_rmse.bar([label_a, label_b], [b_cap["rmse"], a_cap["rmse"]],
-                            color=[COLOR_A, COLOR_B], width=0.55)
+        bars = ax_rmse.bar(labels, [c["rmse"] for c in caps], color=colors, width=0.55)
         _bar_labels(ax_rmse, bars)
         ax_rmse.set_title(f"{mode} — RMSE (낮을수록 좋음)", fontsize=11)
         ax_rmse.set_ylabel("RMSE")
         ax_rmse.spines[["top", "right"]].set_visible(False)
 
         ax_r2 = axes[1, col]
-        bars = ax_r2.bar([label_a, label_b], [b_cap["r2"], a_cap["r2"]],
-                          color=[COLOR_A, COLOR_B], width=0.55)
+        bars = ax_r2.bar(labels, [c["r2"] for c in caps], color=colors, width=0.55)
         _bar_labels(ax_r2, bars)
         ax_r2.set_title(f"{mode} — R² (높을수록 좋음)", fontsize=11)
         ax_r2.set_ylabel("R²")
         ax_r2.set_ylim(0, 1.0)
         ax_r2.spines[["top", "right"]].set_visible(False)
+        if len(runs) > 2:
+            for ax in (ax_rmse, ax_r2):
+                ax.tick_params(axis="x", labelsize=9, rotation=15)
 
-    caveat = _run_source_desc(run_a) + "  |  " + _run_source_desc(run_b)
-    fig.suptitle(f"{label_a} vs {label_b} — oracle·hard 성능 비교\n(test split)",
+    caveat = "  |  ".join(_run_source_desc(r) for r in runs)
+    fig.suptitle(f"{' vs '.join(labels)} — oracle·hard 성능 비교\n(test split)",
                  fontsize=13, fontweight="bold")
     fig.text(0.5, -0.02, caveat, ha="center", va="top", fontsize=8.3, color="#555", wrap=True)
     fig.tight_layout(rect=(0, 0.05, 1, 0.93))
@@ -123,28 +129,45 @@ def plot_perf(run_a: Path, run_b: Path, label_a: str, label_b: str, out_dir: Pat
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"saved {out_path}")
-    for mode in ("oracle", "hard"):
-        print(mode, label_a, before[mode]["capacity"], label_b, after[mode]["capacity"])
+
+    rows = []
+    for run, label, m in zip(runs, labels, mets):
+        for mode in ("oracle", "hard"):
+            cap, brk = m[mode]["capacity"], m[mode].get("breakdown", {})
+            row = {"label": label, "run": run.name, "mode": mode,
+                   "rmse": cap["rmse"], "mae": cap["mae"], "r2": cap["r2"], "mape": cap["mape"],
+                   "acc": m[mode].get("classification", {}).get("accuracy")}
+            for k in ("charge", "discharge"):
+                if k in brk:
+                    row[f"rmse_{k}"] = brk[k]["rmse"]
+            for k, v in brk.items():
+                if k.startswith("dataset_"):
+                    row[f"rmse_{k[8:]}"] = v["rmse"]
+            rows.append(row)
+    df = pd.DataFrame(rows)
+    df.to_csv(out_dir / "perf_compare.csv", index=False, encoding="utf-8-sig")
+    print(df.to_string(index=False, float_format=lambda v: f"{v:.5f}"))
     return out_path
 
 
-def plot_curve_one(run_a: Path, run_b: Path, label_a: str, label_b: str,
-                    cell: str, mode: str, fname: str, out_dir: Path) -> Path | None:
-    before = pd.read_csv(run_a / "predictions" / fname)
-    before = before[before["cell_id"] == cell]
-    after = pd.read_csv(run_b / "predictions" / fname)
-    after = after[after["cell_id"] == cell]
-    if len(before) == 0 or len(after) == 0:
-        print(f"skip {cell}/{mode}: 데이터 없음(a={len(before)}, b={len(after)})")
+def plot_curve_one(runs: list[Path], labels: list[str],
+                   cell: str, mode: str, fname: str, out_dir: Path) -> Path | None:
+    datas = []
+    for run in runs:
+        df = pd.read_csv(run / "predictions" / fname)
+        datas.append(df[df["cell_id"] == cell])
+    if any(len(d) == 0 for d in datas):
+        print(f"skip {cell}/{mode}: 데이터 없음({', '.join(f'{l}={len(d)}' for l, d in zip(labels, datas))})")
         return None
 
-    ymin = min(before["cap_true_Ah"].min(), before["cap_pred_Ah"].min(),
-               after["cap_true_Ah"].min(), after["cap_pred_Ah"].min()) * 0.98
-    ymax = max(before["cap_true_Ah"].max(), before["cap_pred_Ah"].max(),
-               after["cap_true_Ah"].max(), after["cap_pred_Ah"].max()) * 1.02
+    ymin = min(min(d["cap_true_Ah"].min(), d["cap_pred_Ah"].min()) for d in datas) * 0.98
+    ymax = max(max(d["cap_true_Ah"].max(), d["cap_pred_Ah"].max()) for d in datas) * 1.02
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5), sharey=True)
-    for ax, data, title in ((ax1, before, label_a), (ax2, after, label_b)):
+    n = len(runs)
+    ncol = 2 if n == 4 else n
+    nrow = (n + ncol - 1) // ncol
+    fig, axes = plt.subplots(nrow, ncol, figsize=(6.5 * ncol, 5.5 * nrow), sharey=True, squeeze=False)
+    for ax, data, title in zip(axes.flat, datas, labels):
         true_by_cycle = data.groupby("cycle")["cap_true_Ah"].mean().sort_index()
         ax.plot(true_by_cycle.index, true_by_cycle.values, color="black",
                 linewidth=2.0, label="실측", zorder=10)
@@ -156,14 +179,16 @@ def plot_curve_one(run_a: Path, run_b: Path, label_a: str, label_b: str,
             pred_by_cycle = seg_df.groupby("cycle")["cap_pred_Ah"].mean().sort_index()
             ax.plot(pred_by_cycle.index, pred_by_cycle.values, color=color,
                     linewidth=0.9, alpha=0.75, label=seg_name)
-        ax.set_title(title, fontsize=11.5)
+        rmse_pct = ((data["soh_pred"] - data["soh_true"]) ** 2).mean() ** 0.5 * 100
+        ax.set_title(f"{title}  (셀 SOH RMSE {rmse_pct:.2f}%)", fontsize=11.5)
         ax.set_xlabel("Cycle")
         ax.set_ylim(ymin, ymax)
         ax.grid(alpha=0.3)
         ax.legend(fontsize=7.5, ncol=2, loc="lower left")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("Capacity (Ah)")
 
-    ax1.set_ylabel("Capacity (Ah)")
-    fig.suptitle(f"셀 \"{cell}\" — 시나리오별 용량 예측 추이({mode} 모드), {label_a} vs {label_b}",
+    fig.suptitle(f"셀 \"{cell}\" — 시나리오별 용량 예측 추이({mode} 모드), {' vs '.join(labels)}",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     out_path = out_dir / f"curve_{cell}_{mode}.png"
@@ -174,30 +199,41 @@ def plot_curve_one(run_a: Path, run_b: Path, label_a: str, label_b: str,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="p1v2_runs 두 run 성능/예측곡선 비교")
-    ap.add_argument("run_a", help="전체경로 또는 p1v2_runs/ 밑 폴더명")
-    ap.add_argument("run_b", help="전체경로 또는 p1v2_runs/ 밑 폴더명")
+    ap = argparse.ArgumentParser(description="p1v2_runs 2개 이상 run 성능/예측곡선 비교")
+    ap.add_argument("runs", nargs="+", help="전체경로 또는 p1v2_runs/ 밑 폴더명 (2개 이상)")
+    ap.add_argument("--labels", default=None, help="쉼표구분 라벨 (run 순서대로)")
     ap.add_argument("--label-a", default=None)
     ap.add_argument("--label-b", default=None)
     ap.add_argument("--cells", default="b1c0,1-7", help="쉼표구분 cell_id 목록")
+    ap.add_argument("--tag", default=None, help="출력 폴더 이름 뒤에 붙일 꼬리표")
     args = ap.parse_args()
+    if len(args.runs) < 2:
+        ap.error("run을 2개 이상 줘야 한다")
 
-    run_a = _resolve_run_dir(args.run_a)
-    run_b = _resolve_run_dir(args.run_b)
-    label_a = args.label_a or run_a.name
-    label_b = args.label_b or run_b.name
+    runs = [_resolve_run_dir(r) for r in args.runs]
+    if args.labels:
+        labels = [x.strip() for x in args.labels.split(",")]
+        if len(labels) != len(runs):
+            ap.error(f"--labels 개수({len(labels)})가 run 개수({len(runs)})와 다르다")
+    else:
+        labels = [r.name for r in runs]
+        if args.label_a:
+            labels[0] = args.label_a
+        if args.label_b:
+            labels[1] = args.label_b
     cells = [c.strip() for c in args.cells.split(",") if c.strip()]
 
-    out_dir = COMPARISON_DIR / datetime.now().strftime("%m%d_%H%M")
+    out_name = datetime.now().strftime("%m%d_%H%M") + (f"_{args.tag}" if args.tag else "")
+    out_dir = COMPARISON_DIR / out_name
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[compare_runs] 출력 폴더: {out_dir}")
 
-    plot_perf(run_a, run_b, label_a, label_b, out_dir)
+    plot_perf(runs, labels, out_dir)
 
     modes = {"oracle": "test_predictions.csv", "hard": "test_predictions_hard.csv"}
     for cell in cells:
         for mode, fname in modes.items():
-            plot_curve_one(run_a, run_b, label_a, label_b, cell, mode, fname, out_dir)
+            plot_curve_one(runs, labels, cell, mode, fname, out_dir)
 
 
 if __name__ == "__main__":

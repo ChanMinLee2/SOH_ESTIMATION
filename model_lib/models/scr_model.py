@@ -226,6 +226,16 @@ class SCRModel(nn.Module):
         # probe_gate를 간섭할 수 있다는 가설 검증용 — True면 probe_x를 cap_head
         # 입력에서 빼고(forward() 참고) probe_gate는 CE 전용이 된다.
         self.drop_probe_from_regression = bool((model_cfg or {}).get("drop_probe_from_regression", False))
+        # probe_union_into_scen(2026-10-28): probe_x를 따로 이어붙이지 않고, 회귀 입력의 raw HI
+        # 블록을 x·OR(z_probe, z_scen) 한 덩어리(N_HI칸)로 만든다 — 두 게이트가 다 켠 HI가 두 칸에
+        # 중복으로 들어가던 것을 없애 헤드 입력 폭이 drop_probe=True와 같아진다. OR 뒤에 회귀용
+        # redundancy_mask를 다시 곱해 probe가 회귀용 다중공선성 배제를 우회하지 못하게 한다.
+        self.probe_union_into_scen = bool((model_cfg or {}).get("probe_union_into_scen", False))
+        if self.probe_union_into_scen and self.drop_probe_from_regression:
+            raise ValueError(
+                "probe_union_into_scen=True는 probe 정보를 회귀에 쓰는 모드라 "
+                "drop_probe_from_regression=True와 함께 쓸 수 없습니다."
+            )
         # soc_ref_to_regression(ACTIVE_SOC_REF_TO_REGRESSION, 2026-10-20): q_frac의 분모로
         # 쓰인 참조용량(q_ref, z-scored)을 cap_head 입력에 스칼라 1칸 추가 — "회귀기가
         # SOC 참조값을 직접 보면 어떻게 되는가"를 재는 실험용 토글(docs/validation/logics.md
@@ -614,7 +624,16 @@ class SCRModel(nn.Module):
         scen_x, scen_z = self._apply_scen_gate(x, scen_idx) # (B, N_HI)
 
         # Capacity head: [probe_x +] scen_x [+ 커널 융합 HI] + direction + cap_init
-        feat_parts = [scen_x] if self.drop_probe_from_regression else [probe_x, scen_x]
+        if self.probe_union_into_scen:
+            # 학습 중엔 확률적 OR(두 게이트 모두에 그래디언트), 평가 땐 z가 0/1이라 정확히 논리 OR.
+            reg_z = 1 - (1 - probe_z) * (1 - scen_z)
+            if self.redundancy_mask is not None:
+                reg_z = reg_z * self.redundancy_mask[scen_idx]
+            feat_parts = [x * reg_z]
+        elif self.drop_probe_from_regression:
+            feat_parts = [scen_x]
+        else:
+            feat_parts = [probe_x, scen_x]
         if self.scen_kernel_gates is not None:
             x_kernel = batch["x_kernel"]                     # (B, n_kernel_hi), 이미 정규화됨
             kernel_x, kernel_z = self._apply_scen_kernel_gate(x_kernel, scen_idx)
@@ -760,3 +779,29 @@ class SCRModel(nn.Module):
                 for s in range(self.n_scenarios)
             }
         return {s: gate.active_indices() for s, gate in enumerate(self.scen_gates)}
+
+    @torch.no_grad()
+    def regression_effective_masks(self) -> torch.Tensor:
+        """(n_scenarios, N_HI) 0/1 — 평가 모드에서 시나리오별로 회귀 입력에 실제 값이 들어가는 raw HI.
+        forward()와 같은 게이트 함수를 그대로 써서 shared_gate·두 redundancy mask·warmstart 그룹 매핑을
+        모두 반영한다. concat 모드에선 probe 칸이나 scen 칸 중 하나라도 켜지면 회귀에 들어간 것으로 본다."""
+        was_training = self.training
+        self.eval()
+        device = next(self.parameters()).device
+        n = self.n_scenarios
+        x = torch.ones(n, N_HI, device=device)
+        scen_idx = torch.arange(n, device=device)
+        charge_ids = set(self.spec.charge_scenario_ids)
+        direction = torch.tensor([1.0 if s in charge_ids else -1.0 for s in range(n)], device=device)
+        _, probe_z = self._apply_probe_gate(x, direction, scen_idx)
+        _, scen_z = self._apply_scen_gate(x, scen_idx)
+        if self.probe_union_into_scen:
+            z = 1 - (1 - probe_z) * (1 - scen_z)
+            if self.redundancy_mask is not None:
+                z = z * self.redundancy_mask
+        elif self.drop_probe_from_regression:
+            z = scen_z
+        else:
+            z = torch.maximum(probe_z, scen_z)
+        self.train(was_training)
+        return z

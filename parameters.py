@@ -281,6 +281,7 @@ P1_MODEL_CONFIG: dict = {
         "regression_model": "transformer",       # 회귀 헤드 종류: mlp|transformer|i_transformer|resnet_tab|ft_transformer
         "mlp_hidden_dims": [128, 64],
         "drop_probe_from_regression": True,  # True면 cap_head 입력에서 probe_x 제외(mlp/resnet_tab/transformer/i_transformer 지원, ft_transformer만 미지원)
+        "probe_union_into_scen": False,  # True면 probe_x를 따로 붙이지 않고 회귀 raw HI 블록을 x·OR(z_probe, z_scen) 한 덩어리(N_HI칸)로 — drop_probe_from_regression=False와 함께 써야 함
         "soc_ref_to_regression": ACTIVE_SOC_REF_TO_REGRESSION,  # True면 cap_head 입력에 q_ref 1칸 추가(mlp/resnet_tab만 지원)
     },
     "loss": {
