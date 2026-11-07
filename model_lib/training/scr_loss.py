@@ -55,6 +55,8 @@ class SCRLoss(nn.Module):
         lambda_l0: float = 0.01,
         l0_norm_constant: int | None = None,
         hi_cost_weighted: bool = False,
+        soh_bin_edges: list[float] | None = None,
+        soh_bin_weights: list[float] | None = None,
     ):
         super().__init__()
         self.lambda_scen = lambda_scen  # > 0 → CE 활성 (Phase 1 with probe_mlp)
@@ -65,6 +67,15 @@ class SCRLoss(nn.Module):
         costs = get_hi_cost_vector("dis_hi")
         self.register_buffer("cost_vec", torch.tensor(costs, dtype=torch.float32))
 
+        # 2026-11-06: SOH 구간 가중 MSE — 낮은 SOH 구간 과대예측(샘플 부족) 대응.
+        # edges가 None이면 기존 F.mse_loss와 100% 동일. weights는 len(edges)+1개.
+        self.soh_bin_weighted = soh_bin_edges is not None
+        if self.soh_bin_weighted:
+            if len(soh_bin_weights) != len(soh_bin_edges) + 1:
+                raise ValueError("soh_bin_weights 길이는 len(soh_bin_edges)+1이어야 합니다")
+            self.register_buffer("soh_bin_edges", torch.tensor(soh_bin_edges, dtype=torch.float32))
+            self.register_buffer("soh_bin_weights", torch.tensor(soh_bin_weights, dtype=torch.float32))
+
     def forward(
         self,
         outputs: dict[str, torch.Tensor],
@@ -74,7 +85,11 @@ class SCRLoss(nn.Module):
         cap_pred = outputs["cap_pred"]
         target   = batch["target"]
 
-        mse = F.mse_loss(cap_pred, target)
+        if self.soh_bin_weighted:
+            w = self.soh_bin_weights[torch.bucketize(target, self.soh_bin_edges, right=True)]
+            mse = (w * (cap_pred - target) ** 2).mean()
+        else:
+            mse = F.mse_loss(cap_pred, target)
         l0  = self._l0_penalty(model)
 
         # CE: probe_mlp 존재 + lambda_scen > 0 일 때만 활성 (Phase 1 dual-objective)

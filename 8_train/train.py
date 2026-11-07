@@ -150,7 +150,7 @@ def _resolve_device(s: str) -> torch.device:
 
 def _apply_kernel_features(
     datasets: list, pkl_path: Path, spec, combined_redundancy: dict | None = None,
-    use_probe_kernel: bool = False,
+    use_probe_kernel: bool = False, keep_all_scen_for: tuple = (),
 ) -> tuple[dict[int, list[str]], list[int], dict[int, list[float]]]:
     """kernel.py 산출물을 로드해 각 dataset에 x_kernel(정규화된
     RBF 커널 융합값)을 새로 붙인다 — x_hi(raw HI)는 건드리지 않는다(v2: 대체가 아니라
@@ -183,6 +183,11 @@ def _apply_kernel_features(
     경로(계산량 대략 n_scenarios배) 자체를 건너뛰고 기존처럼 "자기 시나리오 행만"
     predict한다 — ds.x_kernel_probe는 안 만들어지고 FastTensorLoader도 자동으로
     배치에 안 실음. use_probe_kernel=True면 2026-10-07 동작을 재현한다.
+
+    2026-11-05: keep_all_scen_for에 든 dataset(평가용 test 등)은 위 전체 후보 텐서를
+    ds.x_kernel_all로도 남긴다. ds.x_kernel은 진짜 scen_idx로 고른 값이라 hard/soft 라우팅
+    평가에서 오분류된 행에 정답 시나리오의 커널 HI가 들어가는 누수가 있었다 —
+    scr_evaluator.py가 x_kernel_all에서 예측 시나리오의 행을 다시 골라 쓴다.
     """
     with open(pkl_path, "rb") as fh:
         artifact = pickle.load(fh)
@@ -217,7 +222,8 @@ def _apply_kernel_features(
         x = (ds.x_hi * ds.nan_mask).numpy()  # NaN 위치 0으로 (fit 시점과 동일 처리)
         scen_idx_np = ds.scen_idx.numpy()
         n = x.shape[0]
-        if use_probe_kernel:
+        keep_all = any(ds is k for k in keep_all_scen_for)
+        if use_probe_kernel or keep_all:
             # 모든 시나리오(진짜 scen_idx와 무관) x 전체 행 — 분류기용 "후보" 포함.
             x_kernel_all = np.zeros((n, spec.n_scenarios, max_k), dtype=np.float32)
             for s in range(spec.n_scenarios):
@@ -229,7 +235,10 @@ def _apply_kernel_features(
             # 독립적이라 부분집합/전체 predict 결과가 일치).
             ds.x_kernel = torch.from_numpy(x_kernel_all[np.arange(n), scen_idx_np, :])
             # 분류기용: 전체 시나리오 후보 그대로 보존.
-            ds.x_kernel_probe = torch.from_numpy(x_kernel_all)
+            if use_probe_kernel:
+                ds.x_kernel_probe = torch.from_numpy(x_kernel_all)
+            if keep_all:
+                ds.x_kernel_all = torch.from_numpy(x_kernel_all)
         else:
             # 기본(2026-10-09 롤백): 자기 시나리오 행만 predict — 분류기용 전체 후보는
             # 계산하지 않는다(x_kernel_probe 자체를 안 만듦).
@@ -363,6 +372,22 @@ def _save_scen_masks_with_shared(model: SCRModel, json_path, hi_cols_by_seg: dic
     print(f"[p1v2] Saved scen HI ranking(shared_gate 반영) -> {json_path} (시나리오별 {n_hi}개 랭킹)")
 
 
+def _soh_bin_weights(target: torch.Tensor, edges: list[float], power: float) -> list[float]:
+    """2026-11-06: SOH 구간 가중 MSE의 구간별 가중치 — train 타깃의 구간별 샘플 수에
+    반비례(^power)하고, train 샘플 평균 가중치가 1이 되도록 정규화한다(손실 스케일과
+    lambda_l0 균형 유지). 빈 구간은 가중치 0(어차피 샘플이 없음). 구간 i는
+    edges[i-1] <= SOH < edges[i] (scr_loss.py의 bucketize(right=True)와 동일)."""
+    idx = torch.bucketize(target, torch.tensor(edges, dtype=target.dtype), right=True)
+    counts = torch.bincount(idx, minlength=len(edges) + 1).double()
+    raw = torch.where(counts > 0, counts.clamp(min=1) ** (-power), torch.zeros_like(counts))
+    raw = raw / ((raw * counts).sum() / counts.sum())
+    bounds = ["-inf", *[f"{e:.2f}" for e in edges], "inf"]
+    for i, (n, w) in enumerate(zip(counts.tolist(), raw.tolist())):
+        print(f"[p1v2] soh-bin [{bounds[i]}, {bounds[i + 1]}): n={int(n):>7d} "
+              f"({n / counts.sum().item():6.2%})  weight={w:.3f}")
+    return raw.tolist()
+
+
 def t1_set_params_and_config() -> SimpleNamespace:
     """1) 파라미터 및 컨피그 세팅 — parameters.py에서 그대로 읽는 실행 파라미터를 전부
     모으고, cfg(P1_MODEL_CONFIG 사본)에 반영한 뒤 세그먼터 spec까지 만든다."""
@@ -388,6 +413,13 @@ def t1_set_params_and_config() -> SimpleNamespace:
     l0_norm_constant = P.FIXED_L0_NORM_CONSTANT
     hi_cost_weighted_l0 = P.ACTIVE_HI_COST_WEIGHTED_L0
     val_rmse_epsilon = P.FIXED_VAL_RMSE_EPSILON
+    soh_bin_edges = getattr(P, "ACTIVE_SOH_BIN_WEIGHT_EDGES", None)
+    if soh_bin_edges is not None:
+        soh_bin_edges = sorted(float(e) for e in soh_bin_edges)
+    soh_bin_power = getattr(P, "FIXED_SOH_BIN_WEIGHT_POWER", 1.0)
+    ckpt_select_rule = getattr(P, "ACTIVE_CKPT_SELECT_RULE", "legacy")
+    if ckpt_select_rule not in ("legacy", "tiebreak"):
+        raise RuntimeError(f"ACTIVE_CKPT_SELECT_RULE은 'legacy' | 'tiebreak' (받은 값: {ckpt_select_rule!r})")
     use_probe_kernel = getattr(P, "ACTIVE_USE_PROBE_KERNEL", False)
     warmstart_branch_epoch = getattr(P, "ACTIVE_WARMSTART_BRANCH_EPOCH", None)
     if warmstart_branch_epoch is not None and warmstart_branch_epoch <= 0:
@@ -433,7 +465,8 @@ def t1_set_params_and_config() -> SimpleNamespace:
         batch_size_override=batch_size_override, lambda_l0_override=lambda_l0_override,
         l0_warmup_epochs_override=l0_warmup_epochs_override, l0_norm_constant=l0_norm_constant,
         hi_cost_weighted_l0=hi_cost_weighted_l0, val_rmse_epsilon=val_rmse_epsilon,
-        use_probe_kernel=use_probe_kernel, warmstart_branch_epoch=warmstart_branch_epoch,
+        soh_bin_edges=soh_bin_edges, soh_bin_power=soh_bin_power,
+        ckpt_select_rule=ckpt_select_rule, use_probe_kernel=use_probe_kernel, warmstart_branch_epoch=warmstart_branch_epoch,
     )
 
 
@@ -596,10 +629,16 @@ def t4_build_model_and_hparams(params: SimpleNamespace, data: SimpleNamespace, m
               f"{params.warmstart_branch_epoch}에 {model.n_scenarios}개로 분기(각자 자기 방향의 "
               f"압력받은 공유 게이트 값으로 초기화, L0/BETA 스케줄은 리셋 없이 계속 이어짐)")
 
+    soh_bin_weights = None
+    if params.soh_bin_edges is not None:
+        soh_bin_weights = _soh_bin_weights(data.train_ds.target, params.soh_bin_edges, params.soh_bin_power)
+
     loss_cfg = cfg["loss"]
     loss_fn = SCRLoss(lambda_scen=lambda_scen, lambda_l0=loss_cfg["lambda_l0"],
                        l0_norm_constant=params.l0_norm_constant,
-                       hi_cost_weighted=params.hi_cost_weighted_l0).to(params.device)
+                       hi_cost_weighted=params.hi_cost_weighted_l0,
+                       soh_bin_edges=params.soh_bin_edges,
+                       soh_bin_weights=soh_bin_weights).to(params.device)
     if params.l0_norm_constant is not None:
         print(f"[p1v2] l0-norm-constant 적용: _l0_penalty를 n_scenarios 대신 "
               f"{params.l0_norm_constant}로 나눔")
@@ -696,6 +735,8 @@ def t5_define_output_paths(params: SimpleNamespace, data: SimpleNamespace, hyper
         "l0_norm_constant": params.l0_norm_constant,
         "hi_cost_weighted_l0": params.hi_cost_weighted_l0,
         "warmstart_branch_epoch": params.warmstart_branch_epoch,
+        "soh_bin_edges": params.soh_bin_edges, "soh_bin_power": params.soh_bin_power,
+        "ckpt_select_rule": params.ckpt_select_rule,
         "status": "in_progress",  # 최종 write에서는 이 키가 아예 빠짐(=완료) -- get()으로만 읽는
             # 기존 소비자(test.py 등)에는 영향 없음
     }
@@ -843,10 +884,19 @@ def t6_run_training_loop(params: SimpleNamespace, hyperparams: SimpleNamespace, 
         _l0_fully_ramped_ep_eff = max(warmstart_T or 0, l0_fully_ramped_ep)
         if epoch >= _l0_fully_ramped_ep_eff:
             rmse_diff = val_rmse_v - best_val_rmse
-            is_better = (rmse_diff <= -params.val_rmse_epsilon) or (sat < best_sat)
+            if params.ckpt_select_rule == "tiebreak":
+                # 2026-11-05: legacy는 sat이 조금만 낮아도 val이 얼마나 나빠졌든 선택하고 best_val_rmse를
+                # 그 나쁜 값으로 덮어써 기준이 계속 느슨해졌다(1029_0347: 선택 59회 중 22회가 val 악화,
+                # 최종 val 0.01431 vs 램프 후 최소 0.01414). 위 best_sat 주석의 원래 의도대로 sat은
+                # ε 이내 동률에서만 tie-break로 쓰고, best_val_rmse는 최솟값만 유지한다.
+                is_better = (rmse_diff <= -params.val_rmse_epsilon) or (
+                    abs(rmse_diff) < params.val_rmse_epsilon and sat < best_sat)
+            else:
+                is_better = (rmse_diff <= -params.val_rmse_epsilon) or (sat < best_sat)
             if is_better:
                 best_sat = sat
-                best_val_rmse = val_rmse_v
+                best_val_rmse = (min(best_val_rmse, val_rmse_v) if params.ckpt_select_rule == "tiebreak"
+                                 else val_rmse_v)
                 best_epoch = epoch
                 is_selected = True
                 no_improve = 0
@@ -955,6 +1005,8 @@ def t7_save_results(params: SimpleNamespace, data: SimpleNamespace, hyperparams:
         "l0_norm_constant": params.l0_norm_constant,
         "hi_cost_weighted_l0": params.hi_cost_weighted_l0,
         "warmstart_branch_epoch": params.warmstart_branch_epoch,
+        "soh_bin_edges": params.soh_bin_edges, "soh_bin_power": params.soh_bin_power,
+        "ckpt_select_rule": params.ckpt_select_rule,
     }
     (output_dir / "p1v2_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[p1v2] 선택된 epoch={loop.best_epoch} (gate_saturation={loop.best_sat:.4f})")

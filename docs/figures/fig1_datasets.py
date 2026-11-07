@@ -6,7 +6,11 @@ Replaces fig1_problem_scenario_definition.py. One column per dataset (MIT LFP, H
     SOC zones shaded. Charge SOC = q_frac, discharge SOC = 1 - q_frac (Section 2.2), so the zone bands
     define all six scenarios.
 (c) Charge dQ/dV against voltage at the same aging stages (CC part only, Gaussian-smoothed).
-(d) SOH of every cell against cycle; TJU colored by ambient temperature; representative cell highlighted.
+(c) SOH of every cell against cycle in one panel, colored by dataset; representative cells highlighted.
+(d) Segment placement in the three zones for w_seg = 0.10 / 0.20 / 0.30 with the overlap of the segments
+    of a zone hatched (moved here from the former window-sweep figure on 2026-11-05).
+(e) Voltage span captured by a segment against its centre on the early-life charge curves of the
+    representative cells (shape content of a segment).
 
 Data: DATA_4_HI_ROOT/clean/<ds>/<cell>.pkl (cleaned time series) and the per-cycle capacity tables of
       q_frac_ref/<config>/cycle/<ds>/*.pkl (SOH = capacity / first valid cycle capacity).
@@ -47,6 +51,11 @@ ZONES = [("lo", 0.0, W_ZONE, Z_LEFT), ("mid", 0.5 - W_ZONE / 2, 0.5 + W_ZONE / 2
          ("hi", 1.0 - W_ZONE, 1.0, Z_RIGHT)]
 DQDV_BIN = {"MIT": 0.004, "HUST": 0.004, "TJU": 0.01}
 DQDV_XLIM = {"MIT": (3.33, 3.60), "HUST": (3.33, 3.60), "TJU": (3.45, 4.20)}
+# segment widths compared in Section 4.3 (N_samp per zone) and their colors, shared with fig8_window_sweep.py
+WIDTHS = {0.10: 4, 0.20: 2, 0.30: 2}
+W_REF = 0.20
+W_COLOR = {0.10: "#7FA3BF", 0.20: "#96473A", 0.30: "#3A6178"}
+DS_LS = {"MIT": "-", "HUST": (0, (3, 1.5)), "TJU": (0, (1, 1))}
 
 
 # ----------------------------------------------------------------- data ----
@@ -156,7 +165,7 @@ def panel_a(ax, ds, ts, cyc_tab, report):
             continue                                 # CV taper and short transitions
         lab = f"{abs(cr):.1f}C".replace(".0C", "C")
         ax2.text((a + b) / 120.0, cr - 0.12 * (1 if cr > 0 else -1) * ax_span(ds), lab, ha="center",
-                va="top" if cr > 0 else "bottom", fontsize=5.3, color=SUBINK, bbox=box, zorder=5,
+                va="top" if cr > 0 else "bottom", fontsize=6.1, color=SUBINK, bbox=box, zorder=5,
                 transform=ax.transData)
     # one CV label over the constant-voltage hold of the charge
     vc_ = chg.voltage_V.values
@@ -164,7 +173,7 @@ def panel_a(ax, ds, ts, cyc_tab, report):
     hold = np.where(vc_ >= vc_.max() - 0.003)[0]
     if len(hold):
         ax2.text(0.5 * (tc_[hold[0]] + tc_[hold[-1]]), 0.12 * ax_span(ds), "CV", ha="center", va="bottom",
-                 fontsize=5.3, color=SUBINK, bbox=box, zorder=5, transform=ax.transData)
+                 fontsize=6.1, color=SUBINK, bbox=box, zorder=5, transform=ax.transData)
     # SOC at discharge rate changes (fraction of the discharge charge)
     soc_marks = []
     rd = np.round(idis / cap * 4) / 4
@@ -188,7 +197,7 @@ def panel_a(ax, ds, ts, cyc_tab, report):
             chg_marks.append(round(qc[k] / qc[-1], 3))
     ax.set_ylim(-6.5, 6.5) if ds != "TJU" else ax.set_ylim(-1.8, 1.8)
     ax2.set_ylim(1.8, 3.8) if ds != "TJU" else ax2.set_ylim(2.3, 4.4)
-    ax.set_title(f"{ds} ({CHEM[ds]}), cell {cell}, cycle {cyc}", fontsize=6.5, color=INK, pad=3)
+    ax.set_title(f"{ds} ({CHEM[ds]}), cell {cell}, cycle {cyc}", fontsize=7.5, color=INK, pad=3)
     report[ds] = {"steps": [(round(a / 60, 1), round(b / 60, 1), round(cr, 2)) for a, b, cr in lines],
                   "chg_soc_changes": chg_marks, "dis_soc_changes": soc_marks,
                   "chg_Ah": round(qc[-1], 3), "dis_Ah": round(qd[-1], 3)}
@@ -198,7 +207,7 @@ def panel_b(ax, ds, ts, picks):
     for name, a, b, col in ZONES:
         ax.axvspan(a, b, color=col, alpha=0.10, lw=0)
         ax.text((a + b) / 2, 0.03, name, transform=ax.get_xaxis_transform(), ha="center", va="bottom",
-                fontsize=5.8, color=col, fontweight="bold")
+                fontsize=6.7, color=col, fontweight="bold")
     for cyc, soh in picks:
         chg, dis = split(one_cycle(ts, cyc))
         qc, vc, _ = q_curve(chg, +1)
@@ -233,63 +242,125 @@ def panel_d(ax, ds, cells, report):
     rep = CELL[ds][0]
     ends = []
     for name, c in cells.items():
-        if ds == "TJU":
-            col = TEMP_COLOR[name[2:4]]
-        else:
-            col = "#B5B5B5"
         if name != rep:
-            ax.plot(c.cycle, c.soh, color=col, lw=0.35, alpha=0.65)
+            ax.plot(c.cycle, c.soh, color=DATASET_COLOR[ds], lw=0.3, alpha=0.28)
         ends.append(c.soh.min())
     c = cells[rep]
-    ax.plot(c.cycle, c.soh, color=DATASET_COLOR[ds], lw=1.1)
-    ax.set_ylim(0.7, 1.03)
+    ax.plot(c.cycle, c.soh, color="white", lw=2.0)
+    ax.plot(c.cycle, c.soh, color=DATASET_COLOR[ds], lw=1.1, label=f"{ds} ({len(cells)} cells)")
+    ax.set_ylim(0.5, 1.03)
     ax.set_xlabel("Cycle")
     ax.set_ylabel("SOH")
-    if ds == "TJU":
-        for k, (tt, col) in enumerate(TEMP_COLOR.items()):
-            ax.plot([], [], color=col, lw=1.0, label=f"{tt} °C")
-        ax.legend(loc="upper right", bbox_to_anchor=(1.0, 0.88), frameon=False, fontsize=5.5, handlelength=1.2)
-        temps = {}
-        for name, cc in cells.items():
-            temps.setdefault(name[2:4], []).append((cc.cycle.iloc[-1], cc.soh.min()))
-        report[ds]["temp"] = {k: (len(v), int(np.median([a for a, _ in v])), round(float(np.median([b for _, b in v])), 3))
-                              for k, v in temps.items()}
-    ax.text(0.98, 0.95, f"{len(cells)} cells", transform=ax.transAxes, ha="right", va="top",
-            fontsize=5.8, color=SUBINK)
     report[ds]["soh_min_range"] = (round(min(ends), 3), round(max(ends), 3))
     report[ds]["cycles_range"] = (int(min(cc.cycle.iloc[-1] for cc in cells.values())),
                                   int(max(cc.cycle.iloc[-1] for cc in cells.values())))
 
 
+def zone_bands(ax):
+    for name, a, b, col in ZONES:
+        ax.axvspan(a, b, color=col, alpha=0.08, lw=0)
+
+
+def panel_seg(ax):
+    """Segment placement for each width: N_samp segments per zone with spacing Delta."""
+    zone_bands(ax)
+    ws = list(WIDTHS)
+    for r, w in enumerate(ws):
+        n, col = WIDTHS[w], W_COLOR[w]
+        step = (W_ZONE - w) / (n - 1)
+        ov = max(0.0, w - step) / w
+        y0 = len(ws) - r - 1
+        lane = 0.8 / n
+        for name, a, _, _ in ZONES:
+            segs = [(a + k * step, a + k * step + w) for k in range(n)]
+            for k, (s0, s1) in enumerate(segs):
+                yk = y0 + 0.1 + k * lane
+                ax.add_patch(plt.Rectangle((s0, yk + 0.12 * lane), s1 - s0, 0.76 * lane, facecolor=col,
+                                           alpha=0.7, edgecolor=col, lw=0.5))
+                if k < n - 1 and segs[k + 1][0] < s1:
+                    ax.add_patch(plt.Rectangle((segs[k + 1][0], yk + 0.12 * lane), s1 - segs[k + 1][0],
+                                               1.76 * lane, facecolor="none", edgecolor=INK, lw=0.3,
+                                               hatch="//////"))
+        ax.axhline(y0, color=FAINT, lw=0.4)
+        ax.text(1.02, y0 + 0.5, f"N={n}\n$\\Delta$={step:.3f}\n{ov * 100:.0f}% overlap",
+                transform=ax.get_yaxis_transform(), va="center", ha="left", fontsize=5.8, linespacing=1.05,
+                color=col, fontweight="bold" if w == W_REF else "normal")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, len(ws))
+    ax.set_yticks([len(ws) - r - 0.5 for r in range(len(ws))])
+    ax.set_yticklabels([f"{w:.2f}" for w in ws])
+    for t, w in zip(ax.get_yticklabels(), ws):
+        t.set_color(W_COLOR[w]); t.set_fontweight("bold")
+    ax.tick_params(axis="y", length=0)
+    ax.set_ylabel(r"Segment width $w_\mathrm{seg}$")
+    ax.set_xlabel("SOC (hatched: overlap within a zone)")
+
+
+def panel_span(ax, curves, report):
+    """Voltage span inside a segment against its centre on each representative charge curve."""
+    zone_bands(ax)
+    centres = np.linspace(0.05, 0.95, 181)
+    report["span_mid"] = {}
+    for w in WIDTHS:
+        for ds, (q, v) in curves.items():
+            sp = []
+            for c in centres:
+                m = (q >= c - w / 2) & (q <= c + w / 2)
+                sp.append((v[m].max() - v[m].min()) * 1000 if m.sum() > 2 else np.nan)
+            ax.plot(centres, sp, color=W_COLOR[w], lw=1.0 if w == W_REF else 0.7, ls=DS_LS[ds])
+            report["span_mid"][(ds, w)] = round(float(sp[90]), 1)
+    ax.set_yscale("log")
+    ax.set_ylim(2, 3000)
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("Segment center (SOC)")
+    ax.set_ylabel("Voltage span (mV)")
+    h = [plt.Line2D([], [], color=W_COLOR[w], lw=1.1, label=f"{w:.2f}") for w in WIDTHS]
+    h += [plt.Line2D([], [], color=SUBINK, lw=0.8, ls=DS_LS[d], label=d) for d in DATASETS]
+    ax.legend(handles=h, loc="lower center", ncol=3, frameon=False, fontsize=5.6, columnspacing=0.7,
+              handlelength=1.6, labelspacing=0.2, borderaxespad=0.1)
+
+
 # ----------------------------------------------------------------- figure ----
 
 def build():
-    fig, axes = plt.subplots(4, 3, figsize=(174 / 25.4, 150 / 25.4),
-                             gridspec_kw={"hspace": 0.62, "wspace": 0.52,
-                                          "left": 0.075, "right": 0.905, "top": 0.955, "bottom": 0.06})
+    fig = plt.figure(figsize=(174 / 25.4, 122 / 25.4))
+    gs = fig.add_gridspec(3, 1, hspace=0.62, left=0.075, right=0.905, top=0.945, bottom=0.075)
+    top = [gs[r].subgridspec(1, 3, wspace=0.62) for r in range(2)]
+    axes = np.array([[fig.add_subplot(top[r][j]) for j in range(3)] for r in range(2)])
+    bot = gs[2].subgridspec(1, 3, wspace=0.9, width_ratios=[0.95, 1.15, 1.0])
+    ax_c, ax_d, ax_e = (fig.add_subplot(bot[j]) for j in range(3))
     report = {}
+    curves = {}
     for j, ds in enumerate(DATASETS):
         cells = load_cells(ds)
         ts = load_series(ds, CELL[ds][0])
         picks = stage_cycles(cells[CELL[ds][0]])
         panel_a(axes[0, j], ds, ts, cells, report)
         panel_b(axes[1, j], ds, ts, picks)
-        panel_c(axes[2, j], ds, ts, picks, report)
-        panel_d(axes[3, j], ds, cells, report)
+        panel_d(ax_c, ds, cells, report)   # 2026-11-05: dQ/dV row dropped; SOH of all datasets in one panel
         report[ds]["stages"] = picks
-        for r in range(1, 4):
-            axes[r, j].spines[["top", "right"]].set_visible(False)
-    for r, lab in enumerate("abcd"):
-        axes[r, 0].text(-0.36, 1.13, f"({lab})", transform=axes[r, 0].transAxes, fontsize=8,
+        axes[1, j].spines[["top", "right"]].set_visible(False)
+        chg, _ = split(one_cycle(ts, CELL[ds][1]))
+        q, v, _ = q_curve(chg, +1)
+        curves[ds] = (q / q[-1], v)
+    ax_c.legend(loc="lower left", frameon=False, fontsize=6.0, handlelength=1.4, labelspacing=0.25)
+    panel_seg(ax_d)
+    panel_span(ax_e, curves, report)
+    for a in (ax_c, ax_e):
+        a.spines[["top", "right"]].set_visible(False)
+    for r, lab in enumerate("ab"):
+        axes[r, 0].text(-0.36, 1.13, f"({lab})", transform=axes[r, 0].transAxes, fontsize=9.2,
                         fontweight="bold", va="bottom")
+    for a, lab, x in ((ax_c, "c", -0.36), (ax_d, "d", -0.22), (ax_e, "e", -0.36)):
+        a.text(x, 1.06, f"({lab})", transform=a.transAxes, fontsize=9.2, fontweight="bold", va="bottom")
     axes[1, 0].plot([], [], color=SUBINK, lw=0.8, label="Charge")
     axes[1, 0].plot([], [], color=SUBINK, lw=0.8, ls="--", label="Discharge")
-    fig.legend(*axes[1, 0].get_legend_handles_labels(), loc="center", bbox_to_anchor=(0.952, 0.72),
-               frameon=False, fontsize=5.5, handlelength=1.6)
-    cax = fig.add_axes([0.935, 0.30, 0.012, 0.34])
+    fig.legend(*axes[1, 0].get_legend_handles_labels(), loc="center", bbox_to_anchor=(0.952, 0.62),
+               frameon=False, fontsize=6.3, handlelength=1.6)
+    cax = fig.add_axes([0.935, 0.39, 0.012, 0.18])
     cb = fig.colorbar(ScalarMappable(norm=SOH_NORM, cmap=CMAP), cax=cax)
-    cb.set_label("SOH of the drawn cycle", fontsize=6)
-    cb.ax.tick_params(labelsize=5.5)
+    cb.set_label("SOH of the drawn cycle", fontsize=6.9)
+    cb.ax.tick_params(labelsize=6.3)
     out = Path(__file__).resolve().parent / "fig1_datasets"
     fig.savefig(out.with_suffix(".png"), dpi=300)
     fig.savefig(out.with_suffix(".pdf"))

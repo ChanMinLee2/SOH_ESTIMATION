@@ -42,7 +42,15 @@ ACTIVE_SYNERGY_REDUNDANCY_THRESHOLD = 0.9  # 다중공선성 판정 상관계수
 # ── 학습(Step 8) ─────────────────────────────────────────────────────────
 ACTIVE_MAX_EPOCHS = None                # 최대 학습 에폭. None=yaml 기본값(500)
 ACTIVE_PATIENCE = None                  # 조기종료 patience(에폭 수). None=60
-ACTIVE_BATCH_SIZE = None                # 배치 크기. None=yaml 기본값(2048)
+ACTIVE_CKPT_SELECT_RULE = "legacy"      # 체크포인트 선택 규칙 — "legacy": val 개선(≥ε) 또는 sat이
+                                         # 조금이라도 낮으면 선택하고 best_val을 그 값으로 덮어씀(1029_0347 등
+                                         # 기존 run) | "tiebreak": val 개선(≥ε)이면 선택, sat은 val이 ε 이내
+                                         # 동률일 때만 tie-break, best_val은 최솟값만 유지(2026-11-05)
+ACTIVE_SOH_BIN_WEIGHT_EDGES = None      # SOH 구간 가중 MSE의 구간 경계(예: (0.85, 0.90, 0.95)). None=비활성
+                                         # (기존 MSE와 동일). 가중치는 train 타깃의 구간별 샘플 수에 반비례,
+                                         # train 평균 가중치=1로 정규화(2026-11-06). val/ckpt 선택은 가중 없음
+FIXED_SOH_BIN_WEIGHT_POWER = 1.0        # 가중치 = (1/구간 샘플 수)^power. 1.0=완전 역빈도, 0.5=완화
+ACTIVE_BATCH_SIZE = None               # 배치 크기. None=yaml 기본값(2048)
 ACTIVE_HI_COST_WEIGHTED_L0 = False      # L0 페널티에 HI 카테고리별 비용 가중 적용 여부
 ACTIVE_USE_PROBE_KERNEL = False         # 분류기(Stage A)에 커널 HI 후보 사용 여부.
                                          # True면 커널 HI 다중공선성도 함께 적용됨
@@ -229,6 +237,9 @@ FIXED_LEGACY_V4_INTERACTION_JSON = (
 # ── Step 9(평가) ──────────────────────────────────────────────────────────
 FIXED_TEST_CHECKPOINT_OVERRIDE = None   # 평가에 쓸 체크포인트 경로 수동 오버라이드.
                                          # None=<run-dir>/checkpoints/best_by_saturation.pt
+FIXED_EVAL_ROUTED_KERNEL = True         # hard/soft 평가에서 커널 HI 블록을 예측 시나리오로 다시 고름
+                                         # (2026-11-05 누수 수정). False=수정 전 동작(정답 시나리오
+                                         # 커널 HI 사용) — 어블레이션 재현용
 
 # ── 데이터 변형(Step 2 전용) ──────────────────────────────────────────────
 FIXED_SKIP_SHAPE = False                # 형상 이상치 필터 비활성화 여부

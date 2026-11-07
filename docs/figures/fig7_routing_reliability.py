@@ -131,14 +131,14 @@ def draw_routing(ax, ax_acc, name, met, df):
         for j in range(3):
             n = int(cm[i, j])
             if i == j:
-                ax.text(j, i - 0.13, f"{pct[i, j]:.2f}%", ha="center", va="center", fontsize=5.4,
+                ax.text(j, i - 0.13, f"{pct[i, j]:.2f}%", ha="center", va="center", fontsize=6.2,
                         color="white", fontweight="bold")
-                ax.text(j, i + 0.22, f"n={n / 1000:.1f}k", ha="center", va="center", fontsize=4.9,
+                ax.text(j, i + 0.22, f"n={n / 1000:.1f}k", ha="center", va="center", fontsize=5.6,
                         color="#D5DEE6")
             elif n:
-                ax.text(j, i, f"{n}", ha="center", va="center", fontsize=5.6, color=INK, fontweight="bold")
+                ax.text(j, i, f"{n}", ha="center", va="center", fontsize=6.4, color=INK, fontweight="bold")
             else:
-                ax.text(j, i, "0", ha="center", va="center", fontsize=5.6, color=FAINT)
+                ax.text(j, i, "0", ha="center", va="center", fontsize=6.4, color=FAINT)
     # the far corners (start <-> end) are never used: mark them
     for (i, j) in ((0, 2), (2, 0)):
         ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False, hatch="////", ec="#C9C2B4", lw=0))
@@ -147,14 +147,14 @@ def draw_routing(ax, ax_acc, name, met, df):
         ax.axvline(k - 0.5, color="white", lw=1.0)
     ax.set_xticks(range(3))
     ax.set_yticks(range(3))
-    ax.set_xticklabels(CLASS_LABEL, fontsize=5.8)
-    ax.set_yticklabels(CLASS_LABEL, fontsize=5.8, rotation=90, va="center")
+    ax.set_xticklabels(CLASS_LABEL, fontsize=6.7)
+    ax.set_yticklabels(CLASS_LABEL, fontsize=6.7, rotation=90, va="center")
     ax.tick_params(length=0, pad=1.5)
     for s in ax.spines.values():
         s.set_visible(False)
     acc = met["hard"]["classification"]["accuracy"] * 100
     n_mis = int(df.misrouted.sum())
-    ax.set_title(f"accuracy {acc:.2f}%   misrouted {n_mis:,}", fontsize=5.9, color=INK, pad=2.5,
+    ax.set_title(f"accuracy {acc:.2f}%   misrouted {n_mis:,}", fontsize=6.8, color=INK, pad=2.5,
                  fontweight="normal")
 
     # per-scenario accuracy strip
@@ -164,16 +164,16 @@ def draw_routing(ax, ax_acc, name, met, df):
         a = acc_s[s] * 100
         ax_acc.plot([98.0, a], [y, y], color=GRID, lw=1.6, solid_capstyle="butt", zorder=1)
         ax_acc.scatter([a], [y], s=13, color=SCEN_COLOR[s], edgecolor="white", lw=0.4, zorder=3)
-        ax_acc.text(97.93, y, SCEN_LABEL[s], ha="right", va="center", fontsize=5.0, color=SUBINK)
+        ax_acc.text(97.93, y, SCEN_LABEL[s], ha="right", va="center", fontsize=5.8, color=SUBINK)
     ax_acc.axvline(100, color=FAINT, lw=0.5, ls=(0, (2, 1.5)))
     ax_acc.axhline(2.5, color=FAINT, lw=0.4)
     ax_acc.set_xlim(98.0, 100.15)
     ax_acc.set_ylim(-0.6, 5.6)
     ax_acc.set_yticks([])
     ax_acc.set_xticks([98, 99, 100])
-    ax_acc.tick_params(axis="x", labelsize=5.0, length=1.8, pad=1)
+    ax_acc.tick_params(axis="x", labelsize=5.8, length=1.8, pad=1)
     style_ax(ax_acc, keep=("bottom",))
-    ax_acc.set_title("scenario acc. (%)", fontsize=5.3, color=SUBINK, pad=2.5, fontweight="normal")
+    ax_acc.set_title("scenario acc. (%)", fontsize=6.1, color=SUBINK, pad=2.5, fontweight="normal")
 
 
 def draw_errors(ax, ax_r, name, met, df, rmse_hard, rmse_true, best, worst):
@@ -208,10 +208,10 @@ def draw_errors(ax, ax_r, name, met, df, rmse_hard, rmse_true, best, worst):
     ax.set_xlim(-0.6, 5.6)
     ax.set_ylim(-7.5, 7.5)
     ax.set_xticks(xs)
-    ax.set_xticklabels([SCEN_LABEL[s] for s in SCEN_ORDER], fontsize=5.4)
+    ax.set_xticklabels([SCEN_LABEL[s] for s in SCEN_ORDER], fontsize=6.2)
     style_ax(ax)
-    ax.text(1.0, -7.3, "charge", ha="center", va="bottom", fontsize=5.4, color=SUBINK)
-    ax.text(4.0, -7.3, "discharge", ha="center", va="bottom", fontsize=5.4, color=SUBINK)
+    ax.text(1.0, -7.3, "charge", ha="center", va="bottom", fontsize=6.2, color=SUBINK)
+    ax.text(4.0, -7.3, "discharge", ha="center", va="bottom", fontsize=6.2, color=SUBINK)
 
     # RMSE bars above: classifier routing (filled) and true-label routing (open)
     for x, s in zip(xs, SCEN_ORDER):
@@ -223,13 +223,13 @@ def draw_errors(ax, ax_r, name, met, df, rmse_hard, rmse_true, best, worst):
             tag = "▲"
         elif s == best:
             tag = "▼"
-        ax_r.text(x, max(rh, rt) + 0.12, f"{rh:.2f}{tag}", ha="center", va="bottom", fontsize=5.1,
+        ax_r.text(x, max(rh, rt) + 0.12, f"{rh:.2f}{tag}", ha="center", va="bottom", fontsize=5.9,
                   color="#B23A2B" if s == worst else ("#2F6B4F" if s == best else INK),
                   fontweight="bold" if s in (best, worst) else "normal")
     ax_r.set_ylim(0, 3.35)
     ax_r.set_xlim(-0.6, 5.6)
     ax_r.set_yticks([0, 1, 2, 3])
-    ax_r.tick_params(axis="y", labelsize=5.2)
+    ax_r.tick_params(axis="y", labelsize=6)
     ax_r.tick_params(axis="x", labelbottom=False, length=0)
     ax_r.axvline(2.5, color=FAINT, lw=0.5, ls=(0, (2, 1.5)))
     for y in (1, 2, 3):
@@ -237,8 +237,8 @@ def draw_errors(ax, ax_r, name, met, df, rmse_hard, rmse_true, best, worst):
     style_ax(ax_r, keep=("left",))
     h = met["hard"]["capacity"]["rmse"] * 100
     o = met["oracle"]["capacity"]["rmse"] * 100
-    ax_r.set_title(f"RMSE {h:.2f}% routed  |  {o:.2f}% true label  (Δ {h - o:+.2f} pp)",
-                   fontsize=5.9, color=INK, pad=2.5, fontweight="normal")
+    ax_r.set_title(f"RMSE: routed {h:.2f}%, true label {o:.2f}%", fontsize=6.4, color=INK, pad=2.5,
+                   fontweight="normal")
 
 
 def draw_soc(ax, ax_bar, name, rmse_hard, norm, worst):
@@ -255,18 +255,18 @@ def draw_soc(ax, ax_bar, name, rmse_hard, norm, worst):
     ax.yaxis.set_major_locator(plt.MultipleLocator(0.4 if CHEM[name] == "NCM" else 0.3))
     ax.tick_params(labelbottom=False)
     style_ax(ax)
-    ax.tick_params(axis="y", labelsize=5.4)
+    ax.tick_params(axis="y", labelsize=6.2)
     if CHEM[name] == "LFP":
         # flat plateau bracket over the mid zone of the charge curve
         sel = (q_c > 0.25) & (q_c < 0.75)
         vtop = np.nanmax(v_c[sel]) + 0.06
         ax.annotate("", xy=(0.25, vtop), xytext=(0.75, vtop),
                     arrowprops=dict(arrowstyle="|-|", lw=0.5, color=SUBINK, mutation_scale=2.5))
-        ax.text(0.5, vtop + 0.025, "flat plateau", ha="center", va="bottom", fontsize=5.1, color=SUBINK)
+        ax.text(0.5, vtop + 0.025, "flat plateau", ha="center", va="bottom", fontsize=5.9, color=SUBINK)
     else:
         ax.text(0.5, 0.06, "sloped curve, no plateau", transform=ax.transAxes, ha="center", va="bottom",
-                fontsize=5.1, color=SUBINK)
-    ax.set_title(f"cell {cell}, cycle {cyc}", fontsize=5.4, color=SUBINK, pad=1.5, fontweight="normal",
+                fontsize=5.9, color=SUBINK)
+    ax.set_title(f"cell {cell}, cycle {cyc}", fontsize=6.2, color=SUBINK, pad=1.5, fontweight="normal",
                  loc="right")
 
     ax_bar.set_xlim(0, 1)
@@ -282,13 +282,13 @@ def draw_soc(ax, ax_bar, name, rmse_hard, norm, worst):
                 ax_bar.plot([xs, xs + W_SEG - 0.024], [track + 0.16 + k * 0.09] * 2, color="white", lw=0.6,
                             alpha=0.9, solid_capstyle="butt", zorder=3)
             ax_bar.text(x0 + W_ZONE / 2, track + 0.55, f"{rmse_hard[scen]:.2f}", ha="center", va="center",
-                        fontsize=5.5, color=INK if norm(rmse_hard[scen]) < 0.6 else "white", fontweight="bold",
+                        fontsize=6.3, color=INK if norm(rmse_hard[scen]) < 0.6 else "white", fontweight="bold",
                         zorder=4)
     ax_bar.set_yticks([1.47, 0.47])
-    ax_bar.set_yticklabels(["Chg", "Dis"], fontsize=5.4)
+    ax_bar.set_yticklabels(["Chg", "Dis"], fontsize=6.2)
     ax_bar.tick_params(axis="y", length=0, pad=1)
     ax_bar.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
-    ax_bar.tick_params(axis="x", labelsize=5.4, length=2, pad=1)
+    ax_bar.tick_params(axis="x", labelsize=6.2, length=2, pad=1)
     for s in ("top", "right", "left"):
         ax_bar.spines[s].set_visible(False)
     ax_bar.spines["bottom"].set_linewidth(0.6)
@@ -308,9 +308,9 @@ def draw_bands(ax, name, df, norm):
     for i in range(6):
         for j in range(len(SOH_BANDS)):
             if np.isnan(mat[i, j]):
-                ax.text(j, i, "–", ha="center", va="center", fontsize=5.2, color=FAINT)
+                ax.text(j, i, "–", ha="center", va="center", fontsize=6, color=FAINT)
                 continue
-            ax.text(j, i, f"{mat[i, j]:.1f}", ha="center", va="center", fontsize=5.0,
+            ax.text(j, i, f"{mat[i, j]:.1f}", ha="center", va="center", fontsize=5.8,
                     color="white" if norm(mat[i, j]) > 0.5 else INK)
     for k in range(7):
         ax.axhline(k - 0.5, color="white", lw=0.8)
@@ -318,15 +318,15 @@ def draw_bands(ax, name, df, norm):
         ax.axvline(k - 0.5, color="white", lw=0.8)
     ax.axhline(2.5, color=INK, lw=0.8)
     ax.set_yticks(range(6))
-    ax.set_yticklabels([SCEN_LABEL[s] for s in SCEN_ORDER], fontsize=5.4)
+    ax.set_yticklabels([SCEN_LABEL[s] for s in SCEN_ORDER], fontsize=6.2)
     ax.set_xticks(range(len(SOH_BANDS)))
-    ax.set_xticklabels([b[2] for b in SOH_BANDS], fontsize=5.0, rotation=0)
+    ax.set_xticklabels([b[2] for b in SOH_BANDS], fontsize=5.8, rotation=0)
     ax.tick_params(length=0, pad=1.5)
     for s in ax.spines.values():
         s.set_visible(False)
     share = [(df.soh_true > lo).mul(df.soh_true <= hi).mean() * 100 for lo, hi, _ in SOH_BANDS]
     for j, p in enumerate(share):
-        ax.text(j, -0.78, f"{p:.0f}%", ha="center", va="bottom", fontsize=4.8, color=SUBINK)
+        ax.text(j, -0.78, f"{p:.0f}%", ha="center", va="bottom", fontsize=5.5, color=SUBINK)
     return mat, cnt
 
 
@@ -340,15 +340,14 @@ def build_figure():
     norm_band = Normalize(vmin=0.0, vmax=6.0)
 
     mm = 1 / 25.4
-    fig = plt.figure(figsize=(174 * mm, 196 * mm))
+    fig = plt.figure(figsize=(174 * mm, 112 * mm))
     L, R = 0.07, 0.985
     gap = 0.045
     cw = (R - L - 2 * gap) / 3
     # row boundaries (figure fraction, top -> bottom)
-    rA = (0.800, 0.940)
-    rB = (0.545, 0.735)
-    rC = (0.300, 0.470)
-    rD = (0.045, 0.188)
+    # 2026-11-05: confusion (old a) and SOC position (old c) rows removed; accuracy is stated in the text
+    rB = (0.555, 0.855)
+    rD = (0.085, 0.345)
     out = {}
     for c, name in enumerate(RUNS):
         x0 = L + c * (cw + gap)
@@ -358,47 +357,31 @@ def build_figure():
         best = min(rh, key=rh.get)
 
         # column header
-        fig.text(x0 + cw / 2, 0.982, f"{name}  ({CHEM[name]})", ha="center", va="top", fontsize=7.6,
+        fig.text(x0 + cw / 2, 0.985, f"{name}  ({CHEM[name]})", ha="center", va="top", fontsize=8.7,
                  fontweight="bold", color=DATASET_COLOR[name])
-        fig.add_artist(Line2D([x0, x0 + cw], [0.962, 0.962], color=DATASET_COLOR[name], lw=1.2))
-
-        ax_cm = fig.add_axes([x0 + 0.004, rA[0], cw * 0.52, rA[1] - rA[0]])
-        ax_acc = fig.add_axes([x0 + cw * 0.76, rA[0] + 0.012, cw * 0.24, rA[1] - rA[0] - 0.024])
-        draw_routing(ax_cm, ax_acc, name, met, df)
+        fig.add_artist(Line2D([x0, x0 + cw], [0.950, 0.950], color=DATASET_COLOR[name], lw=1.2))
 
         hB = rB[1] - rB[0]
         ax_r = fig.add_axes([x0, rB[0] + hB * 0.66, cw, hB * 0.30])
         ax_e = fig.add_axes([x0, rB[0], cw, hB * 0.62])
         draw_errors(ax_e, ax_r, name, met, df, rh, rt, best, worst)
 
-        hC = rC[1] - rC[0]
-        ax_v = fig.add_axes([x0, rC[0] + hC * 0.40, cw, hC * 0.56])
-        ax_b = fig.add_axes([x0, rC[0], cw, hC * 0.36], sharex=ax_v)
-        draw_soc(ax_v, ax_b, name, rh, norm_pos, worst)
-
         ax_d = fig.add_axes([x0, rD[0], cw, rD[1] - rD[0]])
         out[name] = draw_bands(ax_d, name, df, norm_band)
 
         if c == 0:
-            ax_cm.set_ylabel("True position", fontsize=5.8, labelpad=1)
-            ax_e.set_ylabel("Error (% SOH)", fontsize=5.8, labelpad=1)
-            ax_r.set_ylabel("RMSE (%)", fontsize=5.8, labelpad=1)
-            ax_v.set_ylabel("Voltage (V)", fontsize=5.8, labelpad=1)
-            ax_d.set_ylabel("Scenario", fontsize=5.8, labelpad=1)
-        ax_cm.set_xlabel("Predicted position", fontsize=5.8, labelpad=1)
-        ax_b.set_xlabel("SOC", fontsize=5.8, labelpad=1)
-        ax_d.set_xlabel("True SOH band", fontsize=5.8, labelpad=1)
+            ax_e.set_ylabel("Error (% SOH)", fontsize=6.7, labelpad=1)
+            ax_r.set_ylabel("RMSE (%)", fontsize=6.7, labelpad=1)
+            ax_d.set_ylabel("Scenario", fontsize=6.7, labelpad=1)
+        ax_d.set_xlabel("True SOH band", fontsize=6.7, labelpad=1)
 
     # panel letters and row titles
-    rows = [(rA, "(a)", "Routing of the scenario classifier"),
-            (rB, "(b)", "Error per scenario under classifier and true-label routing"),
-            (rC, "(c)", "Scenario RMSE at the SOC position of each zone"),
-            (rD, "(d)", "Scenario RMSE by SOH band")]
+    rows = [(rB, "(a)", "Error per scenario"),
+            (rD, "(b)", "Scenario RMSE by SOH band")]
     for (lo, hi), lab, title in rows:
-        top = hi + (0.030 if lab != "(a)" else 0.006)
-        fig.text(0.008, top, lab, fontsize=8.5, fontweight="bold", va="center")
-        if lab != "(a)":
-            fig.text(0.04, top, title, fontsize=6.4, va="center", color=INK, style="italic")
+        top = hi + (0.055 if lab == "(a)" else 0.062)
+        fig.text(0.008, top, lab, fontsize=9.8, fontweight="bold", va="center")
+        fig.text(0.045, top, title, fontsize=7.4, va="center", color=INK, style="italic")
 
     # legends
     leg = [Rectangle((0, 0), 1, 1, fc=SUBINK, lw=0, label="classifier routing"),
@@ -406,26 +389,14 @@ def build_figure():
            Line2D([], [], marker="o", ls="", ms=2.2, color="#B23A2B", label="misrouted segment"),
            Line2D([], [], marker="$▲$", ls="", ms=3.5, color="#B23A2B", label="worst"),
            Line2D([], [], marker="$▼$", ls="", ms=3.5, color="#2F6B4F", label="best")]
-    fig.legend(handles=leg, loc="center right", bbox_to_anchor=(R, rB[1] + 0.030), ncol=5, fontsize=5.3,
+    fig.legend(handles=leg, loc="center right", bbox_to_anchor=(R, rB[1] + 0.055), ncol=5, fontsize=6.1,
                frameon=False, handlelength=1.3, columnspacing=1.0, handletextpad=0.4)
-    leg2 = [Line2D([], [], color=SUBINK, lw=1.0, label="charge"),
-            Line2D([], [], color=SUBINK, lw=1.0, ls=(0, (3, 1.6)), label="discharge"),
-            Rectangle((0, 0), 1, 1, fc="white", ec="#B23A2B", lw=1.0, label="worst scenario")]
-    fig.legend(handles=leg2, loc="center right", bbox_to_anchor=(R - 0.30, rC[1] + 0.030), ncol=3,
-               fontsize=5.3, frameon=False, handlelength=1.8, columnspacing=1.0)
-
-    cax = fig.add_axes([R - 0.17, rC[1] + 0.026, 0.17, 0.009])
-    cb = fig.colorbar(ScalarMappable(norm=norm_pos, cmap=CMAP_POS), cax=cax, orientation="horizontal")
-    cb.ax.tick_params(labelsize=5.0, length=1.5, pad=1)
-    cb.outline.set_linewidth(0.4)
-    fig.text(R - 0.175, rC[1] + 0.0305, "scenario RMSE (%)", ha="right", va="center", fontsize=5.3)
-
-    cax2 = fig.add_axes([R - 0.17, rD[1] + 0.037, 0.17, 0.009])
+    cax2 = fig.add_axes([R - 0.17, rD[1] + 0.058, 0.17, 0.014])
     cb2 = fig.colorbar(ScalarMappable(norm=norm_band, cmap=CMAP_BAND), cax=cax2, orientation="horizontal")
-    cb2.ax.tick_params(labelsize=5.0, length=1.5, pad=1)
+    cb2.ax.tick_params(labelsize=5.8, length=1.5, pad=1)
     cb2.outline.set_linewidth(0.4)
-    fig.text(R - 0.175, rD[1] + 0.0415, "RMSE (%)    numbers on top: share of test segments in each band",
-             ha="right", va="center", fontsize=5.3)
+    fig.text(R - 0.175, rD[1] + 0.065, "RMSE (%)    top numbers: share of test segments",
+             ha="right", va="center", fontsize=6.1)
     return fig, data, rmse_hard, rmse_true, out
 
 

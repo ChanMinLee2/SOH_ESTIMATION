@@ -145,9 +145,18 @@ class SCREvaluator:
         clf_inp    = torch.cat(clf_parts, dim=1)  # (B, N_HI+1[+n_dir*max_k])
         clf_logits = self._classifier(clf_inp)    # (B, n_classes)
 
+        # 2026-11-05: batch_d["x_kernel"]은 진짜 scen_idx로 고른 커널 HI라, 시나리오만 예측값으로
+        # 바꾸면 오분류 행에 정답 시나리오의 커널 HI가 들어간다(정답 누수 + 다른 시나리오의 j번째
+        # 커널이 j번째 게이트로 들어가는 순서 불일치). x_kernel_all(test.py가 붙임)이 있으면
+        # 라우팅된 시나리오의 행을 다시 고른다. 없으면(구 호출 경로) 기존 동작 그대로.
+        x_kernel_all = batch_d.get("x_kernel_all")                # (B, n_scenarios, max_k) | None
+        rows = torch.arange(B, device=self.device)
+
         if routing_mode == "hard":
             class_pred = clf_logits.argmax(1)                     # (B,)
             batch_d["scen_idx"] = routing_t[dir_idx, class_pred]  # (B,)
+            if x_kernel_all is not None:
+                batch_d["x_kernel"] = x_kernel_all[rows, batch_d["scen_idx"]]
             out = self.model(batch_d)
             lv_pred = class_pred.cpu().numpy()
         else:  # soft
@@ -156,6 +165,8 @@ class SCREvaluator:
             for c in range(self._n_classes):
                 b_c = dict(batch_d)
                 b_c["scen_idx"] = routing_t[dir_idx, c]   # (B,)
+                if x_kernel_all is not None:
+                    b_c["x_kernel"] = x_kernel_all[rows, b_c["scen_idx"]]
                 out_c = self.model(b_c)
                 cap_cls.append(out_c["cap_pred"])
             cap_stack = torch.stack(cap_cls, dim=1)        # (B, n_classes)

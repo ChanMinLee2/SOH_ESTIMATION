@@ -33,7 +33,7 @@ CACHE = HERE / "_cache" / "fig7_synergy_cache.json"
 SCHEMATIC = HERE / "new_fig_3.png"
 OUT = HERE / "fig4_kernel_merged"
 
-W_MM, H_MM = 174.0, 214.0
+W_MM, H_MM = 174.0, 150.0
 DATASETS = ["MIT", "HUST", "TJU"]
 DS_LABEL = {"MIT": "MIT (LFP)", "HUST": "HUST (LFP)", "TJU": "TJU (NCM)"}
 DS_COLOR = {"MIT": "#2b6cb0", "HUST": "#2a9d8f", "TJU": "#c8553d"}
@@ -46,10 +46,10 @@ EXAMPLE = ("MIT", "kernel_chg_hi_g8")
 SEL_THR = 0.9
 
 plt.rcParams.update({
-    "font.size": 6.5, "axes.titlesize": 7, "axes.labelsize": 6.5, "xtick.labelsize": 5.8,
-    "ytick.labelsize": 5.8, "legend.fontsize": 5.6, "axes.linewidth": 0.55,
-    "xtick.major.width": 0.5, "ytick.major.width": 0.5, "xtick.major.size": 2.2,
-    "ytick.major.size": 2.2, "pdf.fonttype": 42, "font.family": "DejaVu Sans",
+    "font.size": 7.5, "axes.titlesize": 8, "axes.labelsize": 7.5, "xtick.labelsize": 6.7,
+    "ytick.labelsize": 6.7, "legend.fontsize": 6.4, "axes.linewidth": 0.55,
+    "xtick.major.width": 0.5, "ytick.major.width": 0.5, "xtick.major.size": 2.5,
+    "ytick.major.size": 2.5, "pdf.fonttype": 42, "font.family": "DejaVu Sans",
 })
 
 
@@ -71,9 +71,9 @@ def ker(r):
 
 
 def title(ax, tag, text, x=0.0, y=1.0, **kw):
-    ax.text(x, y, f"({tag})", transform=ax.transAxes, fontsize=7.4, fontweight="bold",
+    ax.text(x, y, f"({tag})", transform=ax.transAxes, fontsize=8.5, fontweight="bold",
             va="bottom", ha="left", **kw)
-    ax.text(x + 0.075 * kw.pop("scale", 1.0), y, text, transform=ax.transAxes, fontsize=6.6,
+    ax.text(x + 0.075 * kw.pop("scale", 1.0), y, text, transform=ax.transAxes, fontsize=7.6,
             va="bottom", ha="left", **kw)
 
 
@@ -83,33 +83,202 @@ def tidy(ax):
 
 
 def badge(ax, x, y, text, fc="#164f86"):
-    ax.text(x, y, text, transform=ax.transAxes, fontsize=6.2, color="white", fontweight="bold",
+    ax.text(x, y, text, transform=ax.transAxes, fontsize=7.1, color="white", fontweight="bold",
             ha="center", va="center", zorder=10,
             bbox=dict(boxstyle="round,pad=0.28,rounding_size=0.35", fc=fc, ec="white", lw=0.6))
 
 
 # ---------------------------------------------------------------------------------------------
 def panel_schematic(fig):
-    img = plt.imread(SCHEMATIC)
-    h_px, w_px = img.shape[:2]
-    w = 109.0
-    h = w * h_px / w_px
-    ax = ax_mm(fig, 2.0, 7.0, w, h)
-    ax.imshow(img, interpolation="lanczos")
+    """Vector schematic of stages 2-4 in one scenario (replaces the raster new_fig_3.png)."""
+    X0, Y0, WS, HS = 2.0, 6.0, 112.0, 80.0
+    ax = ax_mm(fig, X0, Y0, WS, HS)
+    ax.set_xlim(0, WS)
+    ax.set_ylim(HS, 0)
     ax.set_axis_off()
-    ax.text(0.0, 1.012, "(a)", transform=ax.transAxes, fontsize=7.4, fontweight="bold", va="bottom")
-    ax.text(0.045, 1.012, "Synergy grouping and kernel fusion in each scenario", transform=ax.transAxes,
-            fontsize=6.6, va="bottom")
-    # links from schematic steps to the quantitative panels
-    badge(ax, 0.445, 0.318, "→ (g)", fc="#e08a2c")          # group growing
-    badge(ax, 0.925, 0.618, "→ (b)(f)", fc="#164f86")      # RBF / landmarks
-    badge(ax, 0.925, 0.335, "→ (d)(e)", fc="#164f86")      # ridge output
-    badge(ax, 0.925, 0.89, "→ (c)", fc="#555555")          # group selection
-    return ax, h
+    sub = lambda x, y, w, h: ax_mm(fig, X0 + x, Y0 + y, w, h)
+    rng = np.random.default_rng(3)
+    ax.text(0.0, -1.2, "(a)", fontsize=8.5, fontweight="bold", va="bottom")
+    ax.text(7.0, -1.2, "Synergy grouping and kernel fusion in each scenario $s$", fontsize=7.6, va="bottom")
+    ax.add_patch(FancyBboxPatch((0.4, 0.4), WS - 0.8, HS - 0.8, boxstyle="round,pad=0,rounding_size=1.5",
+                                fc="none", ec="#9a9a9a", lw=0.6))
+    cols = ((1.8, 54.0, "Synergy grouping (linear)", C_LIN), (57.2, 53.0, "Kernel fusion (nonlinear)", C_KER))
+    for x, w, t, c in cols:
+        ax.add_patch(FancyBboxPatch((x, 1.8), w, 5.2, boxstyle="round,pad=0,rounding_size=1.0", fc=c, ec="none",
+                                    alpha=0.9))
+        ax.text(x + w / 2, 4.5, t, ha="center", va="center", fontsize=7.0, color="white", fontweight="bold")
+    for y in (31.0, 55.0):
+        for x, w, *_ in cols:
+            ax.plot([x + 1, x + w - 1], [y, y], color="#c8c8c8", lw=0.5, ls=(0, (2, 1.5)))
+    ax.plot([55.9, 55.9], [8.5, HS - 2], color="#d0d0d0", lw=0.5)
 
+    def step(x, y, n, t):
+        ax.text(x, y, f"{n}", fontsize=6.6, fontweight="bold", va="top",
+                bbox=dict(boxstyle="circle,pad=0.12", fc="white", ec="#555555", lw=0.5))
+        ax.text(x + 3.4, y + 0.1, t, fontsize=6.4, va="top")
+
+    # ---- L1: redundancy collapse -----------------------------------------------------------------
+    step(3.0, 9.0, 1, r"Collapse redundant HIs with $|\rho_{ij}| \geq \tau_\mathrm{red}$")
+    n = 6
+    C = np.abs(rng.uniform(-0.6, 0.6, (n, n)))
+    C = (C + C.T) / 2
+    for i, j in ((0, 2), (3, 4)):
+        C[i, j] = C[j, i] = 0.95
+    np.fill_diagonal(C, 1.0)
+    m = sub(5.0, 16.5, 13.0, 13.0)
+    m.imshow(C, cmap="Reds", vmin=0, vmax=1.15)
+    for i, j in ((0, 2), (2, 0), (3, 4), (4, 3)):
+        m.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fc="none", ec="black", lw=0.7))
+    m.set_xticks([]); m.set_yticks([])
+    for sp in m.spines.values():
+        sp.set_linewidth(0.4)
+    ax.text(11.5, 15.8, r"$|\rho_{ij}|$", ha="center", va="bottom", fontsize=6.2)
+    rs = np.array([0.42, 0.18, 0.31, 0.12, 0.27, 0.08])
+    v = sub(20.0, 16.5, 2.4, 13.0)
+    v.imshow(rs[:, None], cmap="Blues", vmin=0, vmax=0.5, aspect="auto")
+    v.set_xticks([]); v.set_yticks([])
+    for sp in v.spines.values():
+        sp.set_linewidth(0.4)
+    ax.text(21.2, 15.8, r"$|\rho_{iy}|$", ha="center", va="bottom", fontsize=6.2)
+    ax.annotate("", xy=(29.5, 23.0), xytext=(23.6, 23.0),
+                arrowprops=dict(arrowstyle="-|>", lw=0.6, color="#444444", mutation_scale=6))
+    sv = [0, 1, 3, 5]
+    for k, i in enumerate(sv):
+        y = 14.5 + k * 3.2
+        ax.add_patch(plt.Rectangle((31.0, y), 2.6, 2.6, fc=plt.cm.Blues(rs[i] / 0.5 * 0.8 + 0.1), ec="#164f86",
+                                   lw=0.6))
+        ax.text(34.3, y + 1.3, f"HI$_{i + 1}$", fontsize=5.9, va="center")
+    for k, (i, host) in enumerate(((2, 0), (4, 3))):
+        y = 15.5 + k * 6.0
+        ax.add_patch(plt.Rectangle((44.0, y), 2.6, 2.6, fc="white", ec="#164f86", lw=0.6, ls=(0, (1.5, 1))))
+        ax.text(47.2, y + 1.3, f"HI$_{i + 1}$", fontsize=5.9, va="center")
+        ax.annotate("", xy=(38.6, 14.5 + sv.index(host) * 3.2 + 1.3), xytext=(43.7, y + 1.3),
+                    arrowprops=dict(arrowstyle="-|>", lw=0.45, color="#777777", mutation_scale=4,
+                                    connectionstyle="arc3,rad=0.25"))
+    ax.text(29.0, 29.2, r"survivors HI$_\mathrm{sv}^{(s)}$", fontsize=5.5, va="center")
+    ax.text(43.6, 29.2, r"attached HI$_\mathrm{at}^{(s)}$", fontsize=5.5, va="center")
+
+    # ---- L2: group growth --------------------------------------------------------------------------
+    step(3.0, 33.0, 2, r"Grow groups by partial correlation with SOH")
+    ax.text(4.0, 38.3, r"survivors by $|\rho_{iy}|$", fontsize=5.9, va="center", color="#555555")
+    order = [0, 1, 3, 5]
+    for k, i in enumerate(order):
+        y = 40.2 + k * 3.4
+        ax.add_patch(plt.Rectangle((6.0, y), 2.6, 2.6, fc=plt.cm.Blues(rs[i] / 0.5 * 0.8 + 0.1), ec="#164f86",
+                                   lw=0.6))
+        ax.text(9.3, y + 1.3, f"HI$_{i + 1}$", fontsize=5.9, va="center")
+    ax.annotate("", xy=(6.0, 53.5), xytext=(6.0, 41.0),
+                arrowprops=dict(arrowstyle="-|>", lw=0.5, color="#9a9a9a", mutation_scale=5))
+    ax.text(5.0, 47.0, "rank", fontsize=5.3, rotation=90, ha="center", va="center", color="#777777")
+    for gy, mem, lab in ((38.0, [0, 3, 5], "Group 1"), (45.0, [1], "Group 2")):
+        ax.add_patch(FancyBboxPatch((25.0, gy), 21.0, 6.0, boxstyle="round,pad=0,rounding_size=1.0", fc="#fbf3ea",
+                                    ec=C_LIN, lw=0.6))
+        ax.text(46.6, gy + 3.0, lab, fontsize=5.7, va="center", ha="left", color=C_LIN, rotation=0)
+        for k, i in enumerate(mem):
+            ax.add_patch(plt.Rectangle((26.5 + k * 4.4, gy + 1.7), 2.6, 2.6, fc=plt.cm.Blues(rs[i] / 0.5 * 0.8 + 0.1),
+                                       ec="#164f86", lw=0.6))
+        for k in range(len(mem), 4):
+            ax.add_patch(plt.Rectangle((26.5 + k * 4.4, gy + 1.7), 2.6, 2.6, fc="none", ec="#bdbdbd", lw=0.5,
+                                       ls=(0, (1.2, 1))))
+    for i_from, gy, ls in ((0, 38.0, "-"), (3, 38.0, "--"), (5, 38.0, "--"), (1, 45.0, "-")):
+        y = 40.2 + order.index(i_from) * 3.4 + 1.3
+        ax.annotate("", xy=(24.8, gy + 3.0), xytext=(13.5, y),
+                    arrowprops=dict(arrowstyle="-|>", lw=0.5, color="#444444", ls=ls, mutation_scale=5))
+    ax.text(25.0, 53.0, r"$j^\ast = \arg\max_j\, |\rho(x_j, y \mid \mathbf{x}_G)|$", fontsize=5.9, va="center")
+
+    # ---- L3: partial correlation example --------------------------------------------------------
+    step(3.0, 57.0, 3, "Credit the information a candidate adds")
+    yv = rng.uniform(0.75, 1.0, 400)
+    x1 = 0.35 * (yv - 0.875) / 0.07 + rng.normal(0, 1.0, 400)
+    x2 = (yv - 0.875) / 0.07 - 0.9 * x1 + rng.normal(0, 0.8, 400)
+    rx = x2 - np.polyval(np.polyfit(x1, x2, 1), x1)
+    ry = yv - np.polyval(np.polyfit(x1, yv, 1), x1)
+    for k, (xa, ya, lab, xl, yl) in enumerate((
+            (x1, yv, f"seed: r = {np.corrcoef(x1, yv)[0, 1]:.2f}", r"$x_1$", "SOH"),
+            (rx, ry, f"partial r = {np.corrcoef(rx, ry)[0, 1]:.2f}", r"$x_2 \mid x_1$", r"SOH $\mid x_1$"))):
+        s = sub(9.0 + k * 28.0, 62.5, 15.0, 11.5)
+        s.scatter(xa, ya, s=0.6, color="#5b8fc7", alpha=0.5, lw=0)
+        s.plot(np.sort(xa), np.polyval(np.polyfit(xa, ya, 1), np.sort(xa)), color=C_LIN, lw=0.8)
+        s.set_xticks([]); s.set_yticks([])
+        s.set_xlabel(xl, fontsize=5.6, labelpad=0.5)
+        s.set_ylabel(yl, fontsize=5.6, labelpad=0.5)
+        s.set_title(lab, fontsize=5.7, pad=1.5)
+        for sp in s.spines.values():
+            sp.set_linewidth(0.4)
+    ax.annotate("", xy=(35.5, 68.0), xytext=(25.5, 68.0),
+                arrowprops=dict(arrowstyle="-|>", lw=0.6, color="#444444", mutation_scale=6))
+    ax.text(30.5, 66.6, "+ $x_2$", fontsize=5.6, ha="center", va="bottom")
+
+    # ---- R1: keep groups of two or more ---------------------------------------------------------
+    step(58.4, 9.0, 1, r"Fuse groups with $|G| \geq 2$ only")
+    for k, nm in enumerate((3, 2, 4)):
+        gx = 61.0 + k * 10.0
+        ax.add_patch(FancyBboxPatch((gx, 15.0), 8.4, 8.4, boxstyle="round,pad=0,rounding_size=1.0", fc="#eef4fa",
+                                    ec=C_KER, lw=0.6))
+        for q in range(nm):
+            ax.add_patch(plt.Rectangle((gx + 1.0 + (q % 2) * 3.4, 16.0 + (q // 2) * 3.4), 2.6, 2.6,
+                                       fc=plt.cm.Blues(0.35 + 0.12 * q), ec="#164f86", lw=0.5))
+    ax.text(75.4, 25.2, "kernel candidates", fontsize=5.9, ha="center", va="top", color=C_KER)
+    ax.add_patch(FancyBboxPatch((95.5, 15.0), 8.4, 8.4, boxstyle="round,pad=0,rounding_size=1.0", fc="#f3f3f3",
+                                ec="#9a9a9a", lw=0.6, ls=(0, (1.5, 1))))
+    ax.add_patch(plt.Rectangle((96.5, 16.0), 2.6, 2.6, fc=plt.cm.Blues(0.35), ec="#164f86", lw=0.5))
+    ax.text(99.7, 25.2, "singleton:\nraw HI only", fontsize=5.6, ha="center", va="top", color="#777777",
+            linespacing=1.0)
+
+    # ---- R2: RBF on landmarks -------------------------------------------------------------------
+    step(58.4, 33.0, 2, r"RBF map to $N_\mathrm{lm}$ landmarks (Nyström)")
+    e = sub(60.5, 38.5, 20.0, 13.0)
+    pts = rng.normal(0, 1, (500, 2)) * [1.0, 0.7]
+    lm = pts[rng.choice(500, 26, replace=False)]
+    new = np.array([0.35, 0.15])
+    e.scatter(pts[:, 0], pts[:, 1], s=0.6, color="#b5b5b5", lw=0)
+    e.scatter(lm[:, 0], lm[:, 1], s=5, marker="D", color=C_KER, lw=0)
+    near = np.argsort(((lm - new) ** 2).sum(1))[:3]
+    for k in near:
+        e.plot([new[0], lm[k, 0]], [new[1], lm[k, 1]], color=C_LIN, lw=0.6)
+    e.scatter(*new, s=24, marker="*", color=C_LIN, edgecolor="black", lw=0.3, zorder=5)
+    e.set_xticks([]); e.set_yticks([])
+    e.set_xlabel("member HI space of $G$", fontsize=5.6, labelpad=0.5)
+    for sp in e.spines.values():
+        sp.set_linewidth(0.4)
+    hs = [Line2D([0], [0], marker="o", ls="", ms=1.8, color="#b5b5b5", label="training"),
+          Line2D([0], [0], marker="D", ls="", ms=2.4, color=C_KER, label="landmark"),
+          Line2D([0], [0], marker="*", ls="", ms=4.5, color=C_LIN, mec="black", mew=0.3, label="new segment")]
+    ax.legend(handles=hs, loc="upper left", bbox_to_anchor=(82.0 / WS, 1 - 38.0 / HS), frameon=False, fontsize=5.6,
+              handletextpad=0.2, labelspacing=0.25, borderaxespad=0)
+    ax.text(82.4, 49.5, r"$\phi_k = K(\mathbf{x}, \mathbf{z}_k)$", fontsize=6.0, va="center")
+    ax.text(82.4, 52.8, r"$K = \exp(-\|\mathbf{x}-\mathbf{x}'\|^2 / 2\sigma_K^2)$", fontsize=5.6, va="center")
+
+    # ---- R3: ridge to SOH -----------------------------------------------------------------------
+    step(58.4, 57.0, 3, "Ridge regression to SOH")
+    b = sub(61.0, 62.0, 18.0, 13.0)
+    k_ = np.arange(14)
+    phi = np.exp(-0.5 * ((k_ - 5.5) / 2.2) ** 2) * rng.uniform(0.5, 1.0, 14)
+    w = rng.normal(0, 1, 14)
+    b.bar(k_, phi * w, color=np.where(w > 0, C_KER, C_LIN), width=0.75)
+    b.axhline(0, color="#555555", lw=0.4)
+    b.set_xticks([]); b.set_yticks([])
+    b.set_xlabel(r"landmark $k$", fontsize=5.6, labelpad=0.5)
+    b.set_ylabel(r"$w_k \phi_k$", fontsize=5.6, labelpad=0.5)
+    for sp in b.spines.values():
+        sp.set_linewidth(0.4)
+    ax.annotate("", xy=(87.5, 68.5), xytext=(80.5, 68.5),
+                arrowprops=dict(arrowstyle="-|>", lw=0.6, color="#444444", mutation_scale=6))
+    ax.text(84.0, 67.6, r"$\Sigma$", fontsize=6.6, ha="center", va="bottom")
+    ax.add_patch(FancyBboxPatch((88.0, 65.6), 13.0, 5.8, boxstyle="round,pad=0,rounding_size=1.2", fc=C_KER, ec="none"))
+    ax.text(94.5, 68.5, r"$h_\mathrm{ker}(\mathbf{x})$", fontsize=6.4, color="white", ha="center", va="center")
+    ax.text(95.0, 75.5, r"$\mathbf{w}^\ast = (\Phi^\top\Phi + \lambda_\mathrm{ridge} I)^{-1}\Phi^\top \mathbf{y}$",
+            fontsize=5.8, ha="center", va="center")
+    ax.text(94.5, 62.4, r"kept if partial $r \geq 0.10$", fontsize=5.5, ha="center", va="center", color="#555555")
+
+    # links to the quantitative panels
+    for x, y, t, c in ((50.5, 77.0, "→ (d)", C_LIN), (103.5, 59.0, "→ (b)(c)", C_KER)):
+        ax.text(x, y, t, fontsize=6.4, color="white", fontweight="bold", ha="center", va="center", zorder=10,
+                bbox=dict(boxstyle="round,pad=0.25,rounding_size=0.35", fc=c, ec="white", lw=0.6))
+    return ax, HS
 
 def panel_scatter(fig, rows):
-    x0, y0, s = 123.0, 15.5, 40.0
+    x0, y0, s = 125.5, 14.5, 36.0
     ax = ax_mm(fig, x0, y0, s, s)
     axt = ax_mm(fig, x0, y0 - 7.5, s, 7.0)
     axr = ax_mm(fig, x0 + s + 0.8, y0, 7.0, s)
@@ -117,7 +286,7 @@ def panel_scatter(fig, rows):
     ax.plot([0, 1], [0, 1], color="#8a8a8a", lw=0.6, ls="--", zorder=1)
     for k in (0.2, 0.4):
         ax.plot([0, 1 - k], [k, 1], color="#c9d7e6", lw=0.45, ls=":", zorder=1)
-        ax.text(0.98 - k, 0.995, f"+{k:.1f}", fontsize=4.8, color="#7d97b3", ha="right", va="top")
+        ax.text(0.98 - k, 0.995, f"+{k:.1f}", fontsize=5.5, color="#7d97b3", ha="right", va="top")
     for r in rows:
         xv, yv = best(r), ker(r)
         if r["status"] != "kept":
@@ -130,10 +299,10 @@ def panel_scatter(fig, rows):
                    facecolor=c if sel else "white", edgecolor=c, lw=0.55, alpha=0.9, zorder=3)
     ex = next(r for r in rows if (r["dataset"], r["kernel"]) == EXAMPLE)
     ax.scatter(best(ex), ker(ex), s=70, facecolor="none", edgecolor="black", lw=0.8, zorder=5)
-    ax.annotate("(g)", xy=(best(ex), ker(ex)), xytext=(0.04, 0.93), fontsize=5.8, fontweight="bold",
+    ax.annotate("(d)", xy=(best(ex), ker(ex)), xytext=(0.04, 0.93), fontsize=6.7, fontweight="bold",
                 arrowprops=dict(arrowstyle="-", lw=0.5, color="black", shrinkB=3))
     n_up = sum(ker(r) > best(r) for r in rows)
-    ax.text(0.97, 0.05, f"K > B in {n_up}/{len(rows)}", ha="right", fontsize=5.8, color=C_KER,
+    ax.text(0.97, 0.05, f"K > B in {n_up}/{len(rows)}", ha="right", fontsize=6.7, color=C_KER,
             fontweight="bold")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -154,49 +323,12 @@ def panel_scatter(fig, rows):
         a.set_axis_off()
     axt.set_xlim(0, 1)
     axr.set_ylim(0, 1)
-    axt.text(0.0, 1.25, "(b)", transform=axt.transAxes, fontsize=7.4, fontweight="bold", va="bottom")
-    axt.text(0.155, 1.25, "Kernel HI against its best member", transform=axt.transAxes, fontsize=6.6,
+    axt.text(0.0, 1.25, "(b)", transform=axt.transAxes, fontsize=8.5, fontweight="bold", va="bottom")
+    axt.text(0.155, 1.25, "Kernel HI and its best member", transform=axt.transAxes, fontsize=7.6,
              va="bottom")
     return ax
 
 
-def panel_map(fig, rows):
-    ax = ax_mm(fig, 131.0, 70.0, 39.5, 18.0)
-    gain = np.full((3, 6), np.nan)
-    for i, ds in enumerate(DATASETS):
-        for j, sc in enumerate(SCENS):
-            rs = [r for r in rows if r["dataset"] == ds and r["scenario"] == sc]
-            if rs:
-                gain[i, j] = np.median([ker(r) - best(r) for r in rs])
-            n = len(rs)
-            nsel = sum((r["gate_prob"] or 0) >= SEL_THR for r in rs if r["status"] == "kept")
-            ndrop = sum(r["status"] != "kept" for r in rs)
-            txt = f"{n}" + (f"\n{nsel}★" if nsel else "\n–")
-            ax.text(j, i, txt, ha="center", va="center", fontsize=4.9, linespacing=0.95,
-                    color="white" if (not np.isnan(gain[i, j]) and gain[i, j] > 0.42) else "black")
-            if ndrop:
-                ax.text(j + 0.42, i - 0.40, "×" * ndrop, ha="right", va="top", fontsize=4.6, color="#b00020")
-    im = ax.imshow(gain, cmap="Blues", vmin=0.1, vmax=0.6, aspect="auto")
-    ax.set_xticks(range(6))
-    ax.set_xticklabels([s.replace("_", "\n") for s in SCENS], fontsize=5.0, linespacing=0.85)
-    ax.set_yticks(range(3))
-    ax.set_yticklabels(DATASETS, fontsize=5.6)
-    ax.tick_params(length=0, pad=1.2)
-    ax.set_xticks(np.arange(-0.5, 6), minor=True)
-    ax.set_yticks(np.arange(-0.5, 3), minor=True)
-    ax.grid(which="minor", color="white", lw=0.9)
-    ax.axvline(2.5, color="black", lw=0.8)
-    for s in ax.spines.values():
-        s.set_visible(False)
-    cax = ax_mm(fig, 131.0, 103.0, 39.5, 1.4)
-    cb = fig.colorbar(im, cax=cax, orientation="horizontal")
-    cb.set_ticks([0.1, 0.35, 0.6])
-    cb.ax.tick_params(labelsize=5.0, length=1.5, pad=1)
-    cb.outline.set_linewidth(0.4)
-    cax.text(0.5, 1.6, "number: groups   ★: selected kernel HIs   ×: filtered\ncolor: median K − B of the cell",
-             transform=cax.transAxes, fontsize=4.8, ha="center", va="bottom", color="#333333", linespacing=1.1)
-    ax.text(-0.17, 1.12, "(c)", transform=ax.transAxes, fontsize=7.4, fontweight="bold", va="bottom")
-    ax.text(-0.02, 1.12, "Groups per scenario and gain", transform=ax.transAxes, fontsize=6.6, va="bottom")
 
 
 def half_violin(ax, data, pos, color, side=-1, width=0.42):
@@ -210,7 +342,7 @@ def half_violin(ax, data, pos, color, side=-1, width=0.42):
 
 
 def panel_ladder(fig, rows):
-    ax = ax_mm(fig, 13.0, 119.0, 60.0, 51.0)
+    ax = ax_mm(fig, 13.0, 99.0, 74.0, 38.0)
     kept = [r for r in rows if r["status"] == "kept"]
     gap = 3.7
     for di, ds in enumerate(DATASETS):
@@ -228,73 +360,27 @@ def panel_ladder(fig, rows):
         ax.scatter(xs, med, marker="D", s=13, color=[C_BEST, C_LIN, C_KER], edgecolor="black", lw=0.5,
                    zorder=5)
         for k in range(3):
-            ax.text(xs[k] + 0.17, med[k], f"{med[k]:.2f}", fontsize=4.9, va="center", zorder=6,
+            ax.text(xs[k] + 0.17, med[k], f"{med[k]:.2f}", fontsize=5.6, va="center", zorder=6,
                     color="#222222")
         n_up = int((vals[:, 2] > vals[:, 1]).sum())
-        ax.text(xs[1], 1.03, f"K > L  {n_up}/{len(vals)}", ha="center", va="bottom", fontsize=5.3,
+        ax.text(xs[1], 1.03, f"K > L  {n_up}/{len(vals)}", ha="center", va="bottom", fontsize=6.1,
                 color=C_KER, fontweight="bold")
-        ax.text(xs[1], -0.13, DS_LABEL[ds], ha="center", va="top", fontsize=6.0, color=DS_COLOR[ds],
+        ax.text(xs[1], -0.13, DS_LABEL[ds], ha="center", va="top", fontsize=6.9, color=DS_COLOR[ds],
                 fontweight="bold", transform=ax.get_xaxis_transform())
     ax.set_xticks([di * gap + k * 1.05 for di in range(3) for k in range(3)])
-    ax.set_xticklabels(["B", "L", "K"] * 3, fontsize=5.6)
+    ax.set_xticklabels(["B", "L", "K"] * 3, fontsize=6.4)
     ax.set_xlim(-0.75, 2 * gap + 2.6)
     ax.set_ylim(0, 1.0)
     ax.set_ylabel("|r| with SOH on test cells")
     tidy(ax)
     ax.grid(axis="x", visible=False)
-    ax.text(0.0, 1.10, "(d)", transform=ax.transAxes, fontsize=7.4, fontweight="bold", va="bottom")
-    ax.text(0.095, 1.10, "Best member (B), linear fit (L) and kernel HI (K)", transform=ax.transAxes,
-            fontsize=6.6, va="bottom")
+    ax.text(-0.13, 1.12, "(c)", transform=ax.transAxes, fontsize=8.5, fontweight="bold", va="bottom")
+    ax.text(-0.04, 1.12, "Best member (B), linear fit (L) and kernel HI (K)", transform=ax.transAxes,
+            fontsize=7.6, va="bottom")
 
 
-def panel_gain(fig, rows):
-    ax = ax_mm(fig, 87.0, 117.0, 35.0, 35.0)
-    kept = [r for r in rows if r["status"] == "kept"]
-    ax.axhspan(0, 0.8, color="#eef4fa", zorder=0)
-    ax.axhline(0, color="#777777", lw=0.5)
-    ax.axvline(0, color="#777777", lw=0.5)
-    for r in kept:
-        sel = (r["gate_prob"] or 0) >= SEL_THR
-        c = DS_COLOR[r["dataset"]]
-        ax.scatter(lin(r) - best(r), ker(r) - lin(r), marker=DS_MARKER[r["dataset"]], s=10 if sel else 7,
-                   facecolor=c if sel else "white", edgecolor=c, lw=0.5, alpha=0.9, zorder=3)
-    ex = next(r for r in rows if (r["dataset"], r["kernel"]) == EXAMPLE)
-    ax.scatter(lin(ex) - best(ex), ker(ex) - lin(ex), s=55, facecolor="none", edgecolor="black", lw=0.7,
-               zorder=5)
-    n_up = sum(ker(r) > lin(r) for r in kept)
-    ax.text(0.97, 0.95, f"K > L\n{n_up}/{len(kept)}", transform=ax.transAxes, ha="right", va="top",
-            fontsize=5.6, color=C_KER, fontweight="bold")
-    ax.text(0.97, 0.04, "linear only", transform=ax.transAxes, ha="right", fontsize=5.0, color="#777777")
-    ax.set_xlim(-0.02, 0.55)
-    ax.set_ylim(-0.12, 0.72)
-    ax.set_xlabel("Linear gain L − B")
-    ax.set_ylabel("Nonlinear gain K − L", labelpad=1)
-    tidy(ax)
-    ax.text(-0.22, 1.06, "(e)", transform=ax.transAxes, fontsize=7.4, fontweight="bold", va="bottom")
-    ax.text(-0.04, 1.06, "Linear vs nonlinear synergy", transform=ax.transAxes, fontsize=6.6, va="bottom")
 
 
-def panel_traintest(fig, rows):
-    ax = ax_mm(fig, 87.0, 166.0, 35.0, 35.0)
-    kept = [r for r in rows if r["status"] == "kept"]
-    ax.plot([0, 1], [0, 1], color="#8a8a8a", lw=0.6, ls="--")
-    for ds in DATASETS:
-        rs = [r for r in kept if r["dataset"] == ds]
-        ax.scatter([abs(r["kernel_r_train"]) for r in rs], [ker(r) for r in rs], marker=DS_MARKER[ds],
-                   s=7, facecolor="white", edgecolor=DS_COLOR[ds], lw=0.5, alpha=0.9, label=ds)
-    tr = np.array([abs(r["kernel_r_train"]) for r in kept])
-    te = np.array([ker(r) for r in kept])
-    rho = np.corrcoef(tr, te)[0, 1]
-    ax.text(0.04, 0.95, f"r = {rho:.2f}\nmedian drop {np.median(tr - te):.2f}", transform=ax.transAxes,
-            va="top", fontsize=5.4)
-    ax.set_xlim(0.2, 1)
-    ax.set_ylim(0.2, 1)
-    ax.set_xlabel("Kernel HI |r| on training cells")
-    ax.set_ylabel("|r| on test cells", labelpad=1)
-    tidy(ax)
-    ax.text(-0.22, 1.06, "(f)", transform=ax.transAxes, fontsize=7.4, fontweight="bold", va="bottom")
-    ax.text(-0.04, 1.06, "Frozen kernel maps on new cells", transform=ax.transAxes, fontsize=6.6,
-            va="bottom")
 
 
 def _cat(name):
@@ -303,76 +389,76 @@ def _cat(name):
 
 def panel_example(fig, rows):
     ex = next(r for r in rows if (r["dataset"], r["kernel"]) == EXAMPLE)
-    ax = ax_mm(fig, 128.0, 112.0, 45.0, 56.0)
+    ax = ax_mm(fig, 97.0, 96.5, 50.0, 46.0)
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
-    ax.text(0.0, 1.0, "(g)", fontsize=7.4, fontweight="bold", va="bottom")
-    ax.text(0.10, 1.0, "Traced kernel HI (MIT chg hi)", fontsize=6.6, va="bottom")
-    ax.text(0.0, 0.955, "growth order with partial r given earlier members", fontsize=5.0, color="#555555",
+    ax.text(0.0, 1.0, "(d)", fontsize=8.5, fontweight="bold", va="bottom")
+    ax.text(0.105, 1.0, "Traced kernel HI of the MIT high charge scenario", fontsize=7.6, va="bottom")
+    ax.text(0.0, 0.955, "growth order with partial r given earlier members", fontsize=5.8, color="#555555",
             va="top")
     n = len(ex["members"])
-    ys = np.linspace(0.83, 0.42, n)
+    ys = np.linspace(0.80, 0.40, n)
     xm, wb = 0.12, 0.60
     for i, (nm, rt) in enumerate(zip(ex["members"], ex["member_r_test"])):
         c = CAT_COLORS[_cat(nm)]
         ax.add_patch(FancyBboxPatch((xm, ys[i] - 0.05), wb, 0.10, boxstyle="round,pad=0.004,rounding_size=0.02",
                                     fc=c, ec="none", alpha=0.16))
         ax.add_patch(FancyBboxPatch((xm, ys[i] - 0.05), 0.016, 0.10, boxstyle="square,pad=0", fc=c, ec="none"))
-        ax.text(xm + 0.035, ys[i] + 0.018, nm, fontsize=5.1, family="monospace", va="center")
+        ax.text(xm + 0.035, ys[i] + 0.018, nm, fontsize=5.9, family="monospace", va="center")
         # |r| bar inside the box
         ax.add_patch(plt.Rectangle((xm + 0.035, ys[i] - 0.032), 0.5 * abs(rt), 0.018, fc=C_BEST, ec="none"))
-        ax.text(xm + 0.045 + 0.5 * abs(rt), ys[i] - 0.023, f"|r| {abs(rt):.2f}", fontsize=4.9, va="center")
+        ax.text(xm + 0.045 + 0.5 * abs(rt), ys[i] - 0.023, f"|r| {abs(rt):.2f}", fontsize=5.6, va="center")
         ax.add_patch(FancyArrowPatch((xm + wb + 0.01, ys[i]), (0.86, 0.62), arrowstyle="-|>", mutation_scale=4,
                                      lw=0.55, color="#8a8a8a", connectionstyle="arc3,rad=-0.15"))
     for i in range(1, n):
         ax.add_patch(FancyArrowPatch((xm - 0.01, ys[i - 1] - 0.03), (xm - 0.01, ys[i] + 0.03), arrowstyle="-|>",
                                      mutation_scale=4.5, lw=0.6, color=C_LIN, connectionstyle="arc3,rad=0.6"))
-        ax.text(xm - 0.085, (ys[i - 1] + ys[i]) / 2, f"{abs(ex['growth_scores'][i]):.2f}", fontsize=5.0,
+        ax.text(xm - 0.085, (ys[i - 1] + ys[i]) / 2, f"{abs(ex['growth_scores'][i]):.2f}", fontsize=5.8,
                 ha="center", va="center", color=C_LIN)
-    ax.text(xm - 0.085, ys[0] + 0.065, "seed", fontsize=4.9, ha="center", color="#555555")
+    ax.text(xm - 0.085, ys[0] + 0.065, "seed", fontsize=5.6, ha="center", color="#555555")
     ax.add_patch(FancyBboxPatch((0.80, 0.56), 0.18, 0.12, boxstyle="round,pad=0.006,rounding_size=0.03",
                                 fc=C_KER, ec="none"))
-    ax.text(0.89, 0.62, "kernel\nHI", color="white", ha="center", va="center", fontsize=5.8, fontweight="bold",
+    ax.text(0.89, 0.62, "kernel\nHI", color="white", ha="center", va="center", fontsize=6.7, fontweight="bold",
             linespacing=0.9)
-    ax.text(0.89, 0.71, f"gate p {ex['gate_prob']:.2f}", ha="center", fontsize=5.0)
+    ax.text(0.89, 0.71, f"gate p {ex['gate_prob']:.2f}", ha="center", fontsize=5.8)
     # bar comparison
-    bx = ax_mm(fig, 136.0, 150.5, 35.0, 17.5)
+    bx = ax_mm(fig, 157.0, 106.0, 15.0, 26.0)
     labels = [f"m{i + 1}" for i in range(n)] + ["L", "K"]
     vals = [abs(v) for v in ex["member_r_test"]] + [lin(ex), ker(ex)]
     cols = [CAT_COLORS[_cat(m)] for m in ex["members"]] + [C_LIN, C_KER]
     bx.barh(range(len(vals))[::-1], vals, color=cols, height=0.7, alpha=0.9)
     for k, v in enumerate(vals):
-        bx.text(v + 0.02, len(vals) - 1 - k, f"{v:.2f}", va="center", fontsize=4.9)
+        bx.text(v + 0.02, len(vals) - 1 - k, f"{v:.2f}", va="center", fontsize=5.6)
     bx.set_yticks(range(len(vals))[::-1])
-    bx.set_yticklabels(labels, fontsize=5.0)
+    bx.set_yticklabels(labels, fontsize=5.8)
     bx.set_xlim(0, 1)
-    bx.set_xlabel("|r| with SOH on test cells", fontsize=5.4, labelpad=1)
-    bx.tick_params(axis="x", labelsize=5.0)
+    bx.set_xlabel("|r| on test cells", fontsize=6.2, labelpad=1)
+    bx.tick_params(axis="x", labelsize=5.8)
     bx.spines[["top", "right"]].set_visible(False)
     bx.axvline(max(vals[:n]), color=C_BEST, lw=0.6, ls=":")
     handles = [plt.Rectangle((0, 0), 1, 1, fc=c, label=k) for k, c in CAT_COLORS.items()]
-    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(129.5 / W_MM, 1 - 172.5 / H_MM), ncol=4,
-               frameon=False, handlelength=0.8, handletextpad=0.3, columnspacing=0.7, fontsize=5.2,
-               title="HI category (g)", title_fontsize=5.4, alignment="left")
+    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(108.0 / W_MM, 1 - 140.5 / H_MM), ncol=4,
+               frameon=False, handlelength=0.8, handletextpad=0.3, columnspacing=0.7, fontsize=6,
+               title="HI category (d)", title_fontsize=5.4, alignment="left")
 
 
 def legend_block(fig):
     h = [Line2D([0], [0], marker=DS_MARKER[d], ls="", mfc=DS_COLOR[d], mec=DS_COLOR[d], ms=3.6, label=DS_LABEL[d])
          for d in DATASETS]
-    h += [Line2D([0], [0], marker="o", ls="", mfc="white", mec="black", ms=3.6, mew=0.6, label="gate not selected"),
-          Line2D([0], [0], marker="o", ls="", mfc="black", mec="black", ms=3.6, label="gate selected (p ≥ 0.9)"),
+    h += [Line2D([0], [0], marker="o", ls="", mfc="white", mec="black", ms=3.6, mew=0.6, label="not selected"),
+          Line2D([0], [0], marker="o", ls="", mfc="black", mec="black", ms=3.6, label="selected (p ≥ 0.9)"),
           Line2D([0], [0], marker="x", ls="", color="#9a9a9a", ms=3.6, label="filtered out"),
           Line2D([0], [0], marker="o", ls="", mfc="white", mec="#555555", ms=2.4, label="2 members"),
           Line2D([0], [0], marker="o", ls="", mfc="white", mec="#555555", ms=4.2, label="4 members")]
-    fig.legend(handles=h, loc="upper left", bbox_to_anchor=(10.0 / W_MM, 1 - 199.5 / H_MM), ncol=3,
-               frameon=False, handletextpad=0.2, columnspacing=1.0, labelspacing=0.35, fontsize=5.5,
-               title="Markers in (b) (e) (f)", title_fontsize=5.6, alignment="left")
+    fig.legend(handles=h, loc="upper left", bbox_to_anchor=(119.0 / W_MM, 1 - 63.5 / H_MM), ncol=2,
+               frameon=False, handletextpad=0.2, columnspacing=1.0, labelspacing=0.35, fontsize=6.3,
+               title="Markers in (b)", title_fontsize=5.6, alignment="left")
     h2 = [plt.Rectangle((0, 0), 1, 1, fc=c, label=l) for c, l in
           ((C_BEST, "B  best single member"), (C_LIN, "L  least-squares fit of members"), (C_KER, "K  kernel HI"))]
-    fig.legend(handles=h2, loc="upper left", bbox_to_anchor=(10.0 / W_MM, 1 - 182.0 / H_MM), ncol=1,
-               frameon=False, handlelength=0.9, handletextpad=0.35, labelspacing=0.3, fontsize=5.5,
-               title="Levels in (d) (g)", title_fontsize=5.6, alignment="left")
+    fig.legend(handles=h2, loc="upper left", bbox_to_anchor=(10.0 / W_MM, 1 - 144.0 / H_MM), ncol=3,
+               frameon=False, handlelength=0.9, handletextpad=0.35, labelspacing=0.3, fontsize=6.3,
+               title_fontsize=5.6, alignment="left")
 
 
 def main():
@@ -380,20 +466,10 @@ def main():
     fig = plt.figure(figsize=(W_MM / 25.4, H_MM / 25.4))
     ax_a, h_a = panel_schematic(fig)
     ax_b = panel_scatter(fig, rows)
-    panel_map(fig, rows)
     panel_ladder(fig, rows)
-    panel_gain(fig, rows)
-    panel_traintest(fig, rows)
     panel_example(fig, rows)
     legend_block(fig)
-    # connector from the ridge output of the schematic to the scatter
-    con = ConnectionPatch(xyA=(0.985, 0.43), coordsA=ax_a.transAxes, xyB=(0.0, 0.62), coordsB=ax_b.transAxes,
-                          arrowstyle="-|>", mutation_scale=7, lw=0.8, color=C_KER,
-                          connectionstyle="arc3,rad=-0.25", zorder=20)
-    fig.add_artist(con)
-    fig.text(112.5 / W_MM, 1 - 66.0 / H_MM, "fit on train\n|r| on test", fontsize=4.6, color=C_KER,
-             ha="left", va="center")
-    fig.add_artist(Line2D([4 / W_MM, 170 / W_MM], [1 - 109.0 / H_MM] * 2, color="#bdbdbd", lw=0.5, ls=(0, (3, 2))))
+    fig.add_artist(Line2D([4 / W_MM, 170 / W_MM], [1 - 89.0 / H_MM] * 2, color="#bdbdbd", lw=0.5, ls=(0, (3, 2))))
     fig.savefig(OUT.with_suffix(".png"), dpi=300)
     fig.savefig(OUT.with_suffix(".pdf"))
     print("saved", OUT.with_suffix(".png"))

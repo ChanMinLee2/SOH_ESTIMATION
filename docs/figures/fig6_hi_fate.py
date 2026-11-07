@@ -52,9 +52,9 @@ SPEC_COLOR, SHARED_COLOR = "#c0392b", "#d9d9d9"
 DATASET_COLOR = {"MIT": "#3a6ea5", "HUST": "#5b9bd5", "TJU": "#c0504d"}
 
 mpl.rcParams.update({
-    "font.family": "DejaVu Sans", "font.size": 6.5, "axes.titlesize": 7.5, "axes.labelsize": 6.5,
-    "xtick.labelsize": 6, "ytick.labelsize": 6, "legend.fontsize": 6, "axes.linewidth": 0.6,
-    "xtick.major.width": 0.5, "ytick.major.width": 0.5, "xtick.major.size": 2, "ytick.major.size": 2,
+    "font.family": "DejaVu Sans", "font.size": 7.5, "axes.titlesize": 8.6, "axes.labelsize": 7.5,
+    "xtick.labelsize": 6.9, "ytick.labelsize": 6.9, "legend.fontsize": 6.9, "axes.linewidth": 0.6,
+    "xtick.major.width": 0.5, "ytick.major.width": 0.5, "xtick.major.size": 2.3, "ytick.major.size": 2.3,
     "pdf.fonttype": 42,
 })
 
@@ -108,10 +108,10 @@ def build():
     cols = [(n, s) for n, _ in RUNS for s in SCEN]
 
     # ---------------------------------------------------------------- layout
-    W, H = 174 / 25.4, 168 / 25.4
+    W, H = 174 / 25.4, 140 / 25.4   # 2026-11-05: height 168 -> 140 mm, panel (a) about 80%
     fig = plt.figure(figsize=(W, H))
     gs = GridSpec(2, 2, figure=fig, width_ratios=[1.55, 1.0], height_ratios=[1.0, 1.06],
-                  left=0.15, right=0.945, top=0.925, bottom=0.115, wspace=0.34, hspace=0.45)
+                  left=0.15, right=0.93, top=0.925, bottom=0.135, wspace=0.34, hspace=0.55)
     ax_a = fig.add_subplot(gs[:, 0])
     ax_b = fig.add_subplot(gs[0, 1])
     ax_c = fig.add_subplot(gs[1, 1])
@@ -167,11 +167,11 @@ def build():
         for j in (1, 5):
             ax_a.plot([x0[n] + strip_w + j] * 2, [0, nrow], color="#333333", lw=0.3, ls=(0, (2, 1)))
         ax_a.text(x0[n] + strip_w + NSLOT / 2, -0.4, n + (" (NCM)" if n == "TJU" else " (LFP)"),
-                  ha="center", va="bottom", fontsize=7, fontweight="bold", color=DATASET_COLOR[n])
+                  ha="center", va="bottom", fontsize=8, fontweight="bold", color=DATASET_COLOR[n])
         for j, lab in enumerate(SLOT_LABEL):
             is_dir = j in (0, 4)
             ax_a.text(x0[n] + strip_w + j + .5, nrow + 0.35, lab, rotation=90, ha="center", va="top",
-                      fontsize=5.6, color="#a63603" if is_dir else "black",
+                      fontsize=6.4, color="#a63603" if is_dir else "black",
                       fontweight="bold" if is_dir else "normal")
     for i in range(nrow + 1):
         for n, _ in RUNS:
@@ -181,7 +181,7 @@ def build():
     for i, h in enumerate(rows):
         c = _cat(h)
         ax_a.add_patch(Rectangle((xl - 0.55, i), 0.5, 1, color=CAT_COLOR[c], lw=0, clip_on=False))
-        ax_a.text(xl - 0.75, i + 0.5, h, ha="right", va="center", fontsize=5.6, color=CAT_COLOR[c])
+        ax_a.text(xl - 0.75, i + 0.5, h, ha="right", va="center", fontsize=6.4, color=CAT_COLOR[c])
     # category separators
     prev = None
     for i, h in enumerate(rows):
@@ -206,16 +206,16 @@ def build():
                Line2D([], [], marker="o", ls="", color="#fd8d3c", mec="#a63603", mew=0.5, ms=3,
                       label="Selected by direction gate only")]
     fig.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.01, 0.005), ncol=2,
-               frameon=False, handlelength=1.0, columnspacing=0.8, handletextpad=0.4, fontsize=5.6)
-    for xc, cm_, ttl in ((0.40, cmap, "Scenario gate $P(z_j \\neq 0)$"),
-                         (0.555, cmap_dir, "Direction gate $P(z_j \\neq 0)$")):
-        cax = fig.add_axes([xc, 0.045, 0.12, 0.009])
+               frameon=False, handlelength=1.0, columnspacing=0.8, handletextpad=0.4, fontsize=6.4)
+    for xc, cm_, ttl in ((0.50, cmap, "Scenario gate $P(z_j \\neq 0)$"),
+                         (0.70, cmap_dir, "Direction gate $P(z_j \\neq 0)$")):
+        cax = fig.add_axes([xc, 0.04, 0.12, 0.011])
         cb = fig.colorbar(mpl.cm.ScalarMappable(cmap=cm_, norm=mpl.colors.Normalize(0, 1)), cax=cax,
                           orientation="horizontal")
         cb.set_ticks([0, 0.5, 0.9])
-        cb.ax.tick_params(labelsize=5.6, length=1.5, pad=1)
+        cb.ax.tick_params(labelsize=6.4, length=1.5, pad=1)
         cb.outline.set_linewidth(0.4)
-        cax.set_title(ttl, fontsize=5.6, pad=2)
+        cax.set_title(ttl, fontsize=6.4, pad=2)
 
     # ---------------------------------------------------------------- (b) composition
     xb = []
@@ -233,18 +233,18 @@ def build():
     kv = np.array([data[n]["ker_sel"][s] for n, s in cols])
     ax_b.bar(xb, kv, bottom=bottoms, width=0.82, color=KERNEL_COLOR, label="kernel", lw=0)
     for xx, b, k, (n, s) in zip(xb, bottoms, kv, cols):
-        ax_b.text(xx, b + k + 0.3, f"{int(b + k)}", ha="center", va="bottom", fontsize=5.6)
+        ax_b.text(xx, b + k + 0.3, f"{int(b + k)}", ha="center", va="bottom", fontsize=6.4)
     ax_b.set_xticks(xb)
-    ax_b.set_xticklabels(SCEN_LABEL * 3, rotation=90, fontsize=5.6)
+    ax_b.set_xticklabels(SCEN_LABEL * 3, rotation=90, fontsize=6.4)
     for n, _ in RUNS:
         i0 = [i for i, (nn, _) in enumerate(cols) if nn == n]
         ax_b.text(xb[i0].mean(), 1.0, n, transform=ax_b.get_xaxis_transform(), ha="center",
-                  va="bottom", fontsize=6.5, fontweight="bold", color=DATASET_COLOR[n])
+                  va="bottom", fontsize=7.5, fontweight="bold", color=DATASET_COLOR[n])
     ax_b.set_ylabel(r"HIs in $\mathrm{HI}_\mathrm{sel}^{(s)}$")
     ax_b.set_ylim(0, max(bottoms + kv) * 1.22)
     ax_b.spines[["top", "right"]].set_visible(False)
     ax_b.legend(ncol=5, loc="upper left", bbox_to_anchor=(0.0, 1.0), frameon=False, handlelength=0.9,
-                columnspacing=0.6, handletextpad=0.3, fontsize=5.6)
+                columnspacing=0.6, handletextpad=0.3, fontsize=6.4)
     ax_b.set_title(r"(b) Size of $\mathrm{HI}_\mathrm{sel}^{(s)}$ by category", loc="left",
                    fontweight="bold", pad=10)
 
@@ -256,21 +256,21 @@ def build():
         ax_c.axhline(k - .5, color="white", lw=1.2)
         ax_c.axvline(k - .5, color="white", lw=1.2)
     ax_c.set_xticks(range(18))
-    ax_c.set_xticklabels(SCEN_LABEL * 3, rotation=90, fontsize=5.6)
+    ax_c.set_xticklabels(SCEN_LABEL * 3, rotation=90, fontsize=6.4)
     ax_c.set_yticks(range(18))
-    ax_c.set_yticklabels(SCEN_LABEL * 3, fontsize=5.6)
+    ax_c.set_yticklabels(SCEN_LABEL * 3, fontsize=6.4)
     for k, (n, _) in enumerate(RUNS):
-        ax_c.text(6 * k + 2.5, -0.9, n, ha="center", va="bottom", fontsize=6.5, fontweight="bold",
+        ax_c.text(6 * k + 2.5, -0.9, n, ha="center", va="bottom", fontsize=7.5, fontweight="bold",
                   color=DATASET_COLOR[n])
-        ax_c.text(-3.6, 6 * k + 2.5, n, ha="right", va="center", fontsize=6.5, fontweight="bold",
+        ax_c.text(-3.6, 6 * k + 2.5, n, ha="right", va="center", fontsize=7.5, fontweight="bold",
                   color=DATASET_COLOR[n], rotation=90)
     ax_c.tick_params(length=1.2, pad=1)
     cb2 = fig.colorbar(im, ax=ax_c, fraction=0.045, pad=0.03)
-    cb2.ax.tick_params(labelsize=5.6, length=1.5)
-    cb2.set_label("Jaccard similarity", fontsize=5.8)
+    cb2.ax.tick_params(labelsize=6.4, length=1.5)
+    cb2.set_label("Jaccard similarity", fontsize=6.7)
     cb2.outline.set_linewidth(0.4)
-    ax_c.set_title("(c) Jaccard overlap of the raw subsets", loc="left", fontweight="bold", pad=16,
-                   x=-0.12)
+    ax_c.set_title("(c) Overlap of the raw subsets", loc="left", fontweight="bold", pad=16,
+                   x=-0.30)
 
     fig.savefig(OUT.with_suffix(".png"), dpi=300)
     fig.savefig(OUT.with_suffix(".pdf"))

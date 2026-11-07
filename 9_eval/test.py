@@ -142,6 +142,8 @@ class _KernelAugmentedDataset(torch.utils.data.Dataset):
         item["x_kernel"] = self._base.x_kernel[idx]
         if hasattr(self._base, "x_kernel_probe"):
             item["x_kernel_probe"] = self._base.x_kernel_probe[idx]
+        if hasattr(self._base, "x_kernel_all"):  # 2026-11-05: hard/soft 라우팅용(예측 시나리오로 재선택)
+            item["x_kernel_all"] = self._base.x_kernel_all[idx]
         return item
 
     def __getattr__(self, name):
@@ -256,7 +258,11 @@ def _build_dataset_and_kernel(cfg: dict, summary: dict) -> SimpleNamespace:
         _, kernel_hi_counts, kernel_costs_by_scen = _apply_kernel_features(
             [train_ds, val_ds, test_ds], Path(kernel_features_pkl), spec,
             combined_redundancy=combined_redundancy,
+            # 2026-11-05: hard/soft에서 예측 시나리오의 커널 HI를 쓰도록(False면 수정 전 동작)
+            keep_all_scen_for=(test_ds,) if getattr(P, "FIXED_EVAL_ROUTED_KERNEL", True) else (),
         )
+        print(f"[test_p1] hard/soft 커널 HI 블록: "
+              f"{'예측 시나리오로 재선택' if hasattr(test_ds, 'x_kernel_all') else '정답 시나리오 그대로(수정 전 동작)'}")
     if combined_redundancy is not None:
         # 2026-09-21: 입력 레벨 nan_mask 이중 마스킹은 제거(train.py와 동일 이유
         # — probe_x가 그 nan_mask를 공유해서 분류기 정확도를 붕괴시키는 버그였음). 학습 때와

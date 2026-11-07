@@ -12,7 +12,7 @@ over the same cell and scenario (z-score within the cell, rolling median).
   (c) LFP    MIT b1c2, chg_lo segment SOC [0.15, 0.35]; NCM TJU CY45-05_1-#24 same scenario for |G|
   (d) morph  HUST 5-3, dis_lo segment SOC [0.15, 0.35], reference = first valid cycle of the cell
 (e) Cell-level mean |r(HI, SOH)| of all 63 raw HIs in the six scenarios of each dataset, grouped by
-    category, with the scenario spread d_bar of the interaction screening (run JSONs 1031_0117 / 0431 / 0938)
+    category, with the scenario spread d_bar of the dependence test (run JSONs 1031_0117 / 0431 / 0938)
     and the specificity decision (d_bar >= 0.2 and CI > 0).
 
 Segment SOC uses q_ref = charge of the same step one cycle earlier (L = 1, no noise) as in Section 2.2.
@@ -46,8 +46,8 @@ import hi_compute as H  # noqa: E402
 
 setup_rcparams(6.0)
 plt.rcParams.update({"axes.linewidth": 0.6, "xtick.major.width": 0.5, "ytick.major.width": 0.5,
-                     "xtick.major.size": 2.0, "ytick.major.size": 2.0, "xtick.labelsize": 5.2,
-                     "ytick.labelsize": 5.2, "axes.labelsize": 5.8, "legend.fontsize": 4.8})
+                     "xtick.major.size": 2.3, "ytick.major.size": 2.3, "xtick.labelsize": 6,
+                     "ytick.labelsize": 6, "axes.labelsize": 6.7, "legend.fontsize": 5.5})
 
 OUT = HERE / "fig2_hi_anatomy"
 MM = 1 / 25.4
@@ -159,17 +159,17 @@ def ccol(ds, cyc):
     return CMAP(SOH_NORM(soh(ds, cyc)))
 
 
-def tag(ax, text, color, x=0.02, y=0.97, ha="left", va="top", size=4.8):
+def tag(ax, text, color, x=0.02, y=0.97, ha="left", va="top", size=5.5):
     ax.text(x, y, text, transform=ax.transAxes, ha=ha, va=va, fontsize=size, color=color,
             bbox=dict(boxstyle="round,pad=0.18", fc="white", ec=color, lw=0.35, alpha=0.92), zorder=20)
 
 
-def formula(ax, text, color, x=0.98, y=0.04, ha="right", va="bottom", size=4.6):
+def formula(ax, text, color, x=0.98, y=0.04, ha="right", va="bottom", size=5.3):
     ax.text(x, y, text, transform=ax.transAxes, ha=ha, va=va, fontsize=size, color=INK,
             bbox=dict(boxstyle="square,pad=0.22", fc="#FBFAF6", ec=color, lw=0.4), zorder=20)
 
 
-def dim(ax, x0, x1, y, text, color, dy=0.0, size=4.4, above=True):
+def dim(ax, x0, x1, y, text, color, dy=0.0, size=5.1, above=True):
     ax.annotate("", xy=(x0, y), xytext=(x1, y),
                 arrowprops=dict(arrowstyle="<->", lw=0.45, color=color, shrinkA=0, shrinkB=0), zorder=15)
     ax.text(0.5 * (x0 + x1), y + dy, text, ha="center", va="bottom" if above else "top",
@@ -195,7 +195,7 @@ def life(ax, df, ds, scen, names, labels, cat):
         zs = pd.Series(z).rolling(61, center=True, min_periods=15).median().values
         rng += [np.nanmin(zs), np.nanmax(zs)]
         ax.plot(x, zs, color=shades[k] if k else base, lw=0.9 if k == 0 else 0.75, ls=lstyle[k], zorder=4,
-                label=f"{lab}  r={r:+.2f}")
+                label=f"{lab} {r:+.2f}")
     ax.set_xlim(1.01, d["soh"].min() - 0.005)
     lo, hi = min(rng), max(rng)
     pad = 0.25 * (hi - lo)
@@ -236,31 +236,31 @@ def row_stat(axs, df):
     p10, p90 = np.percentile(v0, [10, 90])
     ax.axhspan(p10, p90, color=CAT_COLOR["stat"], alpha=0.07, lw=0, zorder=1)
     ax.axhline(vcw, color=CAT_COLOR["stat"], lw=0.5, ls="--", zorder=2)
-    ax.text(2, vcw, r"$\bar V_{cw}$", fontsize=4.7, color=CAT_COLOR["stat"], ha="left", va="bottom")
-    ax.text(2, p10 + 0.004, r"$V_{p10}$" + "\u2013" + r"$V_{p90}$ band", fontsize=4.3, color=CAT_COLOR["stat"],
+    ax.text(2, vcw, r"$\bar V_{cw}$", fontsize=5.4, color=CAT_COLOR["stat"], ha="left", va="bottom")
+    ax.text(2, p10 + 0.004, r"$V_{p10}$" + "\u2013" + r"$V_{p90}$ band", fontsize=4.9, color=CAT_COLOR["stat"],
             ha="left", va="bottom")
     ax.set_xlabel("Time in segment (s)")
     ax.set_ylabel("Voltage (V)")
-    axi.set_ylabel("|I| (A)", color=SUBINK, labelpad=1)
-    axi.tick_params(labelsize=5.0, pad=1, length=1.8)
+    axi.text(1.04, 1.015, "|I| (A)", transform=axi.transAxes, color=SUBINK, fontsize=5.8, ha="right", va="bottom")
+    axi.tick_params(labelsize=5.8, pad=1, length=1.8)
     axi.set_ylim(0, 9.5)
     for sp in ("top",):
         axi.spines[sp].set_visible(False)
     ax.set_ylim(v0.min() - 0.12, v0.max() + 0.03)
     sty(ax)
     # marginal V histogram (stat_v_ent)
-    hx = ax.inset_axes([1.24, 0.0, 0.15, 1.0])
+    hx = ax.inset_axes([1.12, 0.0, 0.09, 1.0])
     for cyc in (cyc0, cycA):
         wv = window(ds, cyc, d, a, b)[1][1]
         cnt, edges = np.histogram(wv, bins=20)
         hx.barh(0.5 * (edges[1:] + edges[:-1]), cnt / cnt.sum(), height=np.diff(edges), color=ccol(ds, cyc),
                 alpha=0.55, lw=0)
         hv = H._HI["stat_v_ent"](H.W(wv, np.ones_like(wv), np.arange(len(wv), dtype=float)))
-        hx.text(1.0, -0.02 if cyc == cyc0 else -0.11, f"H={hv:.2f}", transform=hx.transAxes, fontsize=4.2,
+        hx.text(1.0, -0.02 if cyc == cyc0 else -0.11, f"H={hv:.2f}", transform=hx.transAxes, fontsize=4.8,
                 color=INK if cyc == cyc0 else ccol(ds, cyc), ha="right", va="top")
     hx.set_ylim(ax.get_ylim())
     hx.axis("off")
-    hx.set_title("20-bin\nV hist.", fontsize=4.2, color=SUBINK, pad=1)
+    hx.text(0.6, 1.015, "V hist.", transform=hx.transAxes, fontsize=4.8, color=SUBINK, ha="center", va="bottom")
     tag(ax, "HUST 5-3 · dis_mid · SOC 0.33–0.53", CAT_COLOR["stat"], x=0.03, y=0.04, va="bottom")
 
     # V-I scatter with fits + I-q inset
@@ -276,9 +276,9 @@ def row_stat(axs, df):
         txt.append((c, H._HI["stat_corr_vi"](w), k))
     for n, (c, r, k) in enumerate(txt):
         ax.text(0.03, 0.04 + 0.075 * (3 - n), f"r(V,I)={r:+.3f}  dV/dI={k * 1e3:.0f} m\u03a9",
-                transform=ax.transAxes, fontsize=4.1, color=INK if n == 0 else c, ha="left", va="bottom")
+                transform=ax.transAxes, fontsize=4.7, color=INK if n == 0 else c, ha="left", va="bottom")
     ax.set_xlabel("|I| (A)")
-    ax.set_ylabel("Voltage (V)")
+    ax.set_ylabel("Voltage (V)", labelpad=0.5)
     sty(ax)
     ins = ax.inset_axes([0.62, 0.55, 0.36, 0.34])
     for cyc in (cyc0, cycA):
@@ -288,11 +288,11 @@ def row_stat(axs, df):
         A = np.column_stack([w.q_rel, np.ones(len(w.q_rel))])
         cf = np.linalg.lstsq(A, i, rcond=None)[0]
         ins.plot(w.q_rel, A @ cf, color=ccol(ds, cyc), lw=0.5, ls="--")
-        ins.text(w.q_rel[-1], A[-1] @ cf, f" {sl:.1f}", fontsize=4.0, color=ccol(ds, cyc), va="center")
-    ins.set_xlabel("q (Ah)", fontsize=4.4, labelpad=0.5)
-    ins.set_ylabel("|I| (A)", fontsize=4.4, labelpad=0.5)
-    ins.tick_params(labelsize=4.0, length=1.2, pad=0.6)
-    ins.set_title("stat_i_q_slope", fontsize=4.3, pad=1, color=CAT_COLOR["stat"])
+        ins.text(w.q_rel[-1], A[-1] @ cf, f" {sl:.1f}", fontsize=4.6, color=ccol(ds, cyc), va="center")
+    ins.set_xlabel("q (Ah)", fontsize=5.1, labelpad=0.5)
+    ins.set_ylabel("|I| (A)", fontsize=5.1, labelpad=0.5)
+    ins.tick_params(labelsize=4.6, length=1.2, pad=0.6)
+    ins.set_title("stat_i_q_slope", fontsize=4.9, pad=1, color=CAT_COLOR["stat"])
     ins.patch.set_alpha(0.9)
     formula(ax, r"$r(V,I)=\frac{\mathrm{cov}(V,|I|)}{\sigma_V\sigma_I}$", CAT_COLOR["stat"], y=0.36, x=0.03,
             ha="left")
@@ -317,7 +317,7 @@ def row_diff(axs, df):
         ax.annotate("", xy=(v.min(), yb), xytext=(v.max(), yb), xycoords=("data", "axes fraction"),
                     arrowprops=dict(arrowstyle="|-|", lw=0.45, color=ccol(ds, cyc), mutation_scale=1.6))
     ax.text(0.5 * (v.min() + v.max()) + 0.012, 0.95, "segment\nwindow", transform=ax.get_xaxis_transform(),
-            fontsize=4.3, color=SUBINK, ha="left", va="top")
+            fontsize=4.9, color=SUBINK, ha="left", va="top")
     ax.set_xlim(3.38, 3.58)
     ax.set_xlabel("Voltage (V)")
     ax.set_ylabel("dQ/dV of full charge (Ah V$^{-1}$)")
@@ -344,16 +344,16 @@ def row_diff(axs, df):
     dim(ax, vm[li], vp, half * 0.82, "", CAT_COLOR["diff"], above=False)
     dim(ax, vp, vm[ri], half * 0.82, "", CAT_COLOR["diff"], above=False)
     ax.text(vp, half * 0.82 - 0.15, f"l = {1e3 * (vp - vm[li]):.0f} mV | r = {1e3 * (vm[ri] - vp):.0f} mV",
-            fontsize=4.3, color=CAT_COLOR["diff"], ha="center", va="top")
+            fontsize=4.9, color=CAT_COLOR["diff"], ha="center", va="top")
     dim(ax, vm[li], vm[ri], half * 1.03, f"FWHM={1e3 * fw:.0f} mV", CAT_COLOR["diff"])
     ax.plot([vp], [hp], marker="v", ms=3.0, color=ccol(ds, cyc0), mec=INK, mew=0.3, zorder=7)
-    ax.text(vp, hp * 1.035, r"$H_p$" + f"={hp:.2f}", fontsize=4.6, ha="center", va="bottom", color=INK)
+    ax.text(vp, hp * 1.035, r"$H_p$" + f"={hp:.2f}", fontsize=5.3, ha="center", va="bottom", color=INK)
     vpa, hpa = peaks[cycA][:2]
     ax.plot([vpa], [hpa], marker="v", ms=3.0, color=ccol(ds, cycA), mec=INK, mew=0.3, zorder=7)
     ax.add_patch(FancyArrowPatch((vp, hp), (vpa, hpa), arrowstyle="-|>", mutation_scale=4.5, lw=0.55,
                                  color=INK, connectionstyle="arc3,rad=-0.25", zorder=6))
     ax.text(3.503, 1.75, f"ΔV$_p$={1e3 * (vpa - vp):+.0f} mV (LLI)\n"
-            f"ΔH$_p$={hpa - hp:+.2f} (LAM)", fontsize=4.3, ha="left", va="center", color=INK)
+            f"ΔH$_p$={hpa - hp:+.2f} (LAM)", fontsize=4.9, ha="left", va="center", color=INK)
     ax.set_ylim(0, hp * 1.22)
     ax.set_xlim(3.462, 3.535)
     ax.set_xlabel("Voltage (V)")
@@ -367,12 +367,12 @@ def row_diff(axs, df):
         cnt, edges = np.histogram(g, bins=10)
         ins.bar(np.arange(10) + (k - 0.5) * 0.4, cnt / cnt.sum(), width=0.4, color=ccol(ds, cyc), lw=0)
         ins.text(0.97, 0.95 - 0.2 * k, f"H={H._HI['diff_dvdq_ent'](w):.2f}", transform=ins.transAxes,
-                 fontsize=3.9, color=ccol(ds, cyc), ha="right", va="top")
+                 fontsize=4.5, color=ccol(ds, cyc), ha="right", va="top")
     ins.set_xticks([0, 9])
     ins.set_xticklabels(["min", "max"])
-    ins.tick_params(labelsize=3.8, length=1.0, pad=0.5)
+    ins.tick_params(labelsize=4.4, length=1.0, pad=0.5)
     ins.set_yticks([])
-    ins.set_title("|G| 10-bin hist.", fontsize=4.0, pad=1, color=CAT_COLOR["diff"])
+    ins.set_title("|G| 10-bin hist.", fontsize=4.6, pad=1, color=CAT_COLOR["diff"])
     life(axs[2], df, ds, scen, ["diff_dqdv_peak_h", "diff_dqdv_peak_w", "diff_dvdq_ent", "diff_dqdv_peak_v"],
          ["dqdv_peak_h", "dqdv_peak_w", "dvdq_ent", "dqdv_peak_v"], "diff")
 
@@ -402,8 +402,8 @@ def row_lfp(axs, df):
     ax.annotate("", xy=(qmid, v_mid), xytext=(qmid, v_lmid),
                 arrowprops=dict(arrowstyle="<->", lw=0.5, color=CAT_COLOR["lfp"], shrinkA=0, shrinkB=0), zorder=6)
     ax.text(qmid + 0.003, v_lmid - 0.001, f"v_dev_mid\n{1e3 * (v_mid - v_lmid):+.1f} mV",
-            fontsize=4.3, color=CAT_COLOR["lfp"], va="top", ha="left")
-    ax.text(qm[-1] - 0.002, vlin[-1] - 0.011, r"chord $\tilde V^{lin}$", fontsize=4.3, ha="right", va="top",
+            fontsize=4.9, color=CAT_COLOR["lfp"], va="top", ha="left")
+    ax.text(qm[-1] - 0.002, vlin[-1] - 0.011, r"chord $\tilde V^{lin}$", fontsize=4.9, ha="right", va="top",
             color=INK)
     ax.set_xlabel("q in segment (Ah)")
     ax.set_ylabel("Voltage (V)")
@@ -413,7 +413,7 @@ def row_lfp(axs, df):
             f"v_flatness = {vals['lfp_v_flatness']:.3f}", CAT_COLOR["lfp"], x=0.98, y=0.04)
     tag(ax, "MIT b1c2 · chg_lo · SOC 0.15–0.35", CAT_COLOR["lfp"], x=0.02, y=0.97)
     ax.text(qm[np.where(flat)[0][len(np.where(flat)[0]) // 2]], ax.get_ylim()[0] + 0.004,
-            "|G| < 0.25 V Ah$^{-1}$", fontsize=4.2, color=CAT_COLOR["lfp"], ha="center", va="bottom")
+            "|G| < 0.25 V Ah$^{-1}$", fontsize=4.8, color=CAT_COLOR["lfp"], ha="center", va="bottom")
 
     ax = axs[1]
     pf = []
@@ -430,7 +430,7 @@ def row_lfp(axs, df):
     ax.axhline(H.THETA_FLAT, color=CAT_COLOR["lfp"], lw=0.6, ls="--", zorder=5)
     ax.axhspan(1e-3, H.THETA_FLAT, color=CAT_COLOR["lfp"], alpha=0.07, lw=0, zorder=0)
     ax.text(0.03, H.THETA_FLAT * 0.82, r"$\theta_{flat}$ = 0.25 V Ah$^{-1}$" + "\nplateau bins below",
-            fontsize=4.4, color=CAT_COLOR["lfp"], transform=ax.get_yaxis_transform(), va="top")
+            fontsize=5.1, color=CAT_COLOR["lfp"], transform=ax.get_yaxis_transform(), va="top")
     ax.set_yscale("log")
     ax.set_ylim(0.012, 30)
     ax.set_xlim(0, 1)
@@ -496,11 +496,11 @@ def row_morph(axs, df):
     ax.annotate("", xy=(grid[kf], ref[0][kf]), xytext=(grid[kf], agd[0][kf]),
                 arrowprops=dict(arrowstyle="<->", lw=0.6, color="#B3261E", shrinkA=0, shrinkB=0), zorder=6)
     ax.text(grid[kf] - 0.02, 0.5 * (ref[0][kf] + agd[0][kf]), f"Fr\u00e9chet\n{1e3 * fre:.0f} mV",
-            fontsize=4.3, color="#B3261E", va="center", ha="right",
+            fontsize=4.9, color="#B3261E", va="center", ha="right",
             bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.8))
-    ax.text(0.02, ref[0][0] + off + 0.01, f"BOL reference (cycle {ref_cyc}, +{off:.2f} V offset)", fontsize=4.3,
+    ax.text(0.02, ref[0][0] + off + 0.01, f"BOL reference (cycle {ref_cyc}, +{off:.2f} V offset)", fontsize=4.9,
             color=cr, va="bottom")
-    ax.text(0.98, agd[0][-1] - 0.012, f"cycle {cycA}, SOH {soh(ds, cycA):.2f}", fontsize=4.3, color=ca,
+    ax.text(0.98, agd[0][-1] - 0.012, f"cycle {cycA}, SOH {soh(ds, cycA):.2f}", fontsize=4.9, color=ca,
             ha="right", va="top")
     ax.set_xlabel("Normalized time in segment")
     ax.set_ylabel("Voltage (V)")
@@ -520,13 +520,13 @@ def row_morph(axs, df):
     ax.plot([grid[kf]], [grid[kf]], marker="s", ms=2.6, mfc="none", mec="#B3261E", mew=0.6, zorder=7)
     ax.set_xlabel("Aged segment index (norm.)")
     ax.set_ylabel("Reference index (norm.)")
-    ax.text(0.97, 0.05, "warping path", color="#7A5A12", fontsize=4.3, ha="right", transform=ax.transAxes)
-    ax.text(0.03, 0.93, "Sakoe–Chiba band", color=SUBINK, fontsize=4.3, transform=ax.transAxes)
+    ax.text(0.97, 0.05, "warping path", color="#7A5A12", fontsize=4.9, ha="right", transform=ax.transAxes)
+    ax.text(0.03, 0.93, "Sakoe–Chiba band", color=SUBINK, fontsize=4.9, transform=ax.transAxes)
     cax = ax.inset_axes([1.03, 0.0, 0.05, 1.0])
     cb = plt.colorbar(im, cax=cax)
-    cb.ax.tick_params(labelsize=4.0, length=1.2, pad=0.6)
+    cb.ax.tick_params(labelsize=4.6, length=1.2, pad=0.6)
     cb.outline.set_linewidth(0.3)
-    cb.set_label("|V$_{ref}$−V| (mV)", fontsize=4.4, labelpad=1)
+    cb.ax.set_title("|ΔV| (mV)", fontsize=5.1, pad=2)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     life(axs[2], df, ds, scen, ["morph_vt_dtw", "morph_ve_dtw", "morph_vt_frec", "morph_vq_dtw"],
@@ -550,14 +550,14 @@ def panel_e(fig, gs_e, names, rmat, dbar, sig):
         for a_ in (ax, axb):
             a_.axhline(e - 0.5, color=INK, lw=0.45)
     ax.set_yticks(range(n))
-    ax.set_yticklabels([x.split("_", 1)[1] for x in names], fontsize=3.5)
+    ax.set_yticklabels([x.split("_", 1)[1] for x in names], fontsize=4)
     ax.tick_params(axis="y", length=0, pad=0.8)
     ax.set_xticks(range(18))
-    ax.set_xticklabels([s.replace("_", " ") for s in SCEN_NAMES] * 3, rotation=90, fontsize=3.7)
+    ax.set_xticklabels([s.replace("_", " ") for s in SCEN_NAMES] * 3, rotation=90, fontsize=4.3)
     ax.tick_params(axis="x", length=0, pad=0.8)
     for k, ds in enumerate(("MIT", "HUST", "TJU")):
         ax.text(6 * k + 2.5, -1.2, f"{ds} ({'NCM' if ds == 'TJU' else 'LFP'})", ha="center", va="bottom",
-                fontsize=5.0, fontweight="bold", color=INK)
+                fontsize=5.8, fontweight="bold", color=INK)
     # row max marker per dataset
     for k in range(3):
         blk = rmat[:, 6 * k:6 * k + 6]
@@ -573,7 +573,7 @@ def panel_e(fig, gs_e, names, rmat, dbar, sig):
         c = cats[a0]
         axc.add_patch(Rectangle((0, a0 - 0.5), 1, a1 - a0, color=CAT_COLOR[c], lw=0))
         axc.text(0.5, 0.5 * (a0 + a1) - 0.5, f"{CAT_NAME[c]} ({a1 - a0})", rotation=90, ha="center",
-                 va="center", fontsize=4.5, color="white", fontweight="bold")
+                 va="center", fontsize=5.2, color="white", fontweight="bold")
     axc.axis("off")
 
     # d_bar bars
@@ -586,26 +586,26 @@ def panel_e(fig, gs_e, names, rmat, dbar, sig):
         m = sig[:, k]
         axb.scatter(dbar[m, k] + 0.025, y[m], s=0.7, color=dcol[ds], lw=0, marker="o")
     axb.axvline(0.2, color="#B3261E", lw=0.5, ls="--")
-    axb.text(0.205, -1.1, r"$\tau_{eff}$=0.2", fontsize=4.2, color="#B3261E", va="bottom")
+    axb.text(0.205, -1.1, r"$\tau_{eff}$=0.2", fontsize=4.8, color="#B3261E", va="bottom")
     axb.set_xlim(0, 0.75)
     axb.set_yticks([])
-    axb.set_xlabel(r"$\bar d$ = mean$_c$ std$_s$ r$_{c,s}$", fontsize=4.8, labelpad=1)
-    axb.tick_params(axis="x", labelsize=4.2, length=1.2, pad=0.6)
+    axb.set_xlabel(r"Scenario spread $\bar D$", fontsize=5.5, labelpad=1)
+    axb.tick_params(axis="x", labelsize=4.8, length=1.2, pad=0.6)
     for s in ("top", "right", "left"):
         axb.spines[s].set_visible(False)
     hs, ls = axb.get_legend_handles_labels()
     hs.append(plt.Line2D([], [], marker="o", ls="", ms=1.6, color=SUBINK))
     ls.append("specific")
-    axb.legend(hs, ls, loc="lower right", frameon=False, fontsize=4.2, handlelength=0.9, borderaxespad=0.1,
+    axb.legend(hs, ls, loc="lower right", frameon=False, fontsize=4.8, handlelength=0.9, borderaxespad=0.1,
                labelspacing=0.15, handletextpad=0.3)
 
     pe = ax.get_position()
     cax = fig.add_axes([pe.x0 + 0.02, 0.03, 0.15, 0.007])
     cb = plt.colorbar(im, cax=cax, orientation="horizontal")
-    cb.ax.tick_params(labelsize=4.0, length=1.2, pad=0.6)
+    cb.ax.tick_params(labelsize=4.6, length=1.2, pad=0.6)
     cb.outline.set_linewidth(0.3)
-    cb.set_label("cell-level mean |r(HI, SOH)|", fontsize=4.4, labelpad=1)
-    fig.text(pe.x0 + 0.02, 0.05, "\u25cf best scenario of the HI in each dataset", fontsize=4.4,
+    cb.set_label("cell-level mean |r(HI, SOH)|", fontsize=5.1, labelpad=1)
+    fig.text(pe.x0 + 0.02, 0.05, "\u25cf best scenario of the HI in each dataset", fontsize=5.1,
              color="#B08A1E", va="center")
     return ax, axc
 
@@ -623,7 +623,7 @@ def main():
     sig = np.array([[bool(inter[ds][n]["significant"]) for ds in RUNS] for n in names])
 
     fig = plt.figure(figsize=(174 * MM, 196 * MM))
-    outer = GridSpec(1, 2, figure=fig, width_ratios=[2.05, 1.0], wspace=0.13,
+    outer = GridSpec(1, 2, figure=fig, width_ratios=[2.05, 1.0], wspace=0.17,
                      left=0.055, right=0.99, top=0.945, bottom=0.09)
     left = GridSpecFromSubplotSpec(4, 1, subplot_spec=outer[0, 0], hspace=0.52)
     rows = []
@@ -642,29 +642,29 @@ def main():
         y1 = p0.y1 + 0.019
         fig.patches.append(Rectangle((p0.x0 - 0.045, y1 - 0.0005), p2.x1 - p0.x0 + 0.045, 0.0028,
                                      transform=fig.transFigure, color=CAT_COLOR[cat], lw=0))
-        fig.text(p0.x0 - 0.045, y1 + 0.004, f"({'abcd'[r]})", fontsize=7.5, fontweight="bold", va="bottom")
-        fig.text(p0.x0 - 0.012, y1 + 0.0045, f"{CAT_NAME[cat]} HIs", fontsize=6.2, fontweight="bold",
+        fig.text(p0.x0 - 0.045, y1 + 0.004, f"({'abcd'[r]})", fontsize=8.6, fontweight="bold", va="bottom")
+        fig.text(p0.x0 - 0.012, y1 + 0.0045, f"{CAT_NAME[cat]} HIs", fontsize=7.1, fontweight="bold",
                  color=CAT_COLOR[cat], va="bottom")
         sub = {"stat": "distribution and V–I response of the segment",
                "diff": "peaks of dQ/dV and spread of dV/dQ",
                "lfp": "plateau bins, chord deviation and curvature of V–Q",
                "morph": "shape distance to the BOL segment of the same scenario"}[cat]
-        fig.text(p0.x0 + 0.115, y1 + 0.0045, sub, fontsize=5.0, color=SUBINK, va="bottom")
-        fig.text(p2.x0, y1 + 0.0045, "life trajectory", fontsize=5.0, color=SUBINK, va="bottom",
+        fig.text(p0.x0 + 0.115, y1 + 0.0045, sub, fontsize=5.8, color=SUBINK, va="bottom")
+        fig.text(p2.x0, y1 + 0.0045, "life trajectory", fontsize=5.8, color=SUBINK, va="bottom",
                  style="italic")
     pe = ax_e.get_position()
     pc = axc.get_position()
-    fig.text(pe.x0 - 0.075, pe.y1 + 0.03, "(e)", fontsize=7.5, fontweight="bold", va="bottom")
-    fig.text(pe.x0 - 0.04, pe.y1 + 0.0305, "Scenario dependence of all 63 raw HIs", fontsize=6.2,
+    fig.text(pe.x0 - 0.075, pe.y1 + 0.03, "(e)", fontsize=8.6, fontweight="bold", va="bottom")
+    fig.text(pe.x0 - 0.04, pe.y1 + 0.0305, "Scenario dependence of all 63 raw HIs", fontsize=7.1,
              fontweight="bold", va="bottom")
     # SOH colorbar for rows (a)-(d)
     cax = fig.add_axes([0.06, 0.03, 0.22, 0.007])
     cb = fig.colorbar(ScalarMappable(SOH_NORM, CMAP), cax=cax, orientation="horizontal")
-    cb.ax.tick_params(labelsize=4.6, length=1.2, pad=0.6)
+    cb.ax.tick_params(labelsize=5.3, length=1.2, pad=0.6)
     cb.outline.set_linewidth(0.3)
-    cb.set_label("SOH of the segment cycle (a)–(d)", fontsize=5.0, labelpad=1)
+    cb.set_label("SOH of the segment cycle (a)–(d)", fontsize=5.8, labelpad=1)
     fig.text(0.31, 0.034, "Dotted verticals in the trajectories mark the four plotted cycles.\n"
-             "z-scores within cell and scenario, rolling median of 61 cycles.", fontsize=4.6, color=SUBINK,
+             "z-scores within cell and scenario, rolling median of 61 cycles.", fontsize=5.3, color=SUBINK,
              va="center", linespacing=1.3)
 
     fig.savefig(OUT.with_suffix(".png"), dpi=300)

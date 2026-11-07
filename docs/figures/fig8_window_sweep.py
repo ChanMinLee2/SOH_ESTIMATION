@@ -133,7 +133,7 @@ def span_curve(q, v, w, centres):
 # --------------------------------------------------------------- panels ----
 
 def label(ax, s, x=-0.02, y=1.02):
-    ax.text(x, y, s, transform=ax.transAxes, fontsize=7.6, fontweight="bold", color=INK,
+    ax.text(x, y, s, transform=ax.transAxes, fontsize=8.7, fontweight="bold", color=INK,
             ha="right", va="bottom")
 
 
@@ -148,12 +148,12 @@ def panel_a(ax, axv, R, curves):
             a_.axvline(x, color=FAINT, lw=0.35, ls=":")
     for z, a in ZONE_START.items():
         axv.text(a + W_ZONE / 2, 1.04, f"{z} zone [{a:.3f}, {a + W_ZONE:.3f}]", transform=axv.get_xaxis_transform(),
-                 ha="center", va="bottom", fontsize=5.6, color=ZONE_COLOR[ZKEY[z]], fontweight="bold")
+                 ha="center", va="bottom", fontsize=6.4, color=ZONE_COLOR[ZKEY[z]], fontweight="bold")
     for name, (q, v) in curves.items():
         axv.plot(q, v, color=DATASET_COLOR[name], lw=0.9, label=f"{name} charge, cycle {CURVES[name][1]}")
     axv.set_ylim(3.25, 3.65)
     axv.set_ylabel("V (V)")
-    axv.legend(loc="lower right", frameon=False, fontsize=5.2, handlelength=1.3, ncol=2,
+    axv.legend(loc="lower right", frameon=False, fontsize=6, handlelength=1.3, ncol=2,
                bbox_to_anchor=(1.0, -0.04))
     axv.tick_params(labelbottom=False)
     yt, yl = [], []
@@ -178,9 +178,9 @@ def panel_a(ax, axv, R, curves):
                                                edgecolor=INK, lw=0.3, hatch="//////"))
         ax.axhline(y0, color=GRID, lw=0.5)
         yt.append(y0 + 0.5)
-        yl.append(f"{int(w * 100)}%")
+        yl.append(f"{w:.2f}")
         txt = f"N={n}  $\\Delta$={step:.3f}\noverlap {ov * 100:.0f}%" + ("\nnot run" if pend else "")
-        ax.text(1.015, y0 + 0.5, txt, va="center", ha="left", fontsize=5.4, linespacing=1.1,
+        ax.text(1.015, y0 + 0.5, txt, va="center", ha="left", fontsize=6.2, linespacing=1.1,
                 color=col if not pend else SUBINK, fontweight="bold" if w == REF else "normal",
                 transform=ax.get_yaxis_transform())
     ax.set_xlim(0, 1)
@@ -208,15 +208,15 @@ def panel_b(ax, curves, widths):
     ax.set_yscale("log")
     ax.set_ylim(5, 3000)
     ax.set_xlim(0, 1)
-    ax.set_xlabel("Window centre (SOC)")
-    ax.set_ylabel("Voltage span in window (mV)")
+    ax.set_xlabel("Segment center (SOC)")
+    ax.set_ylabel("Voltage span in segment (mV)")
     ax.grid(True, which="both", color=GRID, lw=0.35)
-    h = [Line2D([], [], color=W_COLOR[w], lw=1.2, label=f"{int(w * 100)}%") for w in widths]
+    h = [Line2D([], [], color=W_COLOR[w], lw=1.2, label=f"{w:.2f}") for w in widths]
     h += [Line2D([], [], color=SUBINK, lw=0.8, label="MIT"),
           Line2D([], [], color=SUBINK, lw=0.8, ls=(0, (3, 1.5)), label="HUST")]
-    ax.legend(handles=h, loc="upper center", ncol=5, frameon=False, fontsize=5.2,
+    ax.legend(handles=h, loc="upper center", ncol=5, frameon=False, fontsize=6,
               columnspacing=0.8, handlelength=1.4)
-    ax.text(0.5, 7.5, "LFP plateau: 14-49 mV per window", ha="center", va="center", fontsize=5.2,
+    ax.text(0.5, 7.5, "LFP plateau: 14-49 mV per segment", ha="center", va="center", fontsize=6,
             color=SUBINK)
     label(ax, "(b)")
 
@@ -242,12 +242,12 @@ def panel_c(ax, R):
         ax.plot(x, y, color=c, ls=ls, marker=m, ms=3 if k != "All" else 4, lw=lw, label=k,
                 mfc="white" if k != "All" else c, mew=0.7, zorder=3 if k == "All" else 2)
     for xi, yi in zip(x, vals["All"]):
-        ax.text(xi, yi + 0.07, f"{yi:.2f}", ha="center", va="bottom", fontsize=5.6, fontweight="bold")
+        ax.text(xi, yi + 0.07, f"{yi:.2f}", ha="center", va="bottom", fontsize=6.4, fontweight="bold")
     ax.axvspan(REF * 100 - 2, REF * 100 + 2, color=W_COLOR[REF], alpha=0.12, lw=0)
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{int(v)}%" for v in x])
+    ax.set_xticklabels([f"{v / 100:.2f}" for v in x])
     ax.set_xlim(6, 34)
-    ax.set_xlabel("Window width $w_\\mathrm{seg}$")
+    ax.set_xlabel("Segment width $w_\\mathrm{seg}$")
     ax.set_ylabel("RMSE (%)")
     ax.grid(True, axis="y", color=GRID, lw=0.35)
     axr = ax.twinx()
@@ -258,9 +258,9 @@ def panel_c(ax, R):
     axr.tick_params(axis="y", colors=SUBINK)
     ax.set_zorder(axr.get_zorder() + 1)
     ax.patch.set_visible(False)
-    ax.legend(loc="upper right", frameon=False, fontsize=5.0, handlelength=1.6, ncol=1,
+    ax.legend(loc="upper right", frameon=False, fontsize=5.8, handlelength=1.6, ncol=1,
               labelspacing=0.25)
-    label(ax, "(c)")
+    label(ax, "(a)")
     return vals, r2
 
 
@@ -273,23 +273,23 @@ def panel_d(ax, R, cax):
         best = np.argmin(M[:, :].T[:, i]) if False else None
         for j in range(M.shape[1]):
             colbest = np.argmin(M[:, j]) == i
-            ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=5.6,
+            ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=6.4,
                     color="white" if M[i, j] > 1.9 else INK, fontweight="bold" if colbest else "normal")
             if colbest:
                 ax.add_patch(Rectangle((j - 0.48, i - 0.46), 0.96, 0.92, fill=False, ec=INK, lw=0.7))
     ax.set_xticks(range(6))
     ax.set_xticklabels(SCEN_LABEL, rotation=0)
     ax.set_yticks(range(len(ws)))
-    ax.set_yticklabels([f"{int(w * 100)}%" for w in ws])
+    ax.set_yticklabels([f"{w:.2f}" for w in ws])
     ax.axvline(2.5, color="white", lw=1.2)
     for t, w in zip(ax.get_yticklabels(), ws):
         t.set_color(W_COLOR[w])
         t.set_fontweight("bold")
     ax.tick_params(length=0)
     cb = plt.colorbar(im, cax=cax, orientation="horizontal")
-    cb.set_label("Scenario RMSE (%)  (box: best width per scenario)", fontsize=5.4)
-    cb.ax.tick_params(labelsize=5.2)
-    label(ax, "(d)")
+    cb.set_label("Scenario RMSE (%)  (box: best width per scenario)", fontsize=6.2)
+    cb.ax.tick_params(labelsize=6)
+    label(ax, "(b)")
     return M
 
 
@@ -309,22 +309,22 @@ def panel_e(ax, R):
     med = [np.median(per[w].values) for w in ws]
     ax.plot(x, med, color=INK, lw=1.2, marker="_", ms=10, mew=1.4, zorder=4)
     for xi, m in zip(x, med):
-        ax.text(xi, 0.97, f"{m:.2f}", transform=ax.get_xaxis_transform(), fontsize=5.2,
+        ax.text(xi, 0.97, f"{m:.2f}", transform=ax.get_xaxis_transform(), fontsize=6,
                 va="top", ha="center", fontweight="bold")
     wins = {w: int((per[w] < per[REF]).sum()) for w in ws if w != REF}
     for w, n in wins.items():
         xi = ws.index(w)
-        ax.text(xi, ax.get_ylim()[1] if False else 0.02, f"{n}/{len(cells)} cells\nlower than 20%",
-                transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=5.0, color=SUBINK)
+        ax.text(xi, ax.get_ylim()[1] if False else 0.02, f"{n}/{len(cells)} cells\nlower than 0.20",
+                transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=5.8, color=SUBINK)
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{int(w * 100)}%" for w in ws])
+    ax.set_xticklabels([f"{w:.2f}" for w in ws])
     ax.set_ylabel("Per-cell RMSE (%)")
     ax.set_xlim(-0.5, len(ws) - 0.5)
     ax.grid(True, axis="y", color=GRID, lw=0.35)
     ax.legend(handles=[Line2D([], [], color=DATASET_COLOR[k], lw=0.8, marker="o", ms=2.5, label=k)
                        for k in ("MIT", "HUST")] + [Line2D([], [], color=INK, lw=1.2, label="Median")],
-              loc="upper right", bbox_to_anchor=(1.0, 0.9), frameon=False, fontsize=5.0, handlelength=1.4)
-    label(ax, "(e)")
+              loc="upper right", bbox_to_anchor=(1.0, 0.9), frameon=False, fontsize=5.8, handlelength=1.4)
+    label(ax, "(c)")
     return per, med, wins
 
 
@@ -342,13 +342,13 @@ def panel_f(ax, R):
                 q[b] = np.percentile(ae[m], [25, 50, 75])
         ax.fill_between(cen, q[:, 0], q[:, 2], color=W_COLOR[w], alpha=0.13, lw=0)
         ax.plot(cen, q[:, 1], color=W_COLOR[w], lw=1.2 if w == REF else 0.8, marker="o", ms=1.8,
-                label=f"{int(w * 100)}%")
+                label=f"{w:.2f}")
     ax.set_xlabel("True SOH (%)")
     ax.set_ylabel("|Error| (%), median and IQR")
     ax.invert_xaxis()
     ax.grid(True, color=GRID, lw=0.35)
-    ax.legend(loc="upper left", frameon=False, fontsize=5.2, handlelength=1.4)
-    label(ax, "(f)")
+    ax.legend(loc="upper left", frameon=False, fontsize=6, handlelength=1.4)
+    label(ax, "(d)")
 
 
 def panel_g(ax, R):
@@ -362,15 +362,15 @@ def panel_g(ax, R):
         jit = rng.uniform(-0.17, 0.17, len(d))
         ax.scatter(i + jit, d, s=2.5, color=np.where(d >= TAU_EFF, W_COLOR[w], FAINT), lw=0, zorder=3)
         ax.text(i, 1.01, f"{R[w]['n_spec']}/63\nspecific", transform=ax.get_xaxis_transform(),
-                ha="center", va="bottom", fontsize=5.2, color=W_COLOR[w], fontweight="bold")
+                ha="center", va="bottom", fontsize=6, color=W_COLOR[w], fontweight="bold")
     ax.axhline(TAU_EFF, color=INK, lw=0.6, ls="--")
-    ax.text(len(ws) - 0.45, TAU_EFF, r"$\tau_\mathrm{eff}$", fontsize=5.6, va="bottom", ha="right")
+    ax.text(len(ws) - 0.45, TAU_EFF, r"$\tau_\mathrm{eff}$", fontsize=6.4, va="bottom", ha="right")
     ax.set_xticks(range(len(ws)))
-    ax.set_xticklabels([f"{int(w * 100)}%" for w in ws])
-    ax.set_ylabel(r"Position dependence $\bar d$ of each raw HI")
+    ax.set_xticklabels([f"{w:.2f}" for w in ws])
+    ax.set_ylabel(r"Scenario dependence $\bar D$ of each raw HI")
     ax.set_xlim(-0.6, len(ws) - 0.4)
     ax.grid(True, axis="y", color=GRID, lw=0.35)
-    label(ax, "(g)", y=1.12)
+    label(ax, "(e)", y=1.12)
 
 
 def panel_h(ax, R):
@@ -391,35 +391,27 @@ def panel_h(ax, R):
     ax.axvline(2.5, color=FAINT, lw=0.5, ls=":")
     ax.set_ylabel("Number of HIs / groups")
     ax.grid(True, axis="y", color=GRID, lw=0.35)
-    h = [Rectangle((0, 0), 1, 1, color=W_COLOR[w], alpha=0.75, label=f"{int(w * 100)}%") for w in ws]
+    h = [Rectangle((0, 0), 1, 1, color=W_COLOR[w], alpha=0.75, label=f"{w:.2f}") for w in ws]
     h += [Rectangle((0, 0), 1, 1, facecolor=FAINT, alpha=0.5, hatch="////", edgecolor="white",
                     label="+ selected kernel"),
           Line2D([], [], marker="_", color=INK, ls="none", ms=6, mew=0.9, label="synergy groups")]
-    ax.legend(handles=h, loc="upper left", ncol=3, frameon=False, fontsize=5.0, handlelength=1.2,
+    ax.legend(handles=h, loc="upper left", ncol=3, frameon=False, fontsize=5.8, handlelength=1.2,
               columnspacing=0.7)
     ax.set_ylim(0, max(R[w]["raw_sel"][s] + R[w]["ker_sel"][s] for w in ws for s in SCEN) * 1.32)
-    label(ax, "(h)")
+    label(ax, "(f)")
 
 
 # ----------------------------------------------------------------- main ----
 
 def main():
     R = {w: load_run(p) for w, p in RUNS.items()}
-    curves = {k: charge_curve(k) for k in CURVES}
     mm = 1 / 25.4
-    fig = plt.figure(figsize=(174 * mm, 178 * mm))
-    gs = GridSpec(3, 1, figure=fig, height_ratios=[1.0, 1.08, 1.08], hspace=0.42,
-                  left=0.065, right=0.95, top=0.975, bottom=0.05)
-    top = GridSpecFromSubplotSpec(1, 2, gs[0], width_ratios=[1.75, 1.0], wspace=0.38)
-    mid = GridSpecFromSubplotSpec(1, 3, gs[1], width_ratios=[1.0, 1.25, 0.95], wspace=0.55)
-    bot = GridSpecFromSubplotSpec(1, 3, gs[2], width_ratios=[1.0, 0.8, 1.45], wspace=0.42)
-
-    ags = GridSpecFromSubplotSpec(2, 1, top[0], height_ratios=[0.42, 1.0], hspace=0.08)
-    ax_v = fig.add_subplot(ags[0])
-    ax_a = fig.add_subplot(ags[1], sharex=ax_v)
-    panel_a(ax_a, ax_v, R, curves)
-    ax_b = fig.add_subplot(top[1])
-    panel_b(ax_b, curves, sorted(R))
+    # 2026-11-05: the segment placement and voltage span panels moved to Figure 1(d)(e)
+    fig = plt.figure(figsize=(174 * mm, 122 * mm))
+    gs = GridSpec(2, 1, figure=fig, height_ratios=[1.0, 1.0], hspace=0.45,
+                  left=0.07, right=0.94, top=0.94, bottom=0.075)
+    mid = GridSpecFromSubplotSpec(1, 3, gs[0], width_ratios=[1.0, 1.25, 0.95], wspace=0.55)
+    bot = GridSpecFromSubplotSpec(1, 3, gs[1], width_ratios=[1.0, 0.8, 1.45], wspace=0.42)
 
     ax_c = fig.add_subplot(mid[0])
     vals, r2 = panel_c(ax_c, R)
@@ -450,10 +442,6 @@ def main():
               f"cell_median={med[sorted(R).index(w)]:.2f}")
     print("scenario RMSE\n", pd.DataFrame(M, index=sorted(R), columns=SCEN).round(2))
     print("cells better than 20%:", wins)
-    for name, (q, v) in curves.items():
-        for w in sorted(R):
-            sp = span_curve(q, v, w, [0.5])
-            print(f"{name} span at SOC 0.5, w={w}: {sp[0]:.1f} mV")
 
 
 if __name__ == "__main__":

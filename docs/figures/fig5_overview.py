@@ -74,9 +74,9 @@ def _parity(ax, df, name, lim, norm):
     ax.set_aspect("equal")
     rmse, r2 = _metrics(df)
     ax.text(0.04, 0.96, f"RMSE {rmse:.2f}%\n$R^2$ {r2:.3f}", transform=ax.transAxes,
-            ha="left", va="top", fontsize=6.8, color=INK,
+            ha="left", va="top", fontsize=7.8, color=INK,
             bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=GRID, lw=0.6))
-    ax.set_title(f"{name} ({CHEM[name]})", fontsize=7.8)
+    ax.set_title(f"{name} ({CHEM[name]})", fontsize=9)
     ax.set_xlabel("Measured SOH (%)")
     strip_top_right(ax)
     return hb
@@ -96,11 +96,11 @@ def _trajectory(fig, spec, df, name, cell):
     rmse, _ = _metrics(c)
     if name == "TJU":   # convex fade leaves the upper right empty
         ax.text(0.97, 0.95, f"cell {cell}\nRMSE {rmse:.2f}%", transform=ax.transAxes,
-                ha="right", va="top", fontsize=6.6, color=INK)
+                ha="right", va="top", fontsize=7.6, color=INK)
     else:               # concave fade leaves the lower left empty
         ax.text(0.04, 0.05, f"cell {cell}\nRMSE {rmse:.2f}%", transform=ax.transAxes,
-                ha="left", va="bottom", fontsize=6.6, color=INK)
-    ax.set_title(f"{name} ({CHEM[name]})", fontsize=7.8)
+                ha="left", va="bottom", fontsize=7.6, color=INK)
+    ax.set_title(f"{name} ({CHEM[name]})", fontsize=9)
     ax_r.axhline(0, color=INK, lw=0.6)
     lim = np.nanpercentile(np.abs(c.p - c.t), 99.5)
     lim = max(2.0, np.ceil(lim))
@@ -141,20 +141,20 @@ def build_figure():
     p0 = parity_axes[-1].get_position()
     cax = fig.add_axes([0.915, p0.y0, 0.012, p0.height])
     cb = fig.colorbar(hb, cax=cax)
-    cb.set_label("Segments per bin", fontsize=6.8)
-    cb.ax.tick_params(labelsize=6.3)
+    cb.set_label("Segments per bin", fontsize=7.8)
+    cb.ax.tick_params(labelsize=7.2)
 
     # shared scenario legend
     handles = [Line2D([], [], color=INK, lw=1.0, label="Measured")]
     handles += [Line2D([], [], ls="", marker="o", ms=3.6, color=SCEN_COLOR[s], label=SCEN_LABEL[s])
                 for s in SCEN_ORDER]
-    fig.legend(handles=handles, loc="lower center", ncol=7, frameon=False, fontsize=6.8,
+    fig.legend(handles=handles, loc="lower center", ncol=7, frameon=False, fontsize=7.8,
                bbox_to_anchor=(0.49, 0.015), handletextpad=0.3, columnspacing=1.2)
 
     # panel labels
-    fig.text(0.012, 0.955, "(a)", fontsize=9.5, fontweight="bold", color=INK)
+    fig.text(0.012, 0.955, "(a)", fontsize=10.9, fontweight="bold", color=INK)
     ty = traj_axes[0][0].get_position().y1
-    fig.text(0.012, ty + 0.03, "(b)", fontsize=9.5, fontweight="bold", color=INK)
+    fig.text(0.012, ty + 0.03, "(b)", fontsize=10.9, fontweight="bold", color=INK)
     return fig
 
 
